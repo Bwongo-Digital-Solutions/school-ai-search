@@ -11,19 +11,74 @@ type QueryOrder = {
   ascending: boolean;
 };
 
-type QueryResult<T = any> = {
+type QueryResult<T = unknown> = {
   data: T | null;
   error: Error | null;
 };
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
+const normalizeApiBase = (value: unknown) => {
+  const rawValue = typeof value === 'string' ? value.trim() : '';
+  if (!rawValue) return '';
 
-export const buildApiUrl = (path: string) => `${API_BASE}${path}`;
+  const browserHostname =
+    typeof window !== 'undefined' && window.location.hostname ? window.location.hostname : '';
+  const isLoopbackHost = (hostname: string) =>
+    hostname === 'localhost' ||
+    hostname === '0.0.0.0' ||
+    hostname === '::1' ||
+    hostname.startsWith('127.');
+
+  const browserIsLoopback = browserHostname ? isLoopbackHost(browserHostname) : false;
+
+  const withoutTrailingSlash = rawValue.replace(/\/+$/, '');
+
+  if (withoutTrailingSlash.startsWith('/') && !withoutTrailingSlash.startsWith('//')) {
+    return withoutTrailingSlash;
+  }
+
+  const withProtocol =
+    /^https?:\/\//i.test(withoutTrailingSlash) || withoutTrailingSlash.startsWith('//')
+      ? withoutTrailingSlash
+      : `http://${withoutTrailingSlash}`;
+
+  try {
+    const apiUrl = new URL(
+      withProtocol,
+      typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1',
+    );
+
+    if (isLoopbackHost(apiUrl.hostname) && browserHostname && !browserIsLoopback) {
+      return '';
+    }
+
+    if (apiUrl.hostname === '0.0.0.0') {
+      apiUrl.hostname = browserHostname || '127.0.0.1';
+    }
+
+    return apiUrl.toString().replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
+};
+
+const API_BASE = normalizeApiBase(import.meta.env.VITE_API_BASE_URL);
+
+export const buildApiUrl = (path: string) => {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return `${API_BASE}${normalizedPath}`;
+};
 
 const toError = (value: unknown) =>
   value instanceof Error ? value : new Error(typeof value === 'string' ? value : 'Request failed');
 
-class ApiQueryBuilder<T = any> implements PromiseLike<QueryResult<T>> {
+const toNetworkError = (error: unknown) => {
+  const details = error instanceof Error && error.message ? ` (${error.message})` : '';
+  return new Error(
+    `Could not reach the backend API${details}. Make sure the backend is running and VITE_API_BASE_URL points to it.`,
+  );
+};
+
+class ApiQueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
   private readonly table: string;
   private operation: QueryOperation = 'select';
   private columns = '*';
@@ -116,25 +171,25 @@ class ApiQueryBuilder<T = any> implements PromiseLike<QueryResult<T>> {
     } catch (error) {
       return {
         data: null,
-        error: toError(error),
+        error: toNetworkError(error),
       };
     }
   }
 
   then<TResult1 = QueryResult<T>, TResult2 = never>(
     onfulfilled?: ((value: QueryResult<T>) => TResult1 | PromiseLike<TResult1>) | null,
-    onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | null,
+    onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
   ): Promise<TResult1 | TResult2> {
     return this.execute().then(onfulfilled ?? undefined, onrejected ?? undefined);
   }
 }
 
 export const supabase = {
-  from<T = any>(table: string) {
+  from<T = unknown>(table: string) {
     return new ApiQueryBuilder<T>(table);
   },
   functions: {
-    async invoke<T = any>(name: string, options?: { body?: unknown }): Promise<QueryResult<T>> {
+    async invoke<T = unknown>(name: string, options?: { body?: unknown }): Promise<QueryResult<T>> {
       try {
         const response = await fetch(buildApiUrl(`/api/functions/${name}`), {
           method: 'POST',
@@ -159,7 +214,7 @@ export const supabase = {
       } catch (error) {
         return {
           data: null,
-          error: toError(error),
+          error: toNetworkError(error),
         };
       }
     },
