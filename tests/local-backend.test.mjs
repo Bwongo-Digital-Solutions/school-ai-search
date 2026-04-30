@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createAppRuntime } from '../server/local-backend.mjs';
+import { gradeScore, resolveGradingScheme } from '../server/reports/grading-config.mjs';
 
 const startTestRuntime = async (options = {}) => {
   const runtime = await createAppRuntime({ useInMemoryDatabase: true, ...options });
@@ -119,12 +120,28 @@ test('local backend supports auth, data queries, audit logging, and chat', async
     const pdf = await runtime.dispatch({
       method: 'GET',
       pathname: '/api/report-cards/student-001.pdf',
-      searchParams: new URLSearchParams({ term: 'Term 2', academicYear: '2026/2027' }),
+      searchParams: new URLSearchParams({
+        term: 'Term 2',
+        academicYear: '2026/2027',
+        gradingCountry: 'uganda',
+        academicLevel: 'secondary',
+      }),
     });
     assert.equal(pdf.status, 200);
     assert.equal(pdf.type, 'binary');
     assert.equal(pdf.headers['Content-Type'], 'application/pdf');
     assert.ok(pdf.body.length > 500);
+
+    const gradingSchemes = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/grading-schemes',
+    });
+    assert.equal(gradingSchemes.status, 200);
+    assert.ok(
+      gradingSchemes.body.data.schemes.some(
+        (scheme) => scheme.country === 'uganda' && scheme.academicLevel === 'secondary',
+      ),
+    );
 
     const invoice = await dispatch(runtime, 'POST', '/api/db', {
       table: 'invoices',
@@ -229,6 +246,25 @@ test('local backend supports auth, data queries, audit logging, and chat', async
   } finally {
     await cleanup();
   }
+});
+
+test('grading schemes resolve by country and academic level', () => {
+  const ugandaSecondary = resolveGradingScheme({
+    country: 'uganda',
+    academicLevel: 'secondary',
+  });
+
+  assert.equal(ugandaSecondary.label, 'Uganda Secondary UNEB Scale');
+  assert.deepEqual(gradeScore(88, ugandaSecondary), {
+    grade: 'D2',
+    remark: 'Very Good',
+  });
+
+  const nursery = resolveGradingScheme({
+    country: 'international',
+    academicLevel: 'nursery',
+  });
+  assert.equal(gradeScore(72, nursery).grade, 'Meeting');
 });
 
 test('local backend exposes full school management modules through the db API', async () => {

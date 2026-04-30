@@ -1,4 +1,5 @@
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
+import { gradeScore, resolveGradingScheme } from './grading-config.mjs';
 
 const SCHOOL_NAME = process.env.SCHOOL_NAME || 'SchoolBot Academy';
 const SCHOOL_TAGLINE = process.env.SCHOOL_TAGLINE || 'Academic Excellence and Character';
@@ -14,23 +15,7 @@ const hashText = (input) => {
   return Math.abs(hash);
 };
 
-const gradeFromScore = (score) => {
-  if (score >= 90) return 'A';
-  if (score >= 80) return 'B';
-  if (score >= 70) return 'C';
-  if (score >= 60) return 'D';
-  return 'F';
-};
-
-const remarkFromScore = (score) => {
-  if (score >= 90) return 'Excellent';
-  if (score >= 80) return 'Very Good';
-  if (score >= 70) return 'Good';
-  if (score >= 60) return 'Fair';
-  return 'Needs Support';
-};
-
-const buildSubjectResults = (student, term, academicYear) => {
+const buildSubjectResults = (student, term, academicYear, gradingScheme) => {
   const baseScore = Math.round(student.gpa * 25);
   const attendanceAdjustment =
     student.attendance_rate >= 95 ? 4 : student.attendance_rate >= 90 ? 2 : student.attendance_rate >= 85 ? 0 : -4;
@@ -38,13 +23,13 @@ const buildSubjectResults = (student, term, academicYear) => {
   return student.subjects.map((subject, index) => {
     const variance = (hashText(`${student.id}:${subject}:${term}:${academicYear}:${index}`) % 19) - 9;
     const score = clamp(baseScore + attendanceAdjustment + variance, 45, 99);
-    const grade = gradeFromScore(score);
+    const result = gradeScore(score, gradingScheme);
 
     return {
       subject,
       score,
-      grade,
-      remark: remarkFromScore(score),
+      grade: result.grade,
+      remark: result.remark,
     };
   });
 };
@@ -68,12 +53,20 @@ export const buildReportCardPdf = async ({
   student,
   term = 'Term 1',
   academicYear,
+  gradingCountry,
+  academicLevel,
 }) => {
   const resolvedYear = formatAcademicYear(academicYear);
-  const subjectResults = buildSubjectResults(student, term, resolvedYear);
+  const gradingScheme = resolveGradingScheme({
+    country: gradingCountry,
+    academicLevel,
+    gradeLevel: student.grade_level,
+  });
+  const subjectResults = buildSubjectResults(student, term, resolvedYear, gradingScheme);
   const averageScore =
     subjectResults.reduce((total, result) => total + result.score, 0) / Math.max(subjectResults.length, 1);
   const generalComment = buildGeneralComment(student, averageScore);
+  const overallGrade = gradeScore(Math.round(averageScore), gradingScheme).grade;
 
   const pdfDoc = await PDFDocument.create();
   const page = pdfDoc.addPage([595.28, 841.89]);
@@ -127,6 +120,8 @@ export const buildReportCardPdf = async ({
   drawText(`GPA: ${Number(student.gpa).toFixed(2)}`, { x: 315, y });
   y -= 18;
   drawText(`Parent / Guardian: ${student.parent_name || 'Not provided'}`, { x: 50, y });
+  y -= 18;
+  drawText(`Grading Scheme: ${gradingScheme.label}`, { x: 50, y, size: 9, color: rgb(0.35, 0.39, 0.45) });
 
   y -= 28;
   page.drawRectangle({
@@ -159,7 +154,7 @@ export const buildReportCardPdf = async ({
 
   y -= 8;
   drawText(`Average Score: ${averageScore.toFixed(1)}`, { x: 50, y, size: 11, bold: true });
-  drawText(`Overall Grade: ${gradeFromScore(Math.round(averageScore))}`, { x: 315, y, size: 11, bold: true });
+  drawText(`Overall Grade: ${overallGrade}`, { x: 315, y, size: 11, bold: true });
 
   y -= 34;
   drawText('Teacher Comment', { x: 50, y, size: 12, bold: true });

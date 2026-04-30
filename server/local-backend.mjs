@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { createDatabaseConnection, waitForDatabase } from './db/connection.mjs';
 import { initializeDatabase } from './db/schema.mjs';
 import { buildReportCardPdf } from './reports/report-card.mjs';
+import { getPublicGradingOptions } from './reports/grading-config.mjs';
 import { generateLlmSearchReply, getPublicModelCatalog, resolveModelSelection } from './services/llm-models.mjs';
 import { getPaymentStatus, initiatePayment, recordPaymentCallback } from './services/payment-gateway.mjs';
 import { generateAssistantReply } from './services/student-chat.mjs';
@@ -793,10 +794,14 @@ const handleReportCardRequest = async (database, pathname, searchParams) => {
 
   const term = searchParams.get('term') || 'Term 1';
   const academicYear = searchParams.get('academicYear') || undefined;
+  const gradingCountry = searchParams.get('gradingCountry') || undefined;
+  const academicLevel = searchParams.get('academicLevel') || undefined;
   const pdfBytes = await buildReportCardPdf({
     student,
     term,
     academicYear,
+    gradingCountry,
+    academicLevel,
   });
 
   return {
@@ -868,6 +873,10 @@ export const createAppRuntime = async ({
 
       if (method === 'POST' && pathname === '/api/functions/ai-models') {
         return { type: 'json', status: 200, body: { data: { models: getPublicModelCatalog() } } };
+      }
+
+      if (method === 'GET' && pathname === '/api/grading-schemes') {
+        return { type: 'json', status: 200, body: { data: { schemes: getPublicGradingOptions() } } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/voice-to-text') {

@@ -18,12 +18,88 @@ const EMPTY_STUDENT = {
   notes: '',
 };
 
+type StudentFormState = typeof EMPTY_STUDENT;
 type SortKey = 'first_name' | 'last_name' | 'grade_level' | 'gpa' | 'attendance_rate' | 'status';
+
+const GRADING_COUNTRIES = [
+  { value: 'international', label: 'International' },
+  { value: 'uganda', label: 'Uganda' },
+  { value: 'kenya', label: 'Kenya' },
+  { value: 'united-states', label: 'United States' },
+  { value: 'united-kingdom', label: 'United Kingdom' },
+];
+
+const ACADEMIC_LEVELS = [
+  { value: 'nursery', label: 'Nursery' },
+  { value: 'primary', label: 'Primary' },
+  { value: 'secondary', label: 'Secondary' },
+  { value: 'tertiary', label: 'Tertiary' },
+  { value: 'university', label: 'University' },
+];
 
 const getDefaultAcademicYear = () => {
   const year = new Date().getFullYear();
   return `${year}/${year + 1}`;
 };
+
+const inferAcademicLevel = (gradeLevel: number) => {
+  if (gradeLevel <= 0) return 'nursery';
+  if (gradeLevel <= 7) return 'primary';
+  if (gradeLevel <= 13) return 'secondary';
+  return 'tertiary';
+};
+
+const getErrorMessage = (error: unknown) => (error instanceof Error ? error.message : 'Unknown error');
+
+const StudentField = ({ label, name, form, setForm, errors, type = 'text', required, options, min, max, step }: {
+  label: string;
+  name: keyof StudentFormState;
+  form: StudentFormState;
+  setForm: React.Dispatch<React.SetStateAction<StudentFormState>>;
+  errors: Record<string, string>;
+  type?: string;
+  required?: boolean;
+  options?: { value: string; label: string }[];
+  min?: number;
+  max?: number;
+  step?: number;
+}) => (
+  <div>
+    <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+      {label} {required && <span className="text-red-400">*</span>}
+    </label>
+    {options ? (
+      <select
+        value={String(form[name])}
+        onChange={e => setForm(prev => ({ ...prev, [name]: e.target.value }))}
+        className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-200"
+      >
+        {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+      </select>
+    ) : type === 'textarea' ? (
+      <textarea
+        value={String(form[name] ?? '')}
+        onChange={e => setForm(prev => ({ ...prev, [name]: e.target.value }))}
+        rows={3}
+        className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-200 resize-none"
+      />
+    ) : (
+      <input
+        type={type}
+        value={String(form[name] ?? '')}
+        onChange={e => setForm(prev => ({
+          ...prev,
+          [name]: type === 'number' ? (e.target.value === '' ? 0 : Number(e.target.value)) : e.target.value,
+        }))}
+        min={min} max={max} step={step}
+        className={`w-full bg-gray-50 dark:bg-gray-700 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-200 ${
+          errors[name] ? 'border-red-300 dark:border-red-600' : 'border-gray-200 dark:border-gray-600'
+        }`}
+      />
+    )}
+    {errors[name] && <p className="text-[10px] text-red-500 mt-0.5">{errors[name]}</p>}
+  </div>
+);
 
 const StudentManagement: React.FC = () => {
   const { students, refreshStudents } = useChatContext();
@@ -42,6 +118,8 @@ const StudentManagement: React.FC = () => {
   const [reportCardStudent, setReportCardStudent] = useState<Student | null>(null);
   const [reportCardTerm, setReportCardTerm] = useState('Term 1');
   const [reportCardYear, setReportCardYear] = useState(getDefaultAcademicYear());
+  const [reportCardGradingCountry, setReportCardGradingCountry] = useState('international');
+  const [reportCardAcademicLevel, setReportCardAcademicLevel] = useState('secondary');
   const [isBuildingReport, setIsBuildingReport] = useState(false);
 
   const canEdit = isAdmin;
@@ -83,7 +161,7 @@ const StudentManagement: React.FC = () => {
     if (!form.first_name.trim()) e.first_name = 'Required';
     if (!form.last_name.trim()) e.last_name = 'Required';
     if (!form.student_id.trim()) e.student_id = 'Required';
-    if (form.grade_level < 1 || form.grade_level > 12) e.grade_level = 'Must be 1-12';
+    if (form.grade_level < 0 || form.grade_level > 20) e.grade_level = 'Must be 0-20';
     if (form.gpa < 0 || form.gpa > 4) e.gpa = 'Must be 0-4';
     if (form.attendance_rate < 0 || form.attendance_rate > 100) e.attendance_rate = 'Must be 0-100';
     if (form.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) e.email = 'Invalid email';
@@ -137,9 +215,9 @@ const StudentManagement: React.FC = () => {
       }
       await refreshStudents();
       setShowForm(false);
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Save failed:', err);
-      alert('Failed to save student: ' + (err.message || 'Unknown error'));
+      alert('Failed to save student: ' + getErrorMessage(err));
     } finally {
       setSaving(false);
     }
@@ -159,9 +237,9 @@ const StudentManagement: React.FC = () => {
       }
       await refreshStudents();
       setDeleteConfirm(null);
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Delete failed:', err);
-      alert('Failed to delete student: ' + (err.message || 'Unknown error'));
+      alert('Failed to delete student: ' + getErrorMessage(err));
     }
   };
 
@@ -181,6 +259,8 @@ const StudentManagement: React.FC = () => {
     setReportCardStudent(student);
     setReportCardTerm('Term 1');
     setReportCardYear(getDefaultAcademicYear());
+    setReportCardAcademicLevel(inferAcademicLevel(student.grade_level));
+    setReportCardGradingCountry('international');
   };
 
   const handleReportCardDownload = async () => {
@@ -191,6 +271,8 @@ const StudentManagement: React.FC = () => {
       const params = new URLSearchParams({
         term: reportCardTerm,
         academicYear: reportCardYear,
+        gradingCountry: reportCardGradingCountry,
+        academicLevel: reportCardAcademicLevel,
       });
 
       const response = await fetch(buildApiUrl(`/api/report-cards/${reportCardStudent.id}.pdf?${params.toString()}`));
@@ -206,53 +288,15 @@ const StudentManagement: React.FC = () => {
       link.click();
       URL.revokeObjectURL(url);
       setReportCardStudent(null);
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Report card download failed:', err);
-      alert(err.message || 'Failed to build report card.');
+      alert(getErrorMessage(err) || 'Failed to build report card.');
     } finally {
       setIsBuildingReport(false);
     }
   };
 
-  const Field = ({ label, name, type = 'text', required, options, min, max, step }: {
-    label: string; name: string; type?: string; required?: boolean;
-    options?: { value: string; label: string }[]; min?: number; max?: number; step?: number;
-  }) => (
-    <div>
-      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-        {label} {required && <span className="text-red-400">*</span>}
-      </label>
-      {options ? (
-        <select
-          value={(form as any)[name]}
-          onChange={e => setForm(prev => ({ ...prev, [name]: e.target.value }))}
-          className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-200"
-        >
-          {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-        </select>
-      ) : type === 'textarea' ? (
-        <textarea
-          value={(form as any)[name]}
-          onChange={e => setForm(prev => ({ ...prev, [name]: e.target.value }))}
-          rows={3}
-          className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-200 resize-none"
-        />
-      ) : (
-        <input
-          type={type}
-          value={(form as any)[name]}
-          onChange={e => setForm(prev => ({ ...prev, [name]: type === 'number' ? parseFloat(e.target.value) || 0 : e.target.value }))}
-          min={min} max={max} step={step}
-          className={`w-full bg-gray-50 dark:bg-gray-700 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-200 ${
-            (errors as any)[name] ? 'border-red-300 dark:border-red-600' : 'border-gray-200 dark:border-gray-600'
-          }`}
-        />
-      )}
-      {(errors as any)[name] && <p className="text-[10px] text-red-500 mt-0.5">{(errors as any)[name]}</p>}
-    </div>
-  );
-
-  const grades = [9, 10, 11, 12];
+  const grades = Array.from(new Set([...students.map(s => s.grade_level), 9, 10, 11, 12])).sort((a, b) => a - b);
   const avgGpa = students.length ? (students.reduce((s, st) => s + (st.gpa || 0), 0) / students.length).toFixed(2) : '0';
   const avgAtt = students.length ? (students.reduce((s, st) => s + (st.attendance_rate || 0), 0) / students.length).toFixed(1) : '0';
 
@@ -558,9 +602,37 @@ const StudentManagement: React.FC = () => {
                 />
               </div>
 
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Country / System</label>
+                  <select
+                    value={reportCardGradingCountry}
+                    onChange={e => setReportCardGradingCountry(e.target.value)}
+                    className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                  >
+                    {GRADING_COUNTRIES.map(country => (
+                      <option key={country.value} value={country.value}>{country.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Academic Level</label>
+                  <select
+                    value={reportCardAcademicLevel}
+                    onChange={e => setReportCardAcademicLevel(e.target.value)}
+                    className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                  >
+                    {ACADEMIC_LEVELS.map(level => (
+                      <option key={level.value} value={level.value}>{level.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
               <div className="bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-800 rounded-xl px-3 py-3">
                 <p className="text-xs text-indigo-700 dark:text-indigo-300 leading-relaxed">
-                  The PDF includes student details, subject-by-subject results, attendance, GPA, and a teacher comment generated from current records.
+                  The PDF uses the selected country and academic level grading scale for subject results and overall grades.
                 </p>
               </div>
             </div>
@@ -611,16 +683,16 @@ const StudentManagement: React.FC = () => {
               <div>
                 <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Basic Information</h4>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <Field label="Student ID" name="student_id" required />
-                  <Field label="Gender" name="gender" options={[
+                  <StudentField form={form} setForm={setForm} errors={errors} label="Student ID" name="student_id" required />
+                  <StudentField form={form} setForm={setForm} errors={errors} label="Gender" name="gender" options={[
                     { value: 'Male', label: 'Male' }, { value: 'Female', label: 'Female' }, { value: 'Other', label: 'Other' }
                   ]} />
-                  <Field label="First Name" name="first_name" required />
-                  <Field label="Last Name" name="last_name" required />
-                  <Field label="Date of Birth" name="date_of_birth" type="date" />
-                  <Field label="Email" name="email" type="email" />
-                  <Field label="Phone" name="phone" />
-                  <Field label="Address" name="address" />
+                  <StudentField form={form} setForm={setForm} errors={errors} label="First Name" name="first_name" required />
+                  <StudentField form={form} setForm={setForm} errors={errors} label="Last Name" name="last_name" required />
+                  <StudentField form={form} setForm={setForm} errors={errors} label="Date of Birth" name="date_of_birth" type="date" />
+                  <StudentField form={form} setForm={setForm} errors={errors} label="Email" name="email" type="email" />
+                  <StudentField form={form} setForm={setForm} errors={errors} label="Phone" name="phone" />
+                  <StudentField form={form} setForm={setForm} errors={errors} label="Address" name="address" />
                 </div>
               </div>
 
@@ -628,16 +700,16 @@ const StudentManagement: React.FC = () => {
               <div>
                 <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Academic Information</h4>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <Field label="Grade Level" name="grade_level" type="number" required min={1} max={12} />
-                  <Field label="Section" name="class_section" options={[
+                  <StudentField form={form} setForm={setForm} errors={errors} label="Class / Grade Level" name="grade_level" type="number" required min={0} max={20} />
+                  <StudentField form={form} setForm={setForm} errors={errors} label="Section" name="class_section" options={[
                     { value: 'A', label: 'Section A' }, { value: 'B', label: 'Section B' }, { value: 'C', label: 'Section C' }
                   ]} />
-                  <Field label="Status" name="status" options={[
+                  <StudentField form={form} setForm={setForm} errors={errors} label="Status" name="status" options={[
                     { value: 'active', label: 'Active' }, { value: 'inactive', label: 'Inactive' }, { value: 'graduated', label: 'Graduated' }, { value: 'transferred', label: 'Transferred' }
                   ]} />
-                  <Field label="GPA (0-4)" name="gpa" type="number" min={0} max={4} step={0.01} />
-                  <Field label="Attendance Rate (%)" name="attendance_rate" type="number" min={0} max={100} step={0.1} />
-                  <Field label="Enrollment Date" name="enrollment_date" type="date" />
+                  <StudentField form={form} setForm={setForm} errors={errors} label="GPA (0-4)" name="gpa" type="number" min={0} max={4} step={0.01} />
+                  <StudentField form={form} setForm={setForm} errors={errors} label="Attendance Rate (%)" name="attendance_rate" type="number" min={0} max={100} step={0.1} />
+                  <StudentField form={form} setForm={setForm} errors={errors} label="Enrollment Date" name="enrollment_date" type="date" />
                 </div>
               </div>
 
@@ -670,16 +742,16 @@ const StudentManagement: React.FC = () => {
               <div>
                 <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Parent / Guardian</h4>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <Field label="Parent Name" name="parent_name" />
-                  <Field label="Parent Phone" name="parent_phone" />
-                  <Field label="Parent Email" name="parent_email" type="email" />
+                  <StudentField form={form} setForm={setForm} errors={errors} label="Parent Name" name="parent_name" />
+                  <StudentField form={form} setForm={setForm} errors={errors} label="Parent Phone" name="parent_phone" />
+                  <StudentField form={form} setForm={setForm} errors={errors} label="Parent Email" name="parent_email" type="email" />
                 </div>
               </div>
 
               {/* Notes */}
               <div>
                 <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Notes</h4>
-                <Field label="Additional Notes" name="notes" type="textarea" />
+                <StudentField form={form} setForm={setForm} errors={errors} label="Additional Notes" name="notes" type="textarea" />
               </div>
             </div>
 
