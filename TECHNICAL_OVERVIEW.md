@@ -230,7 +230,7 @@ Development defaults:
 | `OPENROUTER_HTTP_REFERER` | Optional OpenRouter referer header. |
 | `OPENROUTER_APP_TITLE` | Optional OpenRouter title header. |
 | `OLLAMA_BASE_URL` | Ollama base URL, default points to host machine in Docker. |
-| `OLLAMA_MODEL` | Ollama local model name, default `llama3.1`. |
+| `OLLAMA_MODEL` | Ollama local model name, default `qwen3.5:2b`. |
 | `PAYMENT_GATEWAY_MODE` | `mock` for local simulation or live mode for configured providers. |
 | `PAYMENT_CURRENCY` | Default payment currency, usually `UGX`. |
 | `PAYMENT_CALLBACK_URL` | Public callback URL registered with payment providers. |
