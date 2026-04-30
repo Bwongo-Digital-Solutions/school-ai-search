@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: school-ai-search-db-dev
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-school_ai_search_dev}
+      POSTGRES_USER: ${POSTGRES_USER:-schoolapp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-schoolapp}
+    ports:
+      - "${DEV_DB_PORT:-5432}:5432"
+    volumes:
+      - school_ai_search_dev_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-schoolapp} -d ${POSTGRES_DB:-school_ai_search_dev}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  app-dev:
+    image: node:20-alpine
+    container_name: school-ai-search-dev
+    working_dir: /app
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      LOCAL_BACKEND_HOST: 0.0.0.0
+      LOCAL_BACKEND_PORT: 8787
+      DATABASE_URL: ${DATABASE_URL:-postgres://schoolapp:schoolapp@db:5432/school_ai_search_dev}
+      DATABASE_SSL: "false"
+      VITE_PROXY_TARGET: http://127.0.0.1:8787
+      VITE_DEV_HOST: 0.0.0.0
+      CHOKIDAR_USEPOLLING: "true"
+    command: sh -c "npm install && npm run dev"
+    ports:
+      - "${DEV_APP_PORT:-8080}:8080"
+      - "${DEV_API_PORT:-8787}:8787"
+    volumes:
+      - .:/app
+      - school_ai_search_node_modules:/app/node_modules
+
+volumes:
+  school_ai_search_dev_postgres_data:
+  school_ai_search_node_modules:

@@ -1,0 +1,46 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: school-ai-search-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-school_ai_search}
+      POSTGRES_USER: ${POSTGRES_USER:-schoolapp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-schoolapp}
+    volumes:
+      - school_ai_search_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-schoolapp} -d ${POSTGRES_DB:-school_ai_search}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: school-ai-search
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${APP_PORT:-8787}:8787"
+    environment:
+      LOCAL_BACKEND_HOST: 0.0.0.0
+      LOCAL_BACKEND_PORT: 8787
+      LOCAL_STATIC_ROOT: /app/dist
+      DATABASE_URL: ${DATABASE_URL:-postgres://schoolapp:schoolapp@db:5432/school_ai_search}
+      DATABASE_SSL: "false"
+      SCHOOL_NAME: ${SCHOOL_NAME:-SchoolBot Academy}
+      SCHOOL_TAGLINE: ${SCHOOL_TAGLINE:-Academic Excellence and Character}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/api/health').then((r)=>{if(!r.ok) process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  school_ai_search_postgres_data:
