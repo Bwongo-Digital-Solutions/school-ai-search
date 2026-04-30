@@ -15,6 +15,7 @@ Usage:
 
 Commands:
   build      Build the app image and services
+  rebuild    Build the app image and services without Docker cache
   start      Start containers in the background
   stop       Stop containers without deleting data
   restart    Stop and start containers
@@ -29,6 +30,7 @@ Environments:
 
 Examples:
   ./containers.sh build
+  ./containers.sh rebuild
   ./containers.sh start prod
   ./containers.sh start dev
   ./containers.sh stop
@@ -53,14 +55,15 @@ print_action_menu() {
 
 Choose an action:
   1) Build containers
-  2) Start containers
-  3) Stop containers
-  4) Restart containers
-  5) Delete containers and volumes
-  6) Show container status
-  7) Follow logs
-  8) Show application endpoints
-  9) Change environment
+  2) Rebuild containers without cache
+  3) Start containers
+  4) Stop containers
+  5) Restart containers
+  6) Delete containers and volumes
+  7) Show container status
+  8) Follow logs
+  9) Show application endpoints
+  10) Change environment
   0) Exit
 EOF
 }
@@ -156,6 +159,10 @@ run_command() {
     compose build
     show_endpoints
     ;;
+  rebuild)
+    compose build --no-cache
+    show_endpoints
+    ;;
   start)
     compose up --build -d
     show_endpoints
@@ -230,34 +237,37 @@ interactive_menu() {
         run_command build
         ;;
       2)
-        run_command start
+        run_command rebuild
         ;;
       3)
-        run_command stop
+        run_command start
         ;;
       4)
-        run_command restart
+        run_command stop
         ;;
       5)
-        run_command delete
+        run_command restart
         ;;
       6)
-        run_command status
+        run_command delete
         ;;
       7)
-        run_command logs
+        run_command status
         ;;
       8)
-        run_command endpoints
+        run_command logs
         ;;
       9)
+        run_command endpoints
+        ;;
+      10)
         choose_environment
         ;;
       0)
         exit 0
         ;;
       *)
-        printf 'Please choose a number from 0 to 9.\n'
+        printf 'Please choose a number from 0 to 10.\n'
         ;;
     esac
   done
