@@ -21,6 +21,7 @@ Commands:
   delete     Stop containers and delete project volumes
   status     Show container status
   logs       Follow container logs
+  endpoints  Show application URLs and ports
 
 Environments:
   prod       Production stack from docker-compose.yml (default)
@@ -58,7 +59,8 @@ Choose an action:
   5) Delete containers and volumes
   6) Show container status
   7) Follow logs
-  8) Change environment
+  8) Show application endpoints
+  9) Change environment
   0) Exit
 EOF
 }
@@ -107,15 +109,56 @@ compose() {
   docker compose -p "$project_name" -f "$compose_file" "$@"
 }
 
+show_endpoints() {
+  if [ "$environment" = "prod" ]; then
+    app_port="${APP_PORT:-8787}"
+    database_name="${POSTGRES_DB:-school_ai_search}"
+    database_user="${POSTGRES_USER:-schoolapp}"
+
+    cat <<EOF
+
+Application locations for $environment_label:
+  Frontend and backend: http://127.0.0.1:$app_port
+  Backend health check: http://127.0.0.1:$app_port/api/health
+  PostgreSQL database: db:5432 inside Docker network
+  Database name: $database_name
+  Database user: $database_user
+
+Production exposes the built React frontend and backend API from the same app container.
+EOF
+  else
+    frontend_port="${DEV_APP_PORT:-8080}"
+    backend_port="${DEV_API_PORT:-8787}"
+    database_port="${DEV_DB_PORT:-5432}"
+    database_name="${POSTGRES_DB:-school_ai_search_dev}"
+    database_user="${POSTGRES_USER:-schoolapp}"
+
+    cat <<EOF
+
+Application locations for $environment_label:
+  Frontend: http://127.0.0.1:$frontend_port
+  Backend API: http://127.0.0.1:$backend_port
+  Backend health check: http://127.0.0.1:$backend_port/api/health
+  PostgreSQL database: 127.0.0.1:$database_port
+  Database name: $database_name
+  Database user: $database_user
+
+Development runs Vite on the frontend port and the local Node backend on the API port.
+EOF
+  fi
+}
+
 run_command() {
   command="$1"
 
   case "$command" in
   build)
     compose build
+    show_endpoints
     ;;
   start)
     compose up --build -d
+    show_endpoints
     ;;
   stop)
     compose stop
@@ -123,6 +166,7 @@ run_command() {
   restart)
     compose stop
     compose up --build -d
+    show_endpoints
     ;;
   delete)
     if confirm_delete; then
@@ -134,6 +178,9 @@ run_command() {
     ;;
   logs)
     compose logs -f
+    ;;
+  endpoints)
+    show_endpoints
     ;;
   help|-h|--help)
     usage
@@ -201,13 +248,16 @@ interactive_menu() {
         run_command logs
         ;;
       8)
+        run_command endpoints
+        ;;
+      9)
         choose_environment
         ;;
       0)
         exit 0
         ;;
       *)
-        printf 'Please choose a number from 0 to 8.\n'
+        printf 'Please choose a number from 0 to 9.\n'
         ;;
     esac
   done

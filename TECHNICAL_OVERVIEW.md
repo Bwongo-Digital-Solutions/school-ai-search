@@ -87,6 +87,7 @@ Use the root helper script:
 ```
 
 The script opens an interactive menu where you choose the environment and then select numbered actions for build, start, stop, restart, delete, status, and logs.
+It also includes an endpoints option that shows where to find the frontend, backend API, backend health check, and database connection after containers are running.
 
 You can also run commands directly:
 
@@ -95,6 +96,7 @@ You can also run commands directly:
 ./containers.sh start
 ./containers.sh stop
 ./containers.sh delete
+./containers.sh endpoints
 ```
 
 By default the script targets the production stack in `docker-compose.yml`. Pass `dev` as the second argument to use `docker-compose.dev.yml`:
