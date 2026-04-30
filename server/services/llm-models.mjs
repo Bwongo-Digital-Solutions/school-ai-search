@@ -59,7 +59,7 @@ const DEFAULT_MODEL_CATALOG = [
     id: 'ollama-default',
     label: 'Ollama',
     provider: 'ollama',
-    model: process.env.OLLAMA_MODEL || 'llama3.1',
+    model: process.env.OLLAMA_MODEL || 'qwen3.5:2b',
     type: 'open_source',
     description: 'Local open-source model served by Ollama.',
   },
