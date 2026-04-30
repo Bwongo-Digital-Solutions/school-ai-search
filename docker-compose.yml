@@ -35,6 +35,49 @@ services:
       DATABASE_SSL: "false"
       SCHOOL_NAME: ${SCHOOL_NAME:-SchoolBot Academy}
       SCHOOL_TAGLINE: ${SCHOOL_TAGLINE:-Academic Excellence and Character}
+      AI_DEFAULT_MODEL_ID: ${AI_DEFAULT_MODEL_ID:-local-rules}
+      AI_MODEL_CATALOG: ${AI_MODEL_CATALOG:-}
+      AI_TEMPERATURE: ${AI_TEMPERATURE:-0.2}
+      AI_MAX_TOKENS: ${AI_MAX_TOKENS:-900}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-3-5-haiku-latest}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+      ANTHROPIC_VERSION: ${ANTHROPIC_VERSION:-2023-06-01}
+      GOOGLE_GEMINI_API_KEY: ${GOOGLE_GEMINI_API_KEY:-}
+      GOOGLE_GEMINI_MODEL: ${GOOGLE_GEMINI_MODEL:-gemini-2.5-flash}
+      GOOGLE_GEMINI_BASE_URL: ${GOOGLE_GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.1-8b-instant}
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      MISTRAL_MODEL: ${MISTRAL_MODEL:-mistral-small-latest}
+      MISTRAL_BASE_URL: ${MISTRAL_BASE_URL:-https://api.mistral.ai/v1}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-meta-llama/llama-3.1-8b-instruct}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      OPENROUTER_HTTP_REFERER: ${OPENROUTER_HTTP_REFERER:-http://localhost}
+      OPENROUTER_APP_TITLE: ${OPENROUTER_APP_TITLE:-School AI Search}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1}
+      PAYMENT_GATEWAY_MODE: ${PAYMENT_GATEWAY_MODE:-mock}
+      PAYMENT_CURRENCY: ${PAYMENT_CURRENCY:-UGX}
+      PAYMENT_CALLBACK_URL: ${PAYMENT_CALLBACK_URL:-}
+      MTN_MOMO_BASE_URL: ${MTN_MOMO_BASE_URL:-https://sandbox.momodeveloper.mtn.com}
+      MTN_MOMO_SUBSCRIPTION_KEY: ${MTN_MOMO_SUBSCRIPTION_KEY:-}
+      MTN_MOMO_API_USER: ${MTN_MOMO_API_USER:-}
+      MTN_MOMO_API_KEY: ${MTN_MOMO_API_KEY:-}
+      MTN_MOMO_TARGET_ENVIRONMENT: ${MTN_MOMO_TARGET_ENVIRONMENT:-sandbox}
+      AIRTEL_MONEY_BASE_URL: ${AIRTEL_MONEY_BASE_URL:-}
+      AIRTEL_MONEY_CLIENT_ID: ${AIRTEL_MONEY_CLIENT_ID:-}
+      AIRTEL_MONEY_CLIENT_SECRET: ${AIRTEL_MONEY_CLIENT_SECRET:-}
+      AIRTEL_MONEY_COUNTRY: ${AIRTEL_MONEY_COUNTRY:-UG}
+      AIRTEL_MONEY_TOKEN_PATH: ${AIRTEL_MONEY_TOKEN_PATH:-/auth/oauth2/token}
+      AIRTEL_MONEY_COLLECTION_PATH: ${AIRTEL_MONEY_COLLECTION_PATH:-/merchant/v1/payments/}
+      BANK_PAYMENT_GATEWAY_URL: ${BANK_PAYMENT_GATEWAY_URL:-}
+      BANK_PAYMENT_API_KEY: ${BANK_PAYMENT_API_KEY:-}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/api/health').then((r)=>{if(!r.ok) process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s

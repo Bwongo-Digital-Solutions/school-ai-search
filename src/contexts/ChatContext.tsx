@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
-import type { Message, Conversation, Attachment, Student } from '@/types/chat';
+import type { Message, Conversation, Attachment, Student, AiModelOption } from '@/types/chat';
 
 type ActiveView = 'chat' | 'students' | 'audit';
 
@@ -12,8 +12,11 @@ interface ChatContextType {
   isLoading: boolean;
   isSidebarOpen: boolean;
   students: Student[];
+  aiModels: AiModelOption[];
+  selectedModelId: string;
   activeView: ActiveView;
   setActiveView: (view: ActiveView) => void;
+  setSelectedModelId: (modelId: string) => void;
   refreshStudents: () => Promise<void>;
   sendMessage: (content: string, attachments?: Attachment[]) => Promise<void>;
   startNewConversation: () => void;
@@ -39,6 +42,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarOpen, setSidebarOpen] = useState(true);
   const [students, setStudents] = useState<Student[]>([]);
+  const [aiModels, setAiModels] = useState<AiModelOption[]>([]);
+  const [selectedModelId, setSelectedModelId] = useState('local-rules');
   const [activeView, setActiveView] = useState<ActiveView>('chat');
 
   const refreshStudents = useCallback(async () => {
@@ -60,6 +65,38 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     refreshStudents();
   }, [refreshStudents]);
+
+  useEffect(() => {
+    const loadAiModels = async () => {
+      try {
+        const { data, error } = await supabase.functions.invoke<{ models: AiModelOption[] }>('ai-models', {
+          body: {},
+        });
+        if (error) throw error;
+
+        const models = data?.models || [];
+        setAiModels(models);
+        if (models.length > 0 && !models.some(model => model.id === selectedModelId)) {
+          setSelectedModelId(models[0].id);
+        }
+      } catch (err) {
+        console.error('Failed to load AI models:', err);
+        setAiModels([
+          {
+            id: 'local-rules',
+            label: 'Local Rules',
+            provider: 'local_rules',
+            model: 'student-search-rules',
+            type: 'local',
+            description: 'Fast local student search without external API calls.',
+            configured: true,
+          },
+        ]);
+      }
+    };
+
+    loadAiModels();
+  }, [selectedModelId]);
 
   const loadConversations = useCallback(async () => {
     try {
@@ -143,6 +180,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
           conversationId: currentConversationId,
           imageData,
           studentData: students,
+          modelId: selectedModelId,
         },
       });
       if (error) throw error;
@@ -150,7 +188,11 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         id: `msg-${Date.now()}`,
         role: 'assistant',
         content: data.message || 'Sorry, I could not process your request.',
-        metadata: { studentsFound: data.studentsFound },
+        metadata: {
+          studentsFound: data.studentsFound,
+          model: data.model,
+          usage: data.usage,
+        },
         createdAt: new Date(),
       };
       setMessages(prev => [...prev, assistantMessage]);
@@ -170,7 +212,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } finally {
       setIsLoading(false);
     }
-  }, [currentConversationId, loadConversations, students]);
+  }, [currentConversationId, loadConversations, students, selectedModelId]);
 
   const toggleSidebar = useCallback(() => {
     setSidebarOpen(prev => !prev);
@@ -180,7 +222,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     <ChatContext.Provider
       value={{
         messages, conversations, currentConversationId, isLoading,
-        isSidebarOpen, students, activeView, setActiveView, refreshStudents,
+        isSidebarOpen, students, aiModels, selectedModelId, activeView, setActiveView,
+        setSelectedModelId, refreshStudents,
         sendMessage, startNewConversation, loadConversation, loadConversations,
         deleteConversation, toggleSidebar, setSidebarOpen,
       }}

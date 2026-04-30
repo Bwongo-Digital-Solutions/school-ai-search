@@ -24,6 +24,16 @@ export interface Conversation {
   lastMessage?: string;
 }
 
+export interface AiModelOption {
+  id: string;
+  label: string;
+  provider: string;
+  model: string;
+  type: 'local' | 'commercial' | 'open_source' | string;
+  description: string;
+  configured: boolean;
+}
+
 export interface Student {
   id: string;
   student_id: string;
@@ -43,6 +53,15 @@ export interface Student {
   status: string;
   gpa: number;
   attendance_rate: number;
+  blood_group?: string;
+  medical_record?: Record<string, any>;
+  emergency_contact_name?: string;
+  emergency_contact_phone?: string;
+  emergency_contact_relation?: string;
+  lifecycle_status?: string;
+  graduation_date?: string;
+  transfer_date?: string;
+  alumni_notes?: string;
   subjects: string[];
   notes: string;
   photo_url?: string;

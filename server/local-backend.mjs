@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { createDatabaseConnection, waitForDatabase } from './db/connection.mjs';
 import { initializeDatabase } from './db/schema.mjs';
 import { buildReportCardPdf } from './reports/report-card.mjs';
+import { generateLlmSearchReply, getPublicModelCatalog, resolveModelSelection } from './services/llm-models.mjs';
+import { getPaymentStatus, initiatePayment, recordPaymentCallback } from './services/payment-gateway.mjs';
 import { generateAssistantReply } from './services/student-chat.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -51,10 +53,19 @@ const TABLES = {
       'status',
       'gpa',
       'attendance_rate',
+      'blood_group',
+      'medical_record',
+      'emergency_contact_name',
+      'emergency_contact_phone',
+      'emergency_contact_relation',
+      'lifecycle_status',
+      'graduation_date',
+      'transfer_date',
+      'alumni_notes',
       'subjects',
       'notes',
     ],
-    jsonColumns: ['subjects'],
+    jsonColumns: ['subjects', 'medical_record'],
   },
   conversations: {
     columns: ['id', 'title', 'created_at', 'updated_at'],
@@ -63,6 +74,193 @@ const TABLES = {
   messages: {
     columns: ['id', 'conversation_id', 'role', 'content', 'attachments', 'metadata', 'created_at'],
     jsonColumns: ['attachments', 'metadata'],
+  },
+  admissions: {
+    columns: [
+      'id',
+      'application_number',
+      'student_id',
+      'applicant_first_name',
+      'applicant_last_name',
+      'grade_level',
+      'status',
+      'submitted_at',
+      'documents',
+      'notes',
+    ],
+    jsonColumns: ['documents'],
+  },
+  classes: {
+    columns: ['id', 'grade_level', 'section_name', 'stream', 'room', 'academic_year', 'capacity'],
+  },
+  subjects_catalog: {
+    columns: ['id', 'code', 'name', 'grade_level', 'department'],
+  },
+  teachers: {
+    columns: ['id', 'staff_id', 'display_name', 'email', 'phone', 'department'],
+  },
+  subject_allocations: {
+    columns: ['id', 'subject_id', 'teacher_id', 'class_id', 'student_id', 'academic_year', 'term'],
+  },
+  timetables: {
+    columns: [
+      'id',
+      'class_id',
+      'teacher_id',
+      'subject_id',
+      'room',
+      'day_of_week',
+      'start_time',
+      'end_time',
+      'academic_year',
+      'term',
+    ],
+  },
+  attendance_records: {
+    columns: [
+      'id',
+      'student_id',
+      'attendance_date',
+      'status',
+      'reason',
+      'marked_by',
+      'notified_parent',
+      'created_at',
+    ],
+  },
+  attendance_alerts: {
+    columns: ['id', 'student_id', 'attendance_record_id', 'channel', 'recipient', 'status', 'message', 'sent_at'],
+  },
+  exams: {
+    columns: ['id', 'name', 'exam_type', 'academic_year', 'term', 'start_date', 'end_date', 'status'],
+  },
+  exam_schedules: {
+    columns: ['id', 'exam_id', 'subject_id', 'class_id', 'exam_date', 'start_time', 'end_time', 'room'],
+  },
+  gradebook_entries: {
+    columns: [
+      'id',
+      'student_id',
+      'exam_id',
+      'subject_id',
+      'score',
+      'max_score',
+      'grade',
+      'remarks',
+      'rank',
+      'created_at',
+    ],
+  },
+  fee_structures: {
+    columns: [
+      'id',
+      'name',
+      'grade_level',
+      'student_type',
+      'academic_year',
+      'term',
+      'amount',
+      'currency',
+      'due_date',
+    ],
+  },
+  payments: {
+    columns: [
+      'id',
+      'student_id',
+      'fee_structure_id',
+      'amount',
+      'currency',
+      'payment_method',
+      'reference',
+      'paid_at',
+      'received_by',
+    ],
+  },
+  invoices: {
+    columns: [
+      'id',
+      'student_id',
+      'invoice_number',
+      'status',
+      'total_amount',
+      'balance_due',
+      'currency',
+      'due_date',
+      'issued_at',
+      'line_items',
+    ],
+    jsonColumns: ['line_items'],
+  },
+  receipts: {
+    columns: ['id', 'payment_id', 'receipt_number', 'amount', 'currency', 'issued_at'],
+  },
+  payment_transactions: {
+    columns: [
+      'id',
+      'student_id',
+      'invoice_id',
+      'provider',
+      'charge_type',
+      'amount',
+      'currency',
+      'phone_number',
+      'bank_code',
+      'account_reference',
+      'external_reference',
+      'provider_reference',
+      'status',
+      'status_reason',
+      'customer_message',
+      'metadata',
+      'created_at',
+      'updated_at',
+    ],
+    jsonColumns: ['metadata'],
+    touchesUpdatedAt: true,
+  },
+  portal_accounts: {
+    columns: ['id', 'owner_type', 'student_id', 'user_id', 'username', 'status', 'last_login_at'],
+  },
+  notices: {
+    columns: ['id', 'title', 'body', 'audience', 'priority', 'published_at', 'expires_at'],
+  },
+  internal_messages: {
+    columns: ['id', 'sender_user_id', 'recipient_user_id', 'student_id', 'subject', 'body', 'read_at', 'created_at'],
+  },
+  library_books: {
+    columns: ['id', 'isbn', 'title', 'author', 'category', 'copies_total', 'copies_available'],
+  },
+  library_loans: {
+    columns: ['id', 'book_id', 'student_id', 'issued_at', 'due_at', 'returned_at', 'fine_amount', 'status'],
+  },
+  transport_routes: {
+    columns: ['id', 'route_name', 'bus_number', 'driver_name', 'driver_phone', 'stops'],
+    jsonColumns: ['stops'],
+  },
+  transport_assignments: {
+    columns: ['id', 'student_id', 'route_id', 'pickup_point', 'dropoff_point', 'status'],
+  },
+  hostel_rooms: {
+    columns: ['id', 'hostel_name', 'room_number', 'capacity', 'inventory'],
+    jsonColumns: ['inventory'],
+  },
+  hostel_assignments: {
+    columns: ['id', 'student_id', 'room_id', 'bed_number', 'start_date', 'end_date', 'status'],
+  },
+  inventory_items: {
+    columns: ['id', 'item_name', 'category', 'sku', 'quantity', 'unit_cost', 'location', 'reorder_level'],
+  },
+  inventory_transactions: {
+    columns: ['id', 'item_id', 'transaction_type', 'quantity', 'notes', 'created_at'],
+  },
+  compliance_reports: {
+    columns: ['id', 'report_type', 'period_start', 'period_end', 'status', 'payload', 'created_at'],
+    jsonColumns: ['payload'],
+  },
+  analytics_snapshots: {
+    columns: ['id', 'snapshot_type', 'academic_year', 'term', 'metrics', 'created_at'],
+    jsonColumns: ['metrics'],
   },
 };
 
@@ -467,10 +665,11 @@ const handleAuthFunction = async (database, body) => {
   return { error: `Unsupported auth action: ${action}` };
 };
 
-const handleAiChatFunction = async (database, body) => {
+const handleAiChatFunction = async (database, body, httpClient) => {
   const message = String(body?.message || '').trim();
   const hasImage = Boolean(body?.imageData);
   const students = await fetchAllStudents(database);
+  const selectedModel = resolveModelSelection(body?.modelId);
 
   const conversation = await ensureConversation(database, {
     conversationId: body?.conversationId || null,
@@ -485,30 +684,97 @@ const handleAiChatFunction = async (database, body) => {
     metadata: {},
   });
 
-  const reply = generateAssistantReply({
-    message,
-    students,
-    hasImage,
-  });
+  let reply;
+  try {
+    reply =
+      selectedModel.provider === 'local_rules'
+        ? generateAssistantReply({ message, students, hasImage })
+        : await generateLlmSearchReply({
+            modelId: selectedModel.id,
+            message,
+            students,
+            hasImage,
+            httpClient,
+          });
+  } catch (error) {
+    reply = {
+      message: [
+        `The selected model (${selectedModel.label}) could not process the request.`,
+        '',
+        error instanceof Error ? error.message : 'Unknown model provider error.',
+        '',
+        'Switch to Local Rules or configure the provider credentials to continue.',
+      ].join('\n'),
+      studentsFound: 0,
+      model: {
+        id: selectedModel.id,
+        label: selectedModel.label,
+        provider: selectedModel.provider,
+        model: selectedModel.model,
+      },
+      error: true,
+    };
+  }
+
+  if (!reply) {
+    reply = generateAssistantReply({ message, students, hasImage });
+  }
 
   await insertMessage(database, {
     conversationId: conversation.id,
     role: 'assistant',
     content: reply.message,
     attachments: [],
-    metadata: { studentsFound: reply.studentsFound },
+    metadata: {
+      studentsFound: reply.studentsFound,
+      modelId: selectedModel.id,
+      modelProvider: selectedModel.provider,
+      modelName: selectedModel.model,
+      usage: reply.usage || null,
+      providerResponseId: reply.providerResponseId || null,
+      modelError: Boolean(reply.error),
+    },
   });
 
   return {
     message: reply.message,
     studentsFound: reply.studentsFound,
     conversationId: conversation.id,
+    model: {
+      id: selectedModel.id,
+      label: selectedModel.label,
+      provider: selectedModel.provider,
+      model: selectedModel.model,
+    },
+    usage: reply.usage || null,
   };
 };
 
 const handleVoiceFunction = async () => ({
   warning: 'Voice transcription is not implemented in local mode yet. Type your message to continue.',
 });
+
+const handlePaymentFunction = async (database, body, httpClient) => {
+  const action = body?.action;
+
+  if (action === 'initiate') {
+    return initiatePayment({ database, body, httpClient });
+  }
+
+  if (action === 'status') {
+    return getPaymentStatus({
+      database,
+      paymentReference: body.paymentReference || body.externalReference || body.providerReference,
+      httpClient,
+    });
+  }
+
+  if (action === 'callback') {
+    return recordPaymentCallback({ database, body });
+  }
+
+  return { error: `Unsupported payment action: ${action}` };
+};
 
 const handleReportCardRequest = async (database, pathname, searchParams) => {
   const match = pathname.match(/^\/api\/report-cards\/([^/]+)\.pdf$/);
@@ -547,6 +813,7 @@ const handleReportCardRequest = async (database, pathname, searchParams) => {
 export const createAppRuntime = async ({
   connectionString,
   useInMemoryDatabase = false,
+  httpClient = fetch,
 } = {}) => {
   const database = createDatabaseConnection({
     connectionString,
@@ -595,13 +862,24 @@ export const createAppRuntime = async ({
       }
 
       if (method === 'POST' && pathname === '/api/functions/ai-chat') {
-        const data = await handleAiChatFunction(database, body);
+        const data = await handleAiChatFunction(database, body, httpClient);
         return { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/ai-models') {
+        return { type: 'json', status: 200, body: { data: { models: getPublicModelCatalog() } } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/voice-to-text') {
         const data = await handleVoiceFunction();
         return { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/payments') {
+        const data = await handlePaymentFunction(database, body, httpClient);
+        return data?.error
+          ? { type: 'json', status: 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
       }
 
       return {
