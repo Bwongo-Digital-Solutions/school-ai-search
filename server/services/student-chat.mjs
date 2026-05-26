@@ -30,10 +30,12 @@ const extractNumber = (text, fallback) => {
 
 const findStudentMatches = (students, query) => {
   const normalized = query.toLowerCase();
+  const compact = normalized.replace(/[^a-z0-9]+/g, '');
   const exactMatches = students.filter(
     (student) =>
       normalized.includes(`${student.first_name} ${student.last_name}`.toLowerCase()) ||
-      normalized.includes(student.student_id.toLowerCase()),
+      normalized.includes(student.student_id.toLowerCase()) ||
+      compact.includes(student.student_id.toLowerCase().replace(/[^a-z0-9]+/g, '')),
   );
 
   if (exactMatches.length > 0) {
@@ -41,11 +43,31 @@ const findStudentMatches = (students, query) => {
   }
 
   const nameTokens = normalized.split(/[^a-z0-9]+/).filter(Boolean);
-  return students.filter((student) => {
+  const fullNameTokenMatches = students.filter((student) => {
     const first = student.first_name.toLowerCase();
     const last = student.last_name.toLowerCase();
     return nameTokens.includes(first) && nameTokens.includes(last);
   });
+
+  if (fullNameTokenMatches.length > 0) {
+    return fullNameTokenMatches;
+  }
+
+  const partialMatches = students.filter((student) => {
+    const first = student.first_name.toLowerCase();
+    const last = student.last_name.toLowerCase();
+    const studentId = student.student_id.toLowerCase();
+    return nameTokens.some(
+      (token) =>
+        token.length >= 3 &&
+        (first.startsWith(token) ||
+          last.startsWith(token) ||
+          studentId.includes(token) ||
+          `${first}${last}`.includes(token)),
+    );
+  });
+
+  return partialMatches;
 };
 
 export const generateAssistantReply = ({ message, students, hasImage }) => {
@@ -69,6 +91,19 @@ export const generateAssistantReply = ({ message, students, hasImage }) => {
     return {
       message: formatStudentProfile(nameMatches[0]),
       studentsFound: 1,
+    };
+  }
+
+  if (nameMatches.length > 1) {
+    return {
+      message: [
+        `## I found ${nameMatches.length} possible student matches`,
+        '',
+        formatStudentTable(nameMatches),
+        '',
+        'Try the full name or student ID to open one exact profile.',
+      ].join('\n'),
+      studentsFound: nameMatches.length,
     };
   }
 

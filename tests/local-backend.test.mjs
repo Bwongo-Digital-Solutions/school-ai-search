@@ -94,6 +94,24 @@ test('local backend supports auth, data queries, audit logging, and chat', async
     assert.equal(aiChat.body.data.studentsFound, 3);
     assert.equal(aiChat.body.data.model.id, 'local-rules');
 
+    const partialStudentSearch = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+      message: 'tell me about Emma',
+      conversationId: null,
+      modelId: 'local-rules',
+    });
+    assert.equal(partialStudentSearch.status, 200);
+    assert.match(partialStudentSearch.body.data.message, /Emma Johnson/);
+    assert.equal(partialStudentSearch.body.data.studentsFound, 1);
+
+    const studentIdSearch = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+      message: 'show STU 2026 001',
+      conversationId: null,
+      modelId: 'local-rules',
+    });
+    assert.equal(studentIdSearch.status, 200);
+    assert.match(studentIdSearch.body.data.message, /STU-2026-001/);
+    assert.equal(studentIdSearch.body.data.studentsFound, 1);
+
     const aiModels = await dispatch(runtime, 'POST', '/api/functions/ai-models', {});
     assert.equal(aiModels.status, 200);
     assert.ok(aiModels.body.data.models.some((model) => model.provider === 'ollama'));
