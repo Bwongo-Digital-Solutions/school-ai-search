@@ -4,6 +4,8 @@ import {
   Bell,
   BookOpen,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   ClipboardList,
   FilePlus2,
   GraduationCap,
@@ -17,6 +19,7 @@ import {
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
 import { useChatContext } from '@/contexts/ChatContext';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import type { Student } from '@/types/chat';
 
 type SectionKey = 'admissions' | 'attendance' | 'academic' | 'discipline' | 'allocation' | 'lifecycle';
@@ -31,6 +34,7 @@ const academicYear = () => {
 
 const getErrorMessage = (error: unknown) => (error instanceof Error ? error.message : 'Unknown error');
 const studentName = (student?: Student) => student ? `${student.first_name} ${student.last_name}` : 'Unknown student';
+const ADMISSIONS_PAGE_SIZE = 8;
 
 const emptyAdmission = {
   application_number: '',
@@ -161,6 +165,8 @@ const StudentRecordsWorkspace: React.FC = () => {
   const { students, refreshStudents } = useChatContext();
   const { isAuthenticated, isAdmin, user, logAudit } = useAuth();
   const [activeSection, setActiveSection] = useState<SectionKey>('admissions');
+  const [admissionPane, setAdmissionPane] = useState('form');
+  const [admissionPage, setAdmissionPage] = useState(1);
   const [selectedStudentId, setSelectedStudentId] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -260,6 +266,21 @@ const StudentRecordsWorkspace: React.FC = () => {
       transfers: (records.student_transfers || []).filter(row => row.student_id === id),
     };
   }, [records, selectedStudent?.id]);
+
+  const admissionRows = useMemo(() => records.admissions || [], [records.admissions]);
+  const admissionPageCount = Math.max(1, Math.ceil(admissionRows.length / ADMISSIONS_PAGE_SIZE));
+  const paginatedAdmissions = admissionRows.slice(
+    (admissionPage - 1) * ADMISSIONS_PAGE_SIZE,
+    admissionPage * ADMISSIONS_PAGE_SIZE,
+  );
+
+  useEffect(() => {
+    setAdmissionPage(1);
+  }, [records.admissions?.length]);
+
+  useEffect(() => {
+    setAdmissionPage(page => Math.min(page, admissionPageCount));
+  }, [admissionPageCount]);
 
   const parseDocuments = (value: string) =>
     value.split(',').map(item => item.trim()).filter(Boolean).map(name => ({ name, status: 'received' }));
@@ -510,20 +531,38 @@ const StudentRecordsWorkspace: React.FC = () => {
 
                 {activeSection === 'admissions' && (
                   <>
-                    <SectionTitle icon={FilePlus2} title="Student Registration / Admission" description="Record applications, admission status, and submitted documents." />
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      <Field label="Application Number" value={admission.application_number} onChange={value => setAdmission(prev => ({ ...prev, application_number: value }))} />
-                      <Field label="Status" value={admission.status} onChange={value => setAdmission(prev => ({ ...prev, status: value }))} options={[
-                        { value: 'submitted', label: 'Submitted' }, { value: 'reviewing', label: 'Reviewing' }, { value: 'accepted', label: 'Accepted' }, { value: 'rejected', label: 'Rejected' }, { value: 'registered', label: 'Registered' },
-                      ]} />
-                      <Field label="Applicant First Name" value={admission.applicant_first_name} onChange={value => setAdmission(prev => ({ ...prev, applicant_first_name: value }))} />
-                      <Field label="Applicant Last Name" value={admission.applicant_last_name} onChange={value => setAdmission(prev => ({ ...prev, applicant_last_name: value }))} />
-                      <Field label="Grade Level" value={admission.grade_level} type="number" onChange={value => setAdmission(prev => ({ ...prev, grade_level: value }))} />
-                      <Field label="Documents" value={admission.documents} onChange={value => setAdmission(prev => ({ ...prev, documents: value }))} />
-                      <div className="md:col-span-2"><Field label="Notes" value={admission.notes} type="textarea" onChange={value => setAdmission(prev => ({ ...prev, notes: value }))} /></div>
-                    </div>
-                    <SaveButton disabled={!canEdit || saving} onClick={createAdmission} label="Save Admission" />
-                    <RecordList rows={selectedStudentRecords.admissions} empty="No admission records for this student." fields={['application_number', 'status', 'grade_level', 'submitted_at', 'notes']} />
+                    <SectionTitle icon={FilePlus2} title="Student Registration / Admission" description="Record applications, then review the full admissions register." />
+                    <Tabs value={admissionPane} onValueChange={setAdmissionPane} className="space-y-4">
+                      <TabsList className="grid w-full max-w-md grid-cols-2">
+                        <TabsTrigger value="form">Admission</TabsTrigger>
+                        <TabsTrigger value="list">Admissions List</TabsTrigger>
+                      </TabsList>
+                      <TabsContent value="form" className="space-y-5">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <Field label="Application Number" value={admission.application_number} onChange={value => setAdmission(prev => ({ ...prev, application_number: value }))} />
+                          <Field label="Status" value={admission.status} onChange={value => setAdmission(prev => ({ ...prev, status: value }))} options={[
+                            { value: 'submitted', label: 'Submitted' }, { value: 'reviewing', label: 'Reviewing' }, { value: 'accepted', label: 'Accepted' }, { value: 'rejected', label: 'Rejected' }, { value: 'registered', label: 'Registered' },
+                          ]} />
+                          <Field label="Applicant First Name" value={admission.applicant_first_name} onChange={value => setAdmission(prev => ({ ...prev, applicant_first_name: value }))} />
+                          <Field label="Applicant Last Name" value={admission.applicant_last_name} onChange={value => setAdmission(prev => ({ ...prev, applicant_last_name: value }))} />
+                          <Field label="Grade Level" value={admission.grade_level} type="number" onChange={value => setAdmission(prev => ({ ...prev, grade_level: value }))} />
+                          <Field label="Documents" value={admission.documents} onChange={value => setAdmission(prev => ({ ...prev, documents: value }))} />
+                          <div className="md:col-span-2"><Field label="Notes" value={admission.notes} type="textarea" onChange={value => setAdmission(prev => ({ ...prev, notes: value }))} /></div>
+                        </div>
+                        <SaveButton disabled={!canEdit || saving} onClick={createAdmission} label="Save Admission" />
+                        <RecordList rows={selectedStudentRecords.admissions} empty="No admission records for this student." fields={['application_number', 'status', 'grade_level', 'submitted_at', 'notes']} />
+                      </TabsContent>
+                      <TabsContent value="list">
+                        <AdmissionsZebraList
+                          rows={paginatedAdmissions}
+                          allRowsCount={admissionRows.length}
+                          page={admissionPage}
+                          pageCount={admissionPageCount}
+                          onPageChange={setAdmissionPage}
+                          students={students}
+                        />
+                      </TabsContent>
+                    </Tabs>
                   </>
                 )}
 
@@ -685,5 +724,104 @@ const RecordList = ({ rows, fields, empty }: { rows: SchoolRecord[]; fields: str
     )}
   </div>
 );
+
+const formatAdmissionDocuments = (documents: unknown) => {
+  if (!Array.isArray(documents)) return '';
+  return documents
+    .map(item => {
+      if (item && typeof item === 'object' && 'name' in item) {
+        return String((item as { name?: unknown }).name || '').trim();
+      }
+      return String(item || '').trim();
+    })
+    .filter(Boolean)
+    .join(', ');
+};
+
+const AdmissionsZebraList = ({
+  rows,
+  allRowsCount,
+  page,
+  pageCount,
+  onPageChange,
+  students,
+}: {
+  rows: SchoolRecord[];
+  allRowsCount: number;
+  page: number;
+  pageCount: number;
+  onPageChange: (page: number) => void;
+  students: Student[];
+}) => {
+  const studentById = useMemo(() => new Map(students.map(student => [student.id, student])), [students]);
+
+  return (
+    <div className="border border-gray-100 dark:border-gray-700 rounded-lg overflow-hidden">
+      <div className="px-4 py-3 border-b border-gray-100 dark:border-gray-700 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-200">Admissions Register</h4>
+          <p className="text-xs text-gray-400">{allRowsCount} total applications</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => onPageChange(Math.max(1, page - 1))}
+            disabled={page === 1}
+            className="p-2 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-500 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50 dark:hover:bg-gray-700"
+            aria-label="Previous admissions page"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+          <span className="text-xs text-gray-500 dark:text-gray-400">Page {page} of {pageCount}</span>
+          <button
+            onClick={() => onPageChange(Math.min(pageCount, page + 1))}
+            disabled={page === pageCount}
+            className="p-2 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-500 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50 dark:hover:bg-gray-700"
+            aria-label="Next admissions page"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+      {rows.length === 0 ? (
+        <p className="px-4 py-8 text-center text-sm text-gray-400">No admissions have been recorded.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 dark:bg-gray-900/40 text-[10px] uppercase tracking-wider text-gray-400">
+              <tr>
+                <th className="px-4 py-3 text-left font-medium">Application</th>
+                <th className="px-4 py-3 text-left font-medium">Applicant</th>
+                <th className="px-4 py-3 text-left font-medium">Grade</th>
+                <th className="px-4 py-3 text-left font-medium">Status</th>
+                <th className="px-4 py-3 text-left font-medium">Submitted</th>
+                <th className="px-4 py-3 text-left font-medium">Documents</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, index) => {
+                const linkedStudent = typeof row.student_id === 'string' ? studentById.get(row.student_id) : undefined;
+                const applicantName = `${row.applicant_first_name || linkedStudent?.first_name || ''} ${row.applicant_last_name || linkedStudent?.last_name || ''}`.trim();
+                return (
+                  <tr key={row.id || `${row.application_number}-${index}`} className={index % 2 === 0 ? 'bg-white dark:bg-gray-800' : 'bg-gray-50/70 dark:bg-gray-900/30'}>
+                    <td className="px-4 py-3 font-medium text-gray-800 dark:text-gray-100">{String(row.application_number || 'Pending')}</td>
+                    <td className="px-4 py-3 text-gray-600 dark:text-gray-300">{applicantName || 'Unknown applicant'}</td>
+                    <td className="px-4 py-3 text-gray-600 dark:text-gray-300">{String(row.grade_level || '')}</td>
+                    <td className="px-4 py-3">
+                      <span className="inline-flex rounded-full bg-indigo-50 dark:bg-indigo-900/20 px-2 py-1 text-[11px] font-medium text-indigo-600 dark:text-indigo-300">
+                        {String(row.status || 'submitted')}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-gray-600 dark:text-gray-300">{String(row.submitted_at || '').slice(0, 10)}</td>
+                    <td className="px-4 py-3 text-gray-600 dark:text-gray-300 max-w-xs truncate">{formatAdmissionDocuments(row.documents) || 'None'}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+};
 
 export default StudentRecordsWorkspace;

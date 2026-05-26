@@ -3,7 +3,7 @@ import { supabase } from '@/lib/supabase';
 import type { Message, Conversation, Attachment, Student, AiModelOption } from '@/types/chat';
 import type { JsonRecord } from '@/types/auth';
 
-type ActiveView = 'chat' | 'students' | 'records' | 'audit';
+type ActiveView = 'chat' | 'students' | 'records' | 'users' | 'audit';
 
 
 interface ChatContextType {
