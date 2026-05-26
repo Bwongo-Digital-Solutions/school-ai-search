@@ -120,6 +120,13 @@ const StudentManagement: React.FC = () => {
   const [reportCardYear, setReportCardYear] = useState(getDefaultAcademicYear());
   const [reportCardGradingCountry, setReportCardGradingCountry] = useState('international');
   const [reportCardAcademicLevel, setReportCardAcademicLevel] = useState('secondary');
+  const [reportCardTitle, setReportCardTitle] = useState('');
+  const [reportCardSchoolName, setReportCardSchoolName] = useState('');
+  const [reportCardSchoolTagline, setReportCardSchoolTagline] = useState('');
+  const [reportCardTeacherName, setReportCardTeacherName] = useState('');
+  const [reportCardHeadTeacherName, setReportCardHeadTeacherName] = useState('');
+  const [reportCardTeacherComment, setReportCardTeacherComment] = useState('');
+  const [reportCardNotes, setReportCardNotes] = useState('');
   const [isBuildingReport, setIsBuildingReport] = useState(false);
 
   const canEdit = isAdmin;
@@ -261,6 +268,13 @@ const StudentManagement: React.FC = () => {
     setReportCardYear(getDefaultAcademicYear());
     setReportCardAcademicLevel(inferAcademicLevel(student.grade_level));
     setReportCardGradingCountry('international');
+    setReportCardTitle('');
+    setReportCardSchoolName('');
+    setReportCardSchoolTagline('');
+    setReportCardTeacherName('');
+    setReportCardHeadTeacherName('');
+    setReportCardTeacherComment('');
+    setReportCardNotes(student.notes || '');
   };
 
   const handleReportCardDownload = async () => {
@@ -273,6 +287,21 @@ const StudentManagement: React.FC = () => {
         academicYear: reportCardYear,
         gradingCountry: reportCardGradingCountry,
         academicLevel: reportCardAcademicLevel,
+      });
+      const optionalReportFields = {
+        reportTitle: reportCardTitle,
+        schoolName: reportCardSchoolName,
+        schoolTagline: reportCardSchoolTagline,
+        teacherName: reportCardTeacherName,
+        headTeacherName: reportCardHeadTeacherName,
+        teacherComment: reportCardTeacherComment,
+        reportNotes: reportCardNotes,
+      };
+      Object.entries(optionalReportFields).forEach(([key, value]) => {
+        const trimmedValue = value.trim();
+        if (trimmedValue) {
+          params.set(key, trimmedValue);
+        }
       });
 
       const response = await fetch(buildApiUrl(`/api/report-cards/${reportCardStudent.id}.pdf?${params.toString()}`));
@@ -564,7 +593,7 @@ const StudentManagement: React.FC = () => {
       {/* Report Card Modal */}
       {reportCardStudent && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => !isBuildingReport && setReportCardStudent(null)}>
-          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl p-6 max-w-md w-full" onClick={e => e.stopPropagation()}>
+          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             <div className="flex items-center gap-3 mb-4">
               <div className="w-11 h-11 rounded-2xl bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center">
                 <FileText className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
@@ -578,6 +607,41 @@ const StudentManagement: React.FC = () => {
             </div>
 
             <div className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Report Name</label>
+                  <input
+                    type="text"
+                    value={reportCardTitle}
+                    onChange={e => setReportCardTitle(e.target.value)}
+                    placeholder="Student Report Card"
+                    className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">School Name</label>
+                  <input
+                    type="text"
+                    value={reportCardSchoolName}
+                    onChange={e => setReportCardSchoolName(e.target.value)}
+                    placeholder="Default school name"
+                    className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">School Tagline</label>
+                <input
+                  type="text"
+                  value={reportCardSchoolTagline}
+                  onChange={e => setReportCardSchoolTagline(e.target.value)}
+                  placeholder="Default school tagline"
+                  className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                />
+              </div>
+
               <div>
                 <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Term</label>
                 <select
@@ -630,9 +694,55 @@ const StudentManagement: React.FC = () => {
                 </div>
               </div>
 
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Class Teacher Name</label>
+                  <input
+                    type="text"
+                    value={reportCardTeacherName}
+                    onChange={e => setReportCardTeacherName(e.target.value)}
+                    placeholder="Class Teacher"
+                    className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Head Teacher Name</label>
+                  <input
+                    type="text"
+                    value={reportCardHeadTeacherName}
+                    onChange={e => setReportCardHeadTeacherName(e.target.value)}
+                    placeholder="Head of School"
+                    className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Teacher Comment</label>
+                <textarea
+                  value={reportCardTeacherComment}
+                  onChange={e => setReportCardTeacherComment(e.target.value)}
+                  rows={3}
+                  placeholder="Leave blank to generate a default comment from GPA and attendance."
+                  className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400 resize-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Report Notes</label>
+                <textarea
+                  value={reportCardNotes}
+                  onChange={e => setReportCardNotes(e.target.value)}
+                  rows={3}
+                  placeholder="Leave blank to use the student's saved notes."
+                  className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400 resize-none"
+                />
+              </div>
+
               <div className="bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-800 rounded-xl px-3 py-3">
                 <p className="text-xs text-indigo-700 dark:text-indigo-300 leading-relaxed">
-                  The PDF uses the selected country and academic level grading scale for subject results and overall grades.
+                  Blank fields use the school defaults, generated teacher comment, or the student's saved notes.
                 </p>
               </div>
             </div>

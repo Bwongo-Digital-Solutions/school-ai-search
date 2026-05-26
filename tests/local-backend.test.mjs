@@ -143,6 +143,13 @@ test('local backend supports auth, data queries, audit logging, and chat', async
         academicYear: '2026/2027',
         gradingCountry: 'uganda',
         academicLevel: 'secondary',
+        reportTitle: 'End of Term Progress Report',
+        schoolName: 'Bwongo Digital School',
+        schoolTagline: 'Learning with purpose',
+        teacherName: 'Grace Nambi',
+        headTeacherName: 'Head Teacher',
+        teacherComment: 'Emma has shown excellent leadership and steady academic discipline.',
+        reportNotes: 'Prepared after teacher review.',
       }),
     });
     assert.equal(pdf.status, 200);

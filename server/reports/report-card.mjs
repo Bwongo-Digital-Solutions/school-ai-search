@@ -48,6 +48,32 @@ const buildGeneralComment = (student, averageScore) => {
 };
 
 const formatAcademicYear = (value) => value || `${new Date().getFullYear()}/${new Date().getFullYear() + 1}`;
+const valueOrDefault = (value, fallback) => {
+  const normalized = String(value ?? '').trim();
+  return normalized || fallback;
+};
+
+const wrapText = (text, maxCharacters = 92) => {
+  const words = String(text || '').split(/\s+/).filter(Boolean);
+  const lines = [];
+  let currentLine = '';
+
+  for (const word of words) {
+    const nextLine = currentLine ? `${currentLine} ${word}` : word;
+    if (nextLine.length > maxCharacters && currentLine) {
+      lines.push(currentLine);
+      currentLine = word;
+    } else {
+      currentLine = nextLine;
+    }
+  }
+
+  if (currentLine) {
+    lines.push(currentLine);
+  }
+
+  return lines.length > 0 ? lines : [''];
+};
 
 export const buildReportCardPdf = async ({
   student,
@@ -55,6 +81,13 @@ export const buildReportCardPdf = async ({
   academicYear,
   gradingCountry,
   academicLevel,
+  reportTitle,
+  schoolName,
+  schoolTagline,
+  teacherName,
+  headTeacherName,
+  teacherComment,
+  reportNotes,
 }) => {
   const resolvedYear = formatAcademicYear(academicYear);
   const gradingScheme = resolveGradingScheme({
@@ -65,8 +98,14 @@ export const buildReportCardPdf = async ({
   const subjectResults = buildSubjectResults(student, term, resolvedYear, gradingScheme);
   const averageScore =
     subjectResults.reduce((total, result) => total + result.score, 0) / Math.max(subjectResults.length, 1);
-  const generalComment = buildGeneralComment(student, averageScore);
+  const generalComment = valueOrDefault(teacherComment, buildGeneralComment(student, averageScore));
   const overallGrade = gradeScore(Math.round(averageScore), gradingScheme).grade;
+  const resolvedSchoolName = valueOrDefault(schoolName, SCHOOL_NAME);
+  const resolvedSchoolTagline = valueOrDefault(schoolTagline, SCHOOL_TAGLINE);
+  const resolvedReportTitle = valueOrDefault(reportTitle, 'Student Report Card');
+  const resolvedReportNotes = valueOrDefault(reportNotes, student.notes || 'No additional notes recorded for this student.');
+  const resolvedTeacherName = valueOrDefault(teacherName, 'Class Teacher');
+  const resolvedHeadTeacherName = valueOrDefault(headTeacherName, 'Head of School');
 
   const pdfDoc = await PDFDocument.create();
   const page = pdfDoc.addPage([595.28, 841.89]);
@@ -94,11 +133,11 @@ export const buildReportCardPdf = async ({
     borderWidth: 1,
   });
 
-  drawText(SCHOOL_NAME, { x: 50, y, size: 22, bold: true, color: rgb(0.16, 0.27, 0.58) });
+  drawText(resolvedSchoolName, { x: 50, y, size: 22, bold: true, color: rgb(0.16, 0.27, 0.58) });
   y -= 22;
-  drawText(SCHOOL_TAGLINE, { x: 50, y, size: 10, color: rgb(0.35, 0.39, 0.45) });
+  drawText(resolvedSchoolTagline, { x: 50, y, size: 10, color: rgb(0.35, 0.39, 0.45) });
   y -= 26;
-  drawText('Student Report Card', { x: 50, y, size: 18, bold: true });
+  drawText(resolvedReportTitle, { x: 50, y, size: 18, bold: true });
   drawText(`${term}  •  Academic Year ${resolvedYear}`, { x: 360, y, size: 10, color: rgb(0.35, 0.39, 0.45) });
 
   y -= 24;
@@ -159,14 +198,20 @@ export const buildReportCardPdf = async ({
   y -= 34;
   drawText('Teacher Comment', { x: 50, y, size: 12, bold: true });
   y -= 18;
-  drawText(generalComment, { x: 50, y, size: 10 });
+  for (const line of wrapText(generalComment)) {
+    drawText(line, { x: 50, y, size: 10 });
+    y -= 14;
+  }
 
-  y -= 38;
+  y -= 20;
   drawText('Notes', { x: 50, y, size: 12, bold: true });
   y -= 18;
-  drawText(student.notes || 'No additional notes recorded for this student.', { x: 50, y, size: 10 });
+  for (const line of wrapText(resolvedReportNotes)) {
+    drawText(line, { x: 50, y, size: 10 });
+    y -= 14;
+  }
 
-  y -= 60;
+  y -= 42;
   page.drawLine({
     start: { x: 60, y },
     end: { x: 220, y },
@@ -179,8 +224,8 @@ export const buildReportCardPdf = async ({
     thickness: 1,
     color: rgb(0.5, 0.53, 0.58),
   });
-  drawText('Class Teacher', { x: 100, y: y - 16, size: 10, color: rgb(0.35, 0.39, 0.45) });
-  drawText('Head of School', { x: 360, y: y - 16, size: 10, color: rgb(0.35, 0.39, 0.45) });
+  drawText(resolvedTeacherName, { x: 88, y: y - 16, size: 10, color: rgb(0.35, 0.39, 0.45) });
+  drawText(resolvedHeadTeacherName, { x: 345, y: y - 16, size: 10, color: rgb(0.35, 0.39, 0.45) });
 
   return pdfDoc.save();
 };

@@ -842,12 +842,26 @@ const handleReportCardRequest = async (database, pathname, searchParams) => {
   const academicYear = searchParams.get('academicYear') || undefined;
   const gradingCountry = searchParams.get('gradingCountry') || undefined;
   const academicLevel = searchParams.get('academicLevel') || undefined;
+  const reportTitle = searchParams.get('reportTitle') || undefined;
+  const schoolName = searchParams.get('schoolName') || undefined;
+  const schoolTagline = searchParams.get('schoolTagline') || undefined;
+  const teacherName = searchParams.get('teacherName') || undefined;
+  const headTeacherName = searchParams.get('headTeacherName') || undefined;
+  const teacherComment = searchParams.get('teacherComment') || undefined;
+  const reportNotes = searchParams.get('reportNotes') || undefined;
   const pdfBytes = await buildReportCardPdf({
     student,
     term,
     academicYear,
     gradingCountry,
     academicLevel,
+    reportTitle,
+    schoolName,
+    schoolTagline,
+    teacherName,
+    headTeacherName,
+    teacherComment,
+    reportNotes,
   });
 
   return {
