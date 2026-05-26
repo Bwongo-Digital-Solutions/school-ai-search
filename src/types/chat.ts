@@ -1,9 +1,11 @@
+import type { JsonRecord } from './auth';
+
 export interface Message {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   attachments?: Attachment[];
-  metadata?: Record<string, any>;
+  metadata?: JsonRecord;
   createdAt: Date;
   isStreaming?: boolean;
 }
@@ -54,7 +56,7 @@ export interface Student {
   gpa: number;
   attendance_rate: number;
   blood_group?: string;
-  medical_record?: Record<string, any>;
+  medical_record?: JsonRecord;
   emergency_contact_name?: string;
   emergency_contact_phone?: string;
   emergency_contact_relation?: string;

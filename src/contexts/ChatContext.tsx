@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
 import type { Message, Conversation, Attachment, Student, AiModelOption } from '@/types/chat';
+import type { JsonRecord } from '@/types/auth';
 
 type ActiveView = 'chat' | 'students' | 'records' | 'audit';
 
@@ -27,6 +28,30 @@ interface ChatContextType {
   setSidebarOpen: (open: boolean) => void;
 }
 
+type ConversationRow = {
+  id: string;
+  title?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type MessageRow = {
+  id: string;
+  role: Message['role'];
+  content: string;
+  attachments?: Attachment[] | null;
+  metadata?: JsonRecord | null;
+  created_at: string;
+};
+
+type AiChatResponse = {
+  message?: string;
+  studentsFound?: number;
+  model?: string;
+  usage?: JsonRecord;
+  conversationId?: string;
+};
+
 const ChatContext = createContext<ChatContextType | undefined>(undefined);
 
 export const useChatContext = () => {
@@ -49,7 +74,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const refreshStudents = useCallback(async () => {
     try {
       const { data, error } = await supabase
-        .from('students')
+        .from<Student[]>('students')
         .select('*')
         .order('last_name');
       if (error) {
@@ -101,12 +126,12 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const loadConversations = useCallback(async () => {
     try {
       const { data, error } = await supabase
-        .from('conversations')
+        .from<ConversationRow[]>('conversations')
         .select('*')
         .order('updated_at', { ascending: false })
         .limit(20);
       if (error) throw error;
-      const convs: Conversation[] = (data || []).map((c: any) => ({
+      const convs: Conversation[] = (data || []).map((c) => ({
         id: c.id,
         title: c.title || 'Untitled',
         createdAt: new Date(c.created_at),
@@ -121,12 +146,12 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const loadConversation = useCallback(async (id: string) => {
     try {
       const { data, error } = await supabase
-        .from('messages')
+        .from<MessageRow[]>('messages')
         .select('*')
         .eq('conversation_id', id)
         .order('created_at', { ascending: true });
       if (error) throw error;
-      const msgs: Message[] = (data || []).map((m: any) => ({
+      const msgs: Message[] = (data || []).map((m) => ({
         id: m.id,
         role: m.role,
         content: m.content,
@@ -174,7 +199,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const imgAttachment = attachments.find(a => a.type === 'image');
         imageData = imgAttachment?.data || imgAttachment?.url;
       }
-      const { data, error } = await supabase.functions.invoke('ai-chat', {
+      const { data, error } = await supabase.functions.invoke<AiChatResponse>('ai-chat', {
         body: {
           message: content,
           conversationId: currentConversationId,
@@ -200,7 +225,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setCurrentConversationId(data.conversationId);
         loadConversations();
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Failed to send message:', err);
       const errorMessage: Message = {
         id: `err-${Date.now()}`,

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   Clock, User, Plus, Pencil, Trash2, RefreshCw,
   ChevronDown, ChevronUp, FileText, Shield
@@ -13,16 +13,16 @@ const AuditLogPanel: React.FC = () => {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [limit, setLimit] = useState(25);
 
-  const loadLogs = async () => {
+  const loadLogs = useCallback(async () => {
     setLoading(true);
     const data = await fetchAuditLog(limit);
     setLogs(data);
     setLoading(false);
-  };
+  }, [fetchAuditLog, limit]);
 
   useEffect(() => {
     loadLogs();
-  }, [limit]);
+  }, [loadLogs]);
 
   const getActionIcon = (action: string) => {
     switch (action) {

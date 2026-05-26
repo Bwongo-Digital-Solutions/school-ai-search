@@ -1,3 +1,13 @@
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+export type JsonRecord = Record<string, JsonValue>;
+
 export interface UserProfile {
   id: string;
   auth_email: string;
@@ -16,6 +26,6 @@ export interface AuditLogEntry {
   entity_type: string;
   entity_id?: string;
   entity_name?: string;
-  changes?: Record<string, any>;
+  changes?: JsonRecord;
   created_at: string;
 }

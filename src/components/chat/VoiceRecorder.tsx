@@ -7,6 +7,11 @@ interface VoiceRecorderProps {
   onRecordingStateChange?: (isRecording: boolean) => void;
 }
 
+type VoiceToTextResponse = {
+  text?: string;
+  warning?: string;
+};
+
 const VoiceRecorder: React.FC<VoiceRecorderProps> = ({ onTranscription, onRecordingStateChange }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
@@ -17,6 +22,38 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({ onTranscription, onRecord
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animFrameRef = useRef<number | null>(null);
+
+  const transcribeAudio = useCallback(async (blob: Blob) => {
+    setIsTranscribing(true);
+    try {
+      // Convert blob to base64
+      const reader = new FileReader();
+      const base64Promise = new Promise<string>((resolve) => {
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.readAsDataURL(blob);
+      });
+      const base64Data = await base64Promise;
+
+      const { data, error } = await supabase.functions.invoke<VoiceToTextResponse>('voice-to-text', {
+        body: { audioData: base64Data },
+      });
+
+      if (error) throw error;
+
+      if (data?.text) {
+        onTranscription(data.text);
+      } else if (data?.warning) {
+        alert(data.warning);
+      } else {
+        alert('Could not transcribe audio. Please try again or type your message.');
+      }
+    } catch (err) {
+      console.error('Transcription failed:', err);
+      alert('Voice transcription failed. Please try again.');
+    } finally {
+      setIsTranscribing(false);
+    }
+  }, [onTranscription]);
 
   const startRecording = useCallback(async () => {
     try {
@@ -72,7 +109,7 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({ onTranscription, onRecord
       console.error('Failed to start recording:', err);
       alert('Could not access microphone. Please check permissions.');
     }
-  }, [onRecordingStateChange]);
+  }, [onRecordingStateChange, transcribeAudio]);
 
   const stopRecording = useCallback(() => {
     if (mediaRecorderRef.current && isRecording) {
@@ -85,38 +122,6 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({ onTranscription, onRecord
       setAudioLevels(new Array(20).fill(0));
     }
   }, [isRecording, onRecordingStateChange]);
-
-  const transcribeAudio = async (blob: Blob) => {
-    setIsTranscribing(true);
-    try {
-      // Convert blob to base64
-      const reader = new FileReader();
-      const base64Promise = new Promise<string>((resolve) => {
-        reader.onloadend = () => resolve(reader.result as string);
-        reader.readAsDataURL(blob);
-      });
-      const base64Data = await base64Promise;
-
-      const { data, error } = await supabase.functions.invoke('voice-to-text', {
-        body: { audioData: base64Data },
-      });
-
-      if (error) throw error;
-
-      if (data?.text) {
-        onTranscription(data.text);
-      } else if (data?.warning) {
-        alert(data.warning);
-      } else {
-        alert('Could not transcribe audio. Please try again or type your message.');
-      }
-    } catch (err) {
-      console.error('Transcription failed:', err);
-      alert('Voice transcription failed. Please try again.');
-    } finally {
-      setIsTranscribing(false);
-    }
-  };
 
   useEffect(() => {
     return () => {
