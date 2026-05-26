@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import {
   Menu, Download, Settings, HelpCircle,
   Moon, Sun, X, ChevronDown, LogOut, User, Shield,
-  MessageSquare, Users, Clock
+  MessageSquare, Users, Clock, ClipboardList
 } from 'lucide-react';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useAuth } from '@/contexts/AuthContext';
@@ -119,6 +119,16 @@ const Header: React.FC = () => {
               }`}
             >
               <Users className="w-3.5 h-3.5" /> Students
+            </button>
+            <button
+              onClick={() => setActiveView('records')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                activeView === 'records'
+                  ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              <ClipboardList className="w-3.5 h-3.5" /> Records
             </button>
             {isAdmin && (
               <button
@@ -283,6 +293,12 @@ const Header: React.FC = () => {
                         className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
                       >
                         <Users className="w-3.5 h-3.5" /> Student Management
+                      </button>
+                      <button
+                        onClick={() => { setActiveView('records'); setShowUserMenu(false); }}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                      >
+                        <ClipboardList className="w-3.5 h-3.5" /> Student Records
                       </button>
                       {isAdmin && (
                         <button

@@ -4,6 +4,7 @@ import ConversationSidebar from './chat/ConversationSidebar';
 import ChatWindow from './chat/ChatWindow';
 import StudentManagement from './chat/StudentManagement';
 import AuditLogPanel from './chat/AuditLogPanel';
+import StudentRecordsWorkspace from './chat/StudentRecordsWorkspace';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { Shield, Clock, Users as UsersIcon } from 'lucide-react';
@@ -59,6 +60,8 @@ const AppLayout: React.FC = () => {
         return <ChatWindow />;
       case 'students':
         return <StudentManagement />;
+      case 'records':
+        return <StudentRecordsWorkspace />;
       case 'audit':
         return <AuditView />;
       default:

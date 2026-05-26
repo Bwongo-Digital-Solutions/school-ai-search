@@ -205,6 +205,48 @@ CREATE TABLE IF NOT EXISTS gradebook_entries (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS discipline_records (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  incident_date DATE NOT NULL,
+  category TEXT NOT NULL,
+  severity TEXT NOT NULL DEFAULT 'minor',
+  description TEXT NOT NULL,
+  action_taken TEXT,
+  reported_by TEXT,
+  guardian_notified BOOLEAN NOT NULL DEFAULT FALSE,
+  status TEXT NOT NULL DEFAULT 'open',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS student_promotions (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  from_grade_level INTEGER NOT NULL,
+  from_class_section TEXT,
+  to_grade_level INTEGER NOT NULL,
+  to_class_section TEXT,
+  academic_year TEXT NOT NULL,
+  effective_date DATE NOT NULL,
+  decision TEXT NOT NULL DEFAULT 'promoted',
+  notes TEXT NOT NULL DEFAULT '',
+  approved_by TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS student_transfers (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  movement_type TEXT NOT NULL CHECK (movement_type IN ('transfer', 'withdrawal')),
+  effective_date DATE NOT NULL,
+  destination_school TEXT,
+  reason TEXT NOT NULL DEFAULT '',
+  documents JSONB NOT NULL DEFAULT '[]'::jsonb,
+  status TEXT NOT NULL DEFAULT 'pending',
+  processed_by TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS fee_structures (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -408,6 +450,9 @@ CREATE INDEX IF NOT EXISTS idx_admissions_status ON admissions(status);
 CREATE INDEX IF NOT EXISTS idx_timetables_class_term ON timetables(class_id, academic_year, term);
 CREATE INDEX IF NOT EXISTS idx_attendance_student_date ON attendance_records(student_id, attendance_date);
 CREATE INDEX IF NOT EXISTS idx_gradebook_student_exam ON gradebook_entries(student_id, exam_id);
+CREATE INDEX IF NOT EXISTS idx_discipline_student_date ON discipline_records(student_id, incident_date);
+CREATE INDEX IF NOT EXISTS idx_promotions_student_year ON student_promotions(student_id, academic_year);
+CREATE INDEX IF NOT EXISTS idx_transfers_student_type ON student_transfers(student_id, movement_type);
 CREATE INDEX IF NOT EXISTS idx_invoices_student_status ON invoices(student_id, status);
 CREATE INDEX IF NOT EXISTS idx_payment_transactions_student_status ON payment_transactions(student_id, status);
 CREATE INDEX IF NOT EXISTS idx_payment_transactions_provider_reference ON payment_transactions(provider_reference);

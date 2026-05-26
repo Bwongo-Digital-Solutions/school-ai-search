@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useCallback, useRef, useEff
 import { supabase } from '@/lib/supabase';
 import type { Message, Conversation, Attachment, Student, AiModelOption } from '@/types/chat';
 
-type ActiveView = 'chat' | 'students' | 'audit';
+type ActiveView = 'chat' | 'students' | 'records' | 'audit';
 
 
 interface ChatContextType {

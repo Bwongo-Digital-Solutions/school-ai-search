@@ -11,6 +11,7 @@ School AI Search is a school administration and student-search application. It c
 - Manages academic setup for classes, sections, subjects, teachers, allocations, and timetables.
 - Records daily attendance and parent alert delivery state.
 - Manages exams, exam schedules, gradebook entries, report cards, and transcripts/progress data.
+- Records discipline incidents, promotion/graduation decisions, transfers, and withdrawals.
 - Supports bursar-office records for fee structures, invoices, payments, and receipts.
 - Supports portal accounts, notices, and internal school messages.
 - Tracks ancillary services: library loans, transport routes, hostel rooms, and store inventory.
@@ -64,6 +65,7 @@ The requested school-management areas are represented as backend database resour
 | Academic & Curriculum Management | `classes`, `subjects_catalog`, `teachers`, `subject_allocations`, and `timetables`. |
 | Attendance Tracking | `attendance_records` and `attendance_alerts`. |
 | Examination & Gradebooks | `exams`, `exam_schedules`, `gradebook_entries`, and PDF report-card generation. |
+| Student Conduct & Lifecycle | `discipline_records`, `student_promotions`, and `student_transfers` for behavior, promotion/graduation, transfer, and withdrawal history. |
 | Financial Management | `fee_structures`, `invoices`, `payments`, and `receipts`. |
 | Communication & Portal Access | `portal_accounts`, `notices`, and `internal_messages`. |
 | Ancillary Services | `library_books`, `library_loans`, `transport_routes`, `transport_assignments`, `hostel_rooms`, `hostel_assignments`, `inventory_items`, and `inventory_transactions`. |
@@ -91,6 +93,9 @@ Schema creation is handled by `server/db/schema.mjs`.
 | `exams` | Internal or external assessment definitions. |
 | `exam_schedules` | Assessment datesheets by class, subject, room, and time. |
 | `gradebook_entries` | Scores, grades, remarks, rankings, and assessment results. |
+| `discipline_records` | Student discipline incidents, severity, action taken, notification state, and resolution status. |
+| `student_promotions` | Promotion, repetition, and graduation decisions with source/destination class details. |
+| `student_transfers` | Transfer and withdrawal records with destination, reason, documents, and processing status. |
 | `fee_structures` | Tuition and service fee tiers by grade, student type, year, and term. |
 | `payments` | Tuition, transport, lab, or other payment records. |
 | `invoices` | Student invoices with balances and line items. |

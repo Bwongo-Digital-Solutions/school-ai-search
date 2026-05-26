@@ -437,6 +437,64 @@ test('local backend exposes full school management modules through the db API', 
     });
     assert.equal(gradebook.body.data.grade, 'A');
 
+    const discipline = await insert('discipline_records', {
+      id: 'discipline-001',
+      student_id: 'student-001',
+      incident_date: '2026-05-02',
+      category: 'Conduct',
+      severity: 'moderate',
+      description: 'Repeated classroom disruption.',
+      action_taken: 'Guardian meeting scheduled.',
+      reported_by: 'teacher-001',
+      guardian_notified: true,
+      status: 'open',
+    });
+    assert.equal(discipline.status, 200);
+    assert.equal(discipline.body.data.severity, 'moderate');
+
+    const promotion = await insert('student_promotions', {
+      id: 'promotion-001',
+      student_id: 'student-001',
+      from_grade_level: 10,
+      from_class_section: 'A',
+      to_grade_level: 11,
+      to_class_section: 'B',
+      academic_year: '2026/2027',
+      effective_date: '2026-12-01',
+      decision: 'promoted',
+      notes: 'Promoted after meeting academic requirements.',
+      approved_by: 'Local Admin',
+    });
+    assert.equal(promotion.status, 200);
+    assert.equal(promotion.body.data.to_grade_level, 11);
+
+    const transfer = await insert('student_transfers', {
+      id: 'transfer-001',
+      student_id: 'student-001',
+      movement_type: 'transfer',
+      effective_date: '2027-01-10',
+      destination_school: 'Partner Secondary School',
+      reason: 'Family relocated.',
+      documents: [{ name: 'transfer-letter.pdf', status: 'issued' }],
+      status: 'completed',
+      processed_by: 'Local Admin',
+    });
+    assert.equal(transfer.status, 200);
+    assert.equal(transfer.body.data.documents[0].name, 'transfer-letter.pdf');
+
+    const withdrawal = await insert('student_transfers', {
+      id: 'withdrawal-001',
+      student_id: 'student-001',
+      movement_type: 'withdrawal',
+      effective_date: '2027-02-01',
+      reason: 'Guardian requested withdrawal.',
+      documents: [{ name: 'withdrawal-request.pdf', status: 'received' }],
+      status: 'completed',
+      processed_by: 'Local Admin',
+    });
+    assert.equal(withdrawal.status, 200);
+    assert.equal(withdrawal.body.data.movement_type, 'withdrawal');
+
     const feeStructure = await insert('fee_structures', {
       id: 'fee-structure-001',
       name: 'Grade 10 Day Tuition',

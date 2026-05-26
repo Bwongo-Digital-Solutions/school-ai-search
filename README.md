@@ -25,6 +25,7 @@ By default:
 ## Features
 
 - student management with admin edit/delete and teacher view-only access
+- student registration/admission, attendance, academic history, discipline, class allocation, promotion/graduation, transfer, and withdrawal records
 - audit logging
 - conversation and message persistence
 - local AI-style student search responses
