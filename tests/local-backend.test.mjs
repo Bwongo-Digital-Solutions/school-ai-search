@@ -764,3 +764,94 @@ test('ai search can use a selected OpenAI-compatible model provider', async () =
     await cleanup();
   }
 });
+
+test('ai search can use a selected Ollama model provider', async () => {
+  const originalBaseUrl = process.env.OLLAMA_BASE_URL;
+  const originalModel = process.env.OLLAMA_MODEL;
+  process.env.OLLAMA_BASE_URL = 'http://ollama.test:11434';
+  process.env.OLLAMA_MODEL = 'llama3.2:3b';
+
+  const providerCalls = [];
+  const httpClient = async (url, options) => {
+    providerCalls.push({ url, options });
+    return new Response(
+      JSON.stringify({
+        message: {
+          role: 'assistant',
+          content: '## Ollama Search Result\n\nEmma Johnson matches the patient search request.',
+        },
+        prompt_eval_count: 30,
+        eval_count: 14,
+      }),
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      },
+    );
+  };
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const result = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+      message: 'Tell me about Emma Johnson',
+      conversationId: null,
+      modelId: 'ollama-default',
+    });
+
+    assert.equal(result.status, 200);
+    assert.match(result.body.data.message, /Ollama Search Result/);
+    assert.equal(result.body.data.model.provider, 'ollama');
+    assert.equal(result.body.data.usage.eval_count, 14);
+    assert.equal(providerCalls.length, 1);
+    assert.equal(providerCalls[0].url, 'http://ollama.test:11434/api/chat');
+
+    const body = JSON.parse(providerCalls[0].options.body);
+    assert.equal(body.model, 'llama3.2:3b');
+    assert.equal(body.stream, false);
+    assert.ok(body.messages.some((message) => message.role === 'system' && message.content.includes('Student records')));
+  } finally {
+    if (originalBaseUrl === undefined) {
+      delete process.env.OLLAMA_BASE_URL;
+    } else {
+      process.env.OLLAMA_BASE_URL = originalBaseUrl;
+    }
+    if (originalModel === undefined) {
+      delete process.env.OLLAMA_MODEL;
+    } else {
+      process.env.OLLAMA_MODEL = originalModel;
+    }
+    await cleanup();
+  }
+});
+
+test('ai search reports actionable Ollama connection errors', async () => {
+  const originalBaseUrl = process.env.OLLAMA_BASE_URL;
+  process.env.OLLAMA_BASE_URL = 'http://offline-ollama.test:11434';
+
+  const httpClient = async () => {
+    throw new TypeError('fetch failed');
+  };
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const result = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+      message: 'Tell me about Emma Johnson',
+      conversationId: null,
+      modelId: 'ollama-default',
+    });
+
+    assert.equal(result.status, 200);
+    assert.match(result.body.data.message, /Could not reach Ollama at http:\/\/offline-ollama\.test:11434/);
+    assert.match(result.body.data.message, /pull the configured model/);
+    assert.equal(result.body.data.model.provider, 'ollama');
+  } finally {
+    if (originalBaseUrl === undefined) {
+      delete process.env.OLLAMA_BASE_URL;
+    } else {
+      process.env.OLLAMA_BASE_URL = originalBaseUrl;
+    }
+    await cleanup();
+  }
+});

@@ -22,6 +22,8 @@ services:
       dockerfile: Dockerfile
     container_name: school-ai-search
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy

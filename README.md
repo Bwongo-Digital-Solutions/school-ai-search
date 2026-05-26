@@ -53,6 +53,96 @@ npm run start
 npm run test:backend
 ```
 
+## Ollama Setup
+
+SchoolBot can use a local Ollama model for chat searches. The backend must be able to reach Ollama; the browser does not call Ollama directly.
+
+1. Install and start Ollama on the machine that will run the model.
+
+```bash
+ollama serve
+```
+
+2. Pull the model you want SchoolBot to use.
+
+```bash
+ollama pull llama3.2:3b
+```
+
+3. Configure the backend environment.
+
+For a non-Docker run:
+
+```bash
+export OLLAMA_BASE_URL=http://127.0.0.1:11434
+export OLLAMA_MODEL=llama3.2:3b
+export AI_DEFAULT_MODEL_ID=ollama-default
+npm run dev
+```
+
+For Docker Compose, put these values in your `.env.development` or `.env.production` file:
+
+```bash
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+OLLAMA_MODEL=llama3.2:3b
+AI_DEFAULT_MODEL_ID=ollama-default
+```
+
+The Compose files map `host.docker.internal` to the host gateway, which is needed on Linux. If Ollama is running as another Compose service, use that service name instead, for example `OLLAMA_BASE_URL=http://ollama:11434`.
+
+If Ollama is running on a remote server, point the backend to that server instead:
+
+```bash
+OLLAMA_BASE_URL=http://REMOTE_SERVER_IP_OR_DNS:11434
+OLLAMA_MODEL=llama3.2:3b
+AI_DEFAULT_MODEL_ID=ollama-default
+```
+
+On the remote server, Ollama must listen on a network interface that the SchoolBot backend can reach. A common Linux systemd override is:
+
+```bash
+sudo systemctl edit ollama
+```
+
+Then add:
+
+```ini
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0:11434"
+```
+
+Restart Ollama after changing it:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+```
+
+Only expose Ollama to trusted networks, a VPN, or a reverse proxy with authentication. Ollama's native HTTP API is not meant to be left open to the public internet.
+
+4. Verify Ollama is reachable before using the model picker.
+
+From the host:
+
+```bash
+curl http://127.0.0.1:11434/api/tags
+```
+
+From the app container:
+
+```bash
+docker compose -f docker-compose.dev.yml exec app-dev wget -qO- http://host.docker.internal:11434/api/tags
+```
+
+For a remote server, replace the URL:
+
+```bash
+curl http://REMOTE_SERVER_IP_OR_DNS:11434/api/tags
+docker compose -f docker-compose.dev.yml exec app-dev wget -qO- http://REMOTE_SERVER_IP_OR_DNS:11434/api/tags
+```
+
+If the app says `Could not reach Ollama`, check that `ollama serve` is running, the configured model was pulled, and `OLLAMA_BASE_URL` is reachable from the backend container or process.
+
 ## Docker Development
 
 Live-reload development stack:

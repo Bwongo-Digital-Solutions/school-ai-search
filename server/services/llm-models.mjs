@@ -1,4 +1,4 @@
-const DEFAULT_MODEL_CATALOG = [
+const createDefaultModelCatalog = () => [
   {
     id: 'local-rules',
     label: 'Local Rules',
@@ -133,7 +133,7 @@ const publicModel = (model) => ({
 
 export const getModelCatalog = () => {
   const override = parseCatalogOverride();
-  const catalog = override || DEFAULT_MODEL_CATALOG;
+  const catalog = override || createDefaultModelCatalog();
   return catalog.map((model) => ({
     ...model,
     id: model.id || `${model.provider}:${model.model}`,
@@ -216,6 +216,23 @@ const postJson = async (httpClient, url, { headers = {}, body }) => {
   }
 
   return data;
+};
+
+const describeOllamaConnectionError = (error) => {
+  const baseUrl = process.env.OLLAMA_BASE_URL || PROVIDER_ENV.ollama.defaultBaseUrl;
+  const model = process.env.OLLAMA_MODEL || 'qwen3.5:2b';
+  const detail = error instanceof Error && error.message ? error.message : 'Unknown connection error';
+
+  return [
+    `Could not reach Ollama at ${baseUrl}.`,
+    `Current Ollama model setting: ${model}.`,
+    '',
+    `Provider detail: ${detail}`,
+    '',
+    'Start Ollama, pull the configured model, and set OLLAMA_BASE_URL to the URL reachable from the backend.',
+    'For a non-Docker backend use http://127.0.0.1:11434.',
+    'For the Docker backend use http://host.docker.internal:11434, or http://ollama:11434 if Ollama runs as a Compose service.',
+  ].join('\n');
 };
 
 const callOpenAiCompatible = async ({ model, messages, httpClient }) => {
@@ -320,16 +337,21 @@ const callGoogle = async ({ model, messages, httpClient }) => {
 
 const callOllama = async ({ model, messages, httpClient }) => {
   const baseUrl = process.env.OLLAMA_BASE_URL || PROVIDER_ENV.ollama.defaultBaseUrl;
-  const data = await postJson(httpClient, `${baseUrl.replace(/\/$/, '')}/api/chat`, {
-    body: {
-      model: model.model,
-      stream: false,
-      messages,
-      options: {
-        temperature: Number(process.env.AI_TEMPERATURE || 0.2),
+  let data;
+  try {
+    data = await postJson(httpClient, `${baseUrl.replace(/\/$/, '')}/api/chat`, {
+      body: {
+        model: model.model,
+        stream: false,
+        messages,
+        options: {
+          temperature: Number(process.env.AI_TEMPERATURE || 0.2),
+        },
       },
-    },
-  });
+    });
+  } catch (error) {
+    throw new Error(describeOllamaConnectionError(error));
+  }
 
   return {
     message: data?.message?.content || '',

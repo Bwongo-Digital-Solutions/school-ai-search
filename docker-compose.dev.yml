@@ -21,6 +21,8 @@ services:
     image: node:20-alpine
     container_name: school-ai-search-dev
     working_dir: /app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy
