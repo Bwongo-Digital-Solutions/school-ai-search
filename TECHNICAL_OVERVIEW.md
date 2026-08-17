@@ -48,6 +48,7 @@ The local backend lives in `server/local-backend.mjs`.
 | `/api/health` | `GET` | Health check with student count. |
 | `/api/db` | `POST` | Generic database operations for allowed tables. |
 | `/api/functions/auth` | `POST` | Sign up, sign in, audit-log write, and audit-log read actions. |
+| `/api/functions/fee-status` | `POST` | Per-student school fees payment status only; the sole student-facing endpoint the `support_staff` role reads. |
 | `/api/functions/ai-chat` | `POST` | Creates chat messages and returns a student-search response. |
 | `/api/functions/ai-models` | `POST` | Lists selectable AI search models and provider configuration state. |
 | `/api/functions/voice-to-text` | `POST` | Placeholder voice transcription response. |
@@ -78,7 +79,7 @@ Schema creation is handled by `server/db/schema.mjs`.
 | Table | Purpose |
 | --- | --- |
 | `students` | Student profiles, GPA, attendance, subjects, and notes. |
-| `users` | Local auth users with roles and password hashes. |
+| `users` | Local auth users with password hashes and a role of `admin`, `teacher`, or `support_staff` (non-teaching staff). |
 | `conversations` | Chat conversation metadata. |
 | `messages` | User and assistant chat messages. |
 | `audit_logs` | Administrative action history. |

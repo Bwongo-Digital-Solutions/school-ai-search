@@ -1,16 +1,17 @@
 import React, { useState } from 'react';
 import {
   Menu, Download, Settings, HelpCircle,
-  Moon, Sun, X, ChevronDown, LogOut, User, Shield,
-  MessageSquare, Users, Clock, ClipboardList, UserCog
+  Moon, Sun, X, ChevronDown, LogOut, User, Shield, HardHat,
+  MessageSquare, Users, Clock, ClipboardList, UserCog, Wallet
 } from 'lucide-react';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useAuth } from '@/contexts/AuthContext';
+import { getRoleLabel, getRoleShortLabel } from '@/lib/roles';
 import AuthModal from './AuthModal';
 
 const Header: React.FC = () => {
   const { toggleSidebar, messages, activeView, setActiveView } = useChatContext();
-  const { user, isAuthenticated, isAdmin, signOut } = useAuth();
+  const { user, isAuthenticated, isAdmin, isSupportStaff, signOut } = useAuth();
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
@@ -100,35 +101,51 @@ const Header: React.FC = () => {
 
           {/* View Toggle */}
           <div className="flex items-center bg-gray-100 dark:bg-gray-800 rounded-lg p-0.5 ml-2">
+            {!isSupportStaff && (
+              <button
+                onClick={() => setActiveView('chat')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                  activeView === 'chat'
+                    ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <MessageSquare className="w-3.5 h-3.5" /> Chat
+              </button>
+            )}
+            {!isSupportStaff && (
+              <button
+                onClick={() => setActiveView('students')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                  activeView === 'students'
+                    ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <Users className="w-3.5 h-3.5" /> Students
+              </button>
+            )}
+            {!isSupportStaff && (
+              <button
+                onClick={() => setActiveView('records')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                  activeView === 'records'
+                    ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <ClipboardList className="w-3.5 h-3.5" /> Records
+              </button>
+            )}
             <button
-              onClick={() => setActiveView('chat')}
+              onClick={() => setActiveView('fees')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                activeView === 'chat'
+                activeView === 'fees'
                   ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
                   : 'text-gray-500 hover:text-gray-700'
               }`}
             >
-              <MessageSquare className="w-3.5 h-3.5" /> Chat
-            </button>
-            <button
-              onClick={() => setActiveView('students')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                activeView === 'students'
-                  ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
-                  : 'text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              <Users className="w-3.5 h-3.5" /> Students
-            </button>
-            <button
-              onClick={() => setActiveView('records')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                activeView === 'records'
-                  ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
-                  : 'text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              <ClipboardList className="w-3.5 h-3.5" /> Records
+              <Wallet className="w-3.5 h-3.5" /> Fees
             </button>
             {isAdmin && (
               <button
@@ -225,6 +242,13 @@ const Header: React.FC = () => {
                     </button>
                   </div>
                   <div className="space-y-2.5 text-xs text-gray-600 dark:text-gray-400">
+                    {isSupportStaff ? (
+                      <div className="flex gap-2">
+                        <span className="w-5 h-5 rounded bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center flex-shrink-0 text-indigo-600 font-bold text-[10px]">1</span>
+                        <span>Your account shows school fees payment status only. Ask an administrator for anything else about a student.</span>
+                      </div>
+                    ) : (
+                      <>
                     <div className="flex gap-2">
                       <span className="w-5 h-5 rounded bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center flex-shrink-0 text-indigo-600 font-bold text-[10px]">1</span>
                       <span>Type any question about students in the chat box</span>
@@ -243,8 +267,10 @@ const Header: React.FC = () => {
                     </div>
                     <div className="flex gap-2">
                       <span className="w-5 h-5 rounded bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center flex-shrink-0 text-indigo-600 font-bold text-[10px]">5</span>
-                      <span>Admins can use Staff to define teacher and administrator roles</span>
+                      <span>Admins can use Staff to assign administrator, teacher, and support staff roles</span>
                     </div>
+                      </>
+                    )}
                   </div>
                 </div>
               </>
@@ -262,7 +288,9 @@ const Header: React.FC = () => {
                   <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
                     isAdmin
                       ? 'bg-gradient-to-br from-purple-500 to-indigo-600'
-                      : 'bg-gradient-to-br from-blue-500 to-cyan-600'
+                      : isSupportStaff
+                        ? 'bg-gradient-to-br from-emerald-500 to-teal-600'
+                        : 'bg-gradient-to-br from-blue-500 to-cyan-600'
                   }`}>
                     <span className="text-white text-xs font-bold">{getUserInitials()}</span>
                   </div>
@@ -276,7 +304,7 @@ const Header: React.FC = () => {
                           <Shield className="w-2.5 h-2.5 text-purple-500" /> Admin
                         </span>
                       ) : (
-                        <span>Teacher</span>
+                        <span>{getRoleShortLabel(user.role)}</span>
                       )}
                     </p>
                   </div>
@@ -293,24 +321,36 @@ const Header: React.FC = () => {
                           <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium ${
                             isAdmin
                               ? 'bg-purple-100 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400'
-                              : 'bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400'
+                              : isSupportStaff
+                                ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400'
+                                : 'bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400'
                           }`}>
-                            {isAdmin ? <Shield className="w-2.5 h-2.5" /> : <User className="w-2.5 h-2.5" />}
-                            {isAdmin ? 'Administrator' : 'Teacher'}
+                            {isAdmin ? <Shield className="w-2.5 h-2.5" /> : isSupportStaff ? <HardHat className="w-2.5 h-2.5" /> : <User className="w-2.5 h-2.5" />}
+                            {getRoleLabel(user.role)}
                           </span>
                         </div>
                       </div>
+                      {!isSupportStaff && (
+                        <button
+                          onClick={() => { setActiveView('students'); setShowUserMenu(false); }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                        >
+                          <Users className="w-3.5 h-3.5" /> Student Management
+                        </button>
+                      )}
+                      {!isSupportStaff && (
+                        <button
+                          onClick={() => { setActiveView('records'); setShowUserMenu(false); }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                        >
+                          <ClipboardList className="w-3.5 h-3.5" /> Student Records
+                        </button>
+                      )}
                       <button
-                        onClick={() => { setActiveView('students'); setShowUserMenu(false); }}
+                        onClick={() => { setActiveView('fees'); setShowUserMenu(false); }}
                         className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
                       >
-                        <Users className="w-3.5 h-3.5" /> Student Management
-                      </button>
-                      <button
-                        onClick={() => { setActiveView('records'); setShowUserMenu(false); }}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
-                      >
-                        <ClipboardList className="w-3.5 h-3.5" /> Student Records
+                        <Wallet className="w-3.5 h-3.5" /> School Fees Status
                       </button>
                       {isAdmin && (
                         <button

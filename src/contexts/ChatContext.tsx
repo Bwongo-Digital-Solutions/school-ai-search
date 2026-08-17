@@ -1,9 +1,10 @@
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
+import { useAuth } from '@/contexts/AuthContext';
 import type { Message, Conversation, Attachment, Student, AiModelOption } from '@/types/chat';
 import type { JsonRecord } from '@/types/auth';
 
-type ActiveView = 'chat' | 'students' | 'records' | 'users' | 'audit';
+type ActiveView = 'chat' | 'students' | 'records' | 'users' | 'audit' | 'fees';
 
 
 interface ChatContextType {
@@ -61,6 +62,9 @@ export const useChatContext = () => {
 };
 
 export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  // Support staff (non-teaching) may only see school fees payment status, so the full
+  // student dataset and the AI assistant are never loaded for them.
+  const { isSupportStaff } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
@@ -72,6 +76,10 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [activeView, setActiveView] = useState<ActiveView>('chat');
 
   const refreshStudents = useCallback(async () => {
+    if (isSupportStaff) {
+      setStudents([]);
+      return;
+    }
     try {
       const { data, error } = await supabase
         .from<Student[]>('students')
@@ -85,11 +93,16 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch (err) {
       console.error('Failed to load students:', err);
     }
-  }, []);
+  }, [isSupportStaff]);
 
   useEffect(() => {
     refreshStudents();
   }, [refreshStudents]);
+
+  // Support staff have exactly one view; keep them on it even if another view was left active.
+  useEffect(() => {
+    if (isSupportStaff) setActiveView('fees');
+  }, [isSupportStaff]);
 
   useEffect(() => {
     const loadAiModels = async () => {
@@ -184,6 +197,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [currentConversationId, startNewConversation]);
 
   const sendMessage = useCallback(async (content: string, attachments?: Attachment[]) => {
+    if (isSupportStaff) return;
     const userMessage: Message = {
       id: `temp-${Date.now()}`,
       role: 'user',
@@ -237,7 +251,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } finally {
       setIsLoading(false);
     }
-  }, [currentConversationId, loadConversations, students, selectedModelId]);
+  }, [currentConversationId, loadConversations, students, selectedModelId, isSupportStaff]);
 
   const toggleSidebar = useCallback(() => {
     setSidebarOpen(prev => !prev);

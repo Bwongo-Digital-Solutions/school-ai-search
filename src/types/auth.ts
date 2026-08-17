@@ -8,11 +8,13 @@ export type JsonValue =
 
 export type JsonRecord = Record<string, JsonValue>;
 
+export type UserRole = 'admin' | 'teacher' | 'support_staff';
+
 export interface UserProfile {
   id: string;
   auth_email: string;
   display_name: string;
-  role: 'admin' | 'teacher';
+  role: UserRole;
   avatar_url?: string;
   created_at: string;
 }

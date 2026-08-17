@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
-import type { UserProfile, AuditLogEntry, JsonRecord } from '@/types/auth';
+import type { UserProfile, AuditLogEntry, JsonRecord, UserRole } from '@/types/auth';
 
 type AuthFunctionResponse = {
   error?: string;
@@ -17,6 +17,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isAdmin: boolean;
   isTeacher: boolean;
+  isSupportStaff: boolean;
   isLoading: boolean;
   signIn: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   signUp: (email: string, password: string, displayName: string) => Promise<{ success: boolean; error?: string }>;
@@ -24,7 +25,7 @@ interface AuthContextType {
   logAudit: (action: string, entityId?: string, entityName?: string, changes?: JsonRecord) => Promise<void>;
   fetchAuditLog: (limit?: number) => Promise<AuditLogEntry[]>;
   fetchUsers: () => Promise<UserProfile[]>;
-  updateUserRole: (userId: string, newRole: 'admin' | 'teacher') => Promise<{ success: boolean; error?: string }>;
+  updateUserRole: (userId: string, newRole: UserRole) => Promise<{ success: boolean; error?: string }>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -155,7 +156,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
-  const updateUserRole = useCallback(async (userId: string, newRole: 'admin' | 'teacher') => {
+  const updateUserRole = useCallback(async (userId: string, newRole: UserRole) => {
     if (!user || user.role !== 'admin') {
       return { success: false, error: 'Unauthorized' };
     }
@@ -175,6 +176,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const isAuthenticated = !!user;
   const isAdmin = user?.role === 'admin';
   const isTeacher = user?.role === 'teacher';
+  const isSupportStaff = user?.role === 'support_staff';
 
   return (
     <AuthContext.Provider
@@ -183,6 +185,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isAuthenticated,
         isAdmin,
         isTeacher,
+        isSupportStaff,
         isLoading,
         signIn,
         signUp,

@@ -6,6 +6,7 @@ import StudentManagement from './chat/StudentManagement';
 import AuditLogPanel from './chat/AuditLogPanel';
 import StudentRecordsWorkspace from './chat/StudentRecordsWorkspace';
 import UserAccessPanel from './chat/UserAccessPanel';
+import FeeStatusPanel from './chat/FeeStatusPanel';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { Shield, Clock, Users as UsersIcon } from 'lucide-react';
@@ -54,9 +55,14 @@ const AuditView: React.FC = () => {
 
 const AppLayout: React.FC = () => {
   const { activeView } = useChatContext();
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isSupportStaff } = useAuth();
 
   const renderMainContent = () => {
+    // Non-teaching support staff are limited to school fees payment status.
+    if (isSupportStaff) {
+      return <FeeStatusPanel />;
+    }
+
     switch (activeView) {
       case 'chat':
         return <ChatWindow />;
@@ -68,6 +74,8 @@ const AppLayout: React.FC = () => {
         return <UserAccessPanel />;
       case 'audit':
         return <AuditView />;
+      case 'fees':
+        return <FeeStatusPanel />;
       default:
         return <ChatWindow />;
     }
@@ -81,7 +89,7 @@ const AppLayout: React.FC = () => {
       {/* Main content */}
       <div className="flex-1 flex overflow-hidden">
         {/* Sidebar - only show in chat view */}
-        {activeView === 'chat' && isAuthenticated && <ConversationSidebar />}
+        {activeView === 'chat' && isAuthenticated && !isSupportStaff && <ConversationSidebar />}
 
         {/* Main area */}
         <div className="flex-1 min-w-0">

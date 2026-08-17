@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   Bell,
@@ -163,7 +163,7 @@ const Field = ({
 
 const StudentRecordsWorkspace: React.FC = () => {
   const { students, refreshStudents } = useChatContext();
-  const { isAuthenticated, isAdmin, user, logAudit } = useAuth();
+  const { isAuthenticated, isAdmin, isSupportStaff, user, logAudit } = useAuth();
   const [activeSection, setActiveSection] = useState<SectionKey>('admissions');
   const [admissionPane, setAdmissionPane] = useState('form');
   const [admissionPage, setAdmissionPage] = useState(1);
@@ -224,7 +224,8 @@ const StudentRecordsWorkspace: React.FC = () => {
     }));
   }, [selectedStudent]);
 
-  const loadRecords = async () => {
+  const loadRecords = useCallback(async () => {
+    if (isSupportStaff) return;
     setLoading(true);
     const tables = [
       ['admissions', 'submitted_at'],
@@ -249,11 +250,11 @@ const StudentRecordsWorkspace: React.FC = () => {
     }
     setRecords(loaded);
     setLoading(false);
-  };
+  }, [isSupportStaff]);
 
   useEffect(() => {
     loadRecords();
-  }, []);
+  }, [loadRecords]);
 
   const selectedStudentRecords = useMemo(() => {
     const id = selectedStudent?.id;
@@ -432,12 +433,18 @@ const StudentRecordsWorkspace: React.FC = () => {
     { key: 'lifecycle', label: 'Lifecycle', icon: Repeat2 },
   ] as const;
 
-  if (!isAuthenticated) {
+  if (!isAuthenticated || isSupportStaff) {
     return (
       <div className="flex flex-col items-center justify-center h-full bg-gray-50 dark:bg-gray-900 p-8 text-center">
         <Shield className="w-10 h-10 text-indigo-500 mb-3" />
-        <h2 className="text-xl font-bold text-gray-800 dark:text-white">Authentication Required</h2>
-        <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Sign in to view student operational records.</p>
+        <h2 className="text-xl font-bold text-gray-800 dark:text-white">
+          {isSupportStaff ? 'Restricted to Teachers and Admins' : 'Authentication Required'}
+        </h2>
+        <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+          {isSupportStaff
+            ? 'Support staff accounts can only view school fees payment status.'
+            : 'Sign in to view student operational records.'}
+        </p>
       </div>
     );
   }

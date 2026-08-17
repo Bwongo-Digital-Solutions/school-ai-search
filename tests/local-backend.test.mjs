@@ -273,6 +273,152 @@ test('local backend supports auth, data queries, audit logging, and chat', async
   }
 });
 
+test('admins can assign the non-teaching support staff role', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const admin = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup',
+      email: 'head@school.local',
+      password: 'password123',
+      displayName: 'Head Teacher',
+    });
+    assert.equal(admin.body.data.user.role, 'admin');
+
+    const gatekeeper = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup',
+      email: 'gate@school.local',
+      password: 'password123',
+      displayName: 'Moses Gatekeeper',
+    });
+    assert.equal(gatekeeper.body.data.user.role, 'teacher');
+
+    const promoted = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'update_role',
+      userId: gatekeeper.body.data.user.id,
+      newRole: 'support_staff',
+      requesterRole: 'admin',
+    });
+    assert.equal(promoted.status, 200);
+    assert.equal(promoted.body.data.user.role, 'support_staff');
+
+    const signin = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signin',
+      email: 'gate@school.local',
+      password: 'password123',
+    });
+    assert.equal(signin.body.data.user.role, 'support_staff');
+
+    const users = await dispatch(runtime, 'POST', '/api/functions/auth', { action: 'get_users' });
+    const roles = users.body.data.users.map((user) => user.role).sort();
+    assert.deepEqual(roles, ['admin', 'support_staff']);
+
+    const unknownRole = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'update_role',
+      userId: gatekeeper.body.data.user.id,
+      newRole: 'chief_cook',
+      requesterRole: 'admin',
+    });
+    assert.equal(unknownRole.status, 400);
+    assert.equal(unknownRole.body.error, 'Unsupported role: chief_cook');
+
+    const nonAdmin = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'update_role',
+      userId: gatekeeper.body.data.user.id,
+      newRole: 'admin',
+      requesterRole: 'support_staff',
+    });
+    assert.equal(nonAdmin.status, 400);
+    assert.equal(nonAdmin.body.error, 'Unauthorized');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('fee status endpoint returns payment data only, with no other student information', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const insert = (table, payload) =>
+      dispatch(runtime, 'POST', '/api/db', { table, operation: 'insert', payload });
+
+    await insert('invoices', {
+      id: 'invoice-fee-1',
+      student_id: 'student-001',
+      invoice_number: 'INV-FEE-1',
+      status: 'issued',
+      total_amount: 800000,
+      balance_due: 300000,
+      currency: 'UGX',
+      due_date: '2030-05-01',
+      line_items: [{ description: 'Term 1 tuition', amount: 800000 }],
+    });
+    await insert('payments', {
+      id: 'payment-fee-1',
+      student_id: 'student-001',
+      amount: 500000,
+      currency: 'UGX',
+      payment_method: 'mtn_momo',
+      reference: 'MOMO-1',
+    });
+    await insert('invoices', {
+      id: 'invoice-fee-2',
+      student_id: 'student-002',
+      invoice_number: 'INV-FEE-2',
+      status: 'issued',
+      total_amount: 800000,
+      balance_due: 800000,
+      currency: 'UGX',
+      due_date: '2020-01-15',
+      line_items: [],
+    });
+
+    const feeStatus = await dispatch(runtime, 'POST', '/api/functions/fee-status', {});
+    assert.equal(feeStatus.status, 200);
+
+    const rows = feeStatus.body.data.students;
+    assert.equal(rows.length, 15);
+
+    const partPaid = rows.find((row) => row.student_id === 'student-001');
+    assert.equal(partPaid.total_invoiced, 800000);
+    assert.equal(partPaid.total_paid, 500000);
+    assert.equal(partPaid.balance_due, 300000);
+    assert.equal(partPaid.next_due_date, '2030-05-01');
+    assert.equal(partPaid.status, 'partial');
+
+    const overdue = rows.find((row) => row.student_id === 'student-002');
+    assert.equal(overdue.status, 'overdue');
+    assert.equal(overdue.total_paid, 0);
+
+    const uninvoiced = rows.find((row) => row.invoice_count === 0);
+    assert.equal(uninvoiced.status, 'no_invoices');
+
+    // The payload must never carry anything beyond identity + fees.
+    const allowedFields = new Set([
+      'student_id',
+      'student_number',
+      'full_name',
+      'grade_level',
+      'class_section',
+      'currency',
+      'invoice_count',
+      'total_invoiced',
+      'total_paid',
+      'balance_due',
+      'next_due_date',
+      'last_payment_at',
+      'status',
+    ]);
+    for (const row of rows) {
+      for (const field of Object.keys(row)) {
+        assert.ok(allowedFields.has(field), `unexpected field leaked to fee status: ${field}`);
+      }
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
 test('grading schemes resolve by country and academic level', () => {
   const ugandaSecondary = resolveGradingScheme({
     country: 'uganda',

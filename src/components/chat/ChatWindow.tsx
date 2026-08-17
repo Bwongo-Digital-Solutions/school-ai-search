@@ -10,7 +10,7 @@ import { useAuth } from '@/contexts/AuthContext';
 
 const ChatWindow: React.FC = () => {
   const { messages, isLoading } = useChatContext();
-  const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const { isAuthenticated, isSupportStaff, isLoading: authLoading } = useAuth();
   const [showAuthModal, setShowAuthModal] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -29,6 +29,19 @@ const ChatWindow: React.FC = () => {
     );
   }
 
+  // SchoolBot answers from the full student dataset, so it is closed to support staff.
+  if (isSupportStaff) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center bg-gray-50 dark:bg-gray-900 p-8 text-center">
+        <Shield className="mb-3 h-10 w-10 text-indigo-500" />
+        <h2 className="text-xl font-bold text-gray-800 dark:text-white">Restricted to Teachers and Admins</h2>
+        <p className="mt-1 max-w-sm text-sm text-gray-500 dark:text-gray-400">
+          SchoolBot answers questions using full student records. Support staff accounts can only view school fees payment status.
+        </p>
+      </div>
+    );
+  }
+
   if (!isAuthenticated) {
     return (
       <>
@@ -36,7 +49,7 @@ const ChatWindow: React.FC = () => {
           <Shield className="mb-3 h-10 w-10 text-indigo-500" />
           <h2 className="text-xl font-bold text-gray-800 dark:text-white">Sign In Required</h2>
           <p className="mt-1 max-w-sm text-sm text-gray-500 dark:text-gray-400">
-            SchoolBot chat is available only to signed-in teachers and administrators.
+            SchoolBot chat is available only to signed-in school staff.
           </p>
           <button
             onClick={() => setShowAuthModal(true)}

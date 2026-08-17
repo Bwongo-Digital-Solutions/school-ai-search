@@ -49,11 +49,15 @@ CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   auth_email TEXT NOT NULL UNIQUE,
   display_name TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('admin', 'teacher')),
+  role TEXT NOT NULL CHECK (role IN ('admin', 'teacher', 'support_staff')),
   avatar_url TEXT,
   password_hash TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Widen the role list on databases created before 'support_staff' (non-teaching staff) existed.
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin', 'teacher', 'support_staff'));
 
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,

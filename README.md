@@ -24,7 +24,8 @@ By default:
 
 ## Features
 
-- student management with admin edit/delete and teacher view-only access
+- three staff roles: administrators (full edit access), teachers (view-only student records), and non-teaching support staff — security, gatekeepers, cooks, cleaners, drivers — who see school fees payment status and nothing else
+- school fees status view listing invoiced, paid, balance, due date, and payment state per student
 - student registration/admission, attendance, academic history, discipline, class allocation, promotion/graduation, transfer, and withdrawal records
 - audit logging
 - conversation and message persistence

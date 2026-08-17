@@ -20,6 +20,10 @@ const DEFAULT_STATIC_ROOT = process.env.LOCAL_STATIC_ROOT || join(ROOT_DIR, 'dis
 const DEFAULT_HOST = process.env.LOCAL_BACKEND_HOST || '127.0.0.1';
 const DEFAULT_PORT = Number(process.env.LOCAL_BACKEND_PORT || process.env.PORT || 8787);
 
+// Keep in sync with the users.role CHECK constraint in server/db/schema.mjs and src/lib/roles.ts.
+// 'support_staff' covers non-teaching staff such as security, gatekeepers, cooks, cleaners and drivers.
+const USER_ROLES = ['admin', 'teacher', 'support_staff'];
+
 const MIME_TYPES = {
   '.css': 'text/css; charset=utf-8',
   '.html': 'text/html; charset=utf-8',
@@ -692,6 +696,10 @@ const handleAuthFunction = async (database, body) => {
       return { error: 'Unauthorized' };
     }
 
+    if (!USER_ROLES.includes(body.newRole)) {
+      return { error: `Unsupported role: ${body.newRole}` };
+    }
+
     const result = await database.query(
       `
         UPDATE users
@@ -710,6 +718,105 @@ const handleAuthFunction = async (database, body) => {
   }
 
   return { error: `Unsupported auth action: ${action}` };
+};
+
+const toIsoDate = (value) => {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
+};
+
+const toAmount = (value) => {
+  const amount = Number(value);
+  return Number.isFinite(amount) ? amount : 0;
+};
+
+const resolveFeeStatus = ({ invoiceCount, totalPaid, balanceDue, earliestUnpaidDueDate }) => {
+  if (invoiceCount === 0) return 'no_invoices';
+  if (balanceDue <= 0) return 'cleared';
+  if (earliestUnpaidDueDate && earliestUnpaidDueDate < toIsoDate(new Date())) return 'overdue';
+  return totalPaid > 0 ? 'partial' : 'unpaid';
+};
+
+// Returns fee payment status only — no contact, academic, medical or behavioural data.
+// This is the single student-facing endpoint the support_staff role is allowed to read.
+const handleFeeStatusFunction = async (database) => {
+  const [students, invoices, payments] = await Promise.all([
+    database.query(
+      'SELECT id, student_id, first_name, last_name, grade_level, class_section FROM students ORDER BY last_name, first_name',
+    ),
+    database.query('SELECT student_id, status, total_amount, balance_due, currency, due_date FROM invoices'),
+    database.query('SELECT student_id, amount, currency, paid_at FROM payments'),
+  ]);
+
+  const summaries = new Map(
+    students.rows.map((student) => [
+      student.id,
+      {
+        student_id: student.id,
+        student_number: student.student_id,
+        full_name: `${student.first_name} ${student.last_name}`,
+        grade_level: student.grade_level,
+        class_section: student.class_section,
+        currency: 'UGX',
+        invoice_count: 0,
+        total_invoiced: 0,
+        total_paid: 0,
+        balance_due: 0,
+        next_due_date: null,
+        last_payment_at: null,
+        status: 'no_invoices',
+      },
+    ]),
+  );
+
+  const earliestUnpaidDueDates = new Map();
+
+  for (const invoice of invoices.rows) {
+    const summary = summaries.get(invoice.student_id);
+    if (!summary) continue;
+
+    const balance = toAmount(invoice.balance_due);
+    summary.invoice_count += 1;
+    summary.total_invoiced += toAmount(invoice.total_amount);
+    summary.balance_due += balance;
+    if (invoice.currency) summary.currency = invoice.currency;
+
+    const dueDate = toIsoDate(invoice.due_date);
+    if (dueDate && (!summary.next_due_date || dueDate < summary.next_due_date)) {
+      summary.next_due_date = dueDate;
+    }
+    if (balance > 0 && dueDate) {
+      const earliest = earliestUnpaidDueDates.get(invoice.student_id);
+      if (!earliest || dueDate < earliest) {
+        earliestUnpaidDueDates.set(invoice.student_id, dueDate);
+      }
+    }
+  }
+
+  for (const payment of payments.rows) {
+    const summary = summaries.get(payment.student_id);
+    if (!summary) continue;
+
+    summary.total_paid += toAmount(payment.amount);
+
+    const paidAt = payment.paid_at instanceof Date ? payment.paid_at.toISOString() : payment.paid_at;
+    if (paidAt && (!summary.last_payment_at || paidAt > summary.last_payment_at)) {
+      summary.last_payment_at = paidAt;
+    }
+  }
+
+  const rows = [...summaries.values()].map((summary) => ({
+    ...summary,
+    status: resolveFeeStatus({
+      invoiceCount: summary.invoice_count,
+      totalPaid: summary.total_paid,
+      balanceDue: summary.balance_due,
+      earliestUnpaidDueDate: earliestUnpaidDueDates.get(summary.student_id) ?? null,
+    }),
+  }));
+
+  return { students: rows };
 };
 
 const handleAiChatFunction = async (database, body, httpClient) => {
@@ -924,6 +1031,11 @@ export const createAppRuntime = async ({
         return data?.error
           ? { type: 'json', status: 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/fee-status') {
+        const data = await handleFeeStatusFunction(database);
+        return { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/ai-chat') {

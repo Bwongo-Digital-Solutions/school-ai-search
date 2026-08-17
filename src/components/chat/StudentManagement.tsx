@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import {
   Search, Plus, Pencil, Trash2, X, ChevronUp, ChevronDown,
   Save, AlertTriangle, Users, GraduationCap, ArrowUpDown, Filter,
-  Shield, Lock, Eye, FileText, Download, Loader2
+  Shield, Lock, Eye, FileText, Download, Loader2, Wallet
 } from 'lucide-react';
 import { buildApiUrl, supabase } from '@/lib/supabase';
 import { useChatContext } from '@/contexts/ChatContext';
@@ -103,7 +103,7 @@ const StudentField = ({ label, name, form, setForm, errors, type = 'text', requi
 
 const StudentManagement: React.FC = () => {
   const { students, refreshStudents } = useChatContext();
-  const { user, isAuthenticated, isAdmin, isTeacher, logAudit } = useAuth();
+  const { user, isAuthenticated, isAdmin, isSupportStaff, logAudit } = useAuth();
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('last_name');
   const [sortAsc, setSortAsc] = useState(true);
@@ -130,7 +130,9 @@ const StudentManagement: React.FC = () => {
   const [isBuildingReport, setIsBuildingReport] = useState(false);
 
   const canEdit = isAdmin;
-  const canView = isAuthenticated;
+  // Support staff are limited to the school fees payment status view.
+  const canView = isAuthenticated && !isSupportStaff;
+  const isViewOnly = canView && !isAdmin;
 
   const filtered = useMemo(() => {
     let list = [...students];
@@ -329,30 +331,44 @@ const StudentManagement: React.FC = () => {
   const avgGpa = students.length ? (students.reduce((s, st) => s + (st.gpa || 0), 0) / students.length).toFixed(2) : '0';
   const avgAtt = students.length ? (students.reduce((s, st) => s + (st.attendance_rate || 0), 0) / students.length).toFixed(1) : '0';
 
-  // Not authenticated - show sign-in prompt
-  if (!isAuthenticated) {
+  // Not authenticated, or a support staff account that may only see fees status
+  if (!canView) {
     return (
       <div className="flex flex-col items-center justify-center h-full bg-gradient-to-b from-gray-50/50 to-white dark:from-gray-900/50 dark:to-gray-900 p-8">
         <div className="max-w-md text-center">
           <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-indigo-100 to-purple-100 dark:from-indigo-900/30 dark:to-purple-900/30 flex items-center justify-center mx-auto mb-4">
             <Lock className="w-8 h-8 text-indigo-500" />
           </div>
-          <h2 className="text-xl font-bold text-gray-800 dark:text-white mb-2">Authentication Required</h2>
+          <h2 className="text-xl font-bold text-gray-800 dark:text-white mb-2">
+            {isSupportStaff ? 'Restricted to Teachers and Admins' : 'Authentication Required'}
+          </h2>
           <p className="text-sm text-gray-500 dark:text-gray-400 mb-6">
-            You need to sign in to access the Student Management panel. Please use the Sign In button in the header to continue.
+            {isSupportStaff
+              ? 'Support staff accounts can only view school fees payment status. Student records are available to teachers and administrators.'
+              : 'You need to sign in to access the Student Management panel. Please use the Sign In button in the header to continue.'}
           </p>
-          <div className="flex items-center justify-center gap-4 text-xs text-gray-400">
-            <div className="flex items-center gap-1.5">
-              <Shield className="w-3.5 h-3.5 text-purple-500" />
-              <span><strong>Admin</strong> — Full access (add, edit, delete)</span>
-            </div>
-          </div>
-          <div className="flex items-center justify-center gap-4 text-xs text-gray-400 mt-2">
-            <div className="flex items-center gap-1.5">
-              <Eye className="w-3.5 h-3.5 text-blue-500" />
-              <span><strong>Teacher</strong> — View-only access</span>
-            </div>
-          </div>
+          {!isSupportStaff && (
+            <>
+              <div className="flex items-center justify-center gap-4 text-xs text-gray-400">
+                <div className="flex items-center gap-1.5">
+                  <Shield className="w-3.5 h-3.5 text-purple-500" />
+                  <span><strong>Admin</strong> — Full access (add, edit, delete)</span>
+                </div>
+              </div>
+              <div className="flex items-center justify-center gap-4 text-xs text-gray-400 mt-2">
+                <div className="flex items-center gap-1.5">
+                  <Eye className="w-3.5 h-3.5 text-blue-500" />
+                  <span><strong>Teacher</strong> — View-only access</span>
+                </div>
+              </div>
+              <div className="flex items-center justify-center gap-4 text-xs text-gray-400 mt-2">
+                <div className="flex items-center gap-1.5">
+                  <Wallet className="w-3.5 h-3.5 text-emerald-500" />
+                  <span><strong>Support Staff</strong> — Fees payment status only</span>
+                </div>
+              </div>
+            </>
+          )}
         </div>
       </div>
     );
@@ -370,7 +386,7 @@ const StudentManagement: React.FC = () => {
             </h2>
             <div className="flex items-center gap-2 mt-0.5">
               <p className="text-xs text-gray-400">Manage student records — changes sync with AI assistant automatically</p>
-              {isTeacher && (
+              {isViewOnly && (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-800">
                   <Eye className="w-2.5 h-2.5" /> View Only
                 </span>
@@ -561,7 +577,7 @@ const StudentManagement: React.FC = () => {
         </div>
         <p className="text-[10px] text-gray-400 mt-2 px-1">
           Showing {filtered.length} of {students.length} students
-          {isTeacher && ' (view-only mode)'}
+          {isViewOnly && ' (view-only mode)'}
           {isAdmin && ' (admin mode)'}
         </p>
       </div>
