@@ -26,6 +26,8 @@ By default:
 
 - three staff roles: administrators (full edit access), teachers (view-only student records), and non-teaching support staff — security, gatekeepers, cooks, cleaners, drivers — who see school fees payment status and nothing else
 - school fees status view listing invoiced, paid, balance, due date, and payment state per student
+- student ID card lookup: scan the card QR with the device camera, use a handheld barcode/QR scanner, or type the student number. Support staff get the fees status; teachers and admins jump to the full record
+- printable QR student ID cards generated in-app with the open-source `qrcode` library (MIT): one CR80 card per page for card printers, or ten per A4 sheet for cutting
 - student registration/admission, attendance, academic history, discipline, class allocation, promotion/graduation, transfer, and withdrawal records
 - audit logging
 - conversation and message persistence

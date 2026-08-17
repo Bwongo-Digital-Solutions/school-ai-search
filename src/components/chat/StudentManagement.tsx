@@ -2,9 +2,11 @@ import React, { useState, useMemo } from 'react';
 import {
   Search, Plus, Pencil, Trash2, X, ChevronUp, ChevronDown,
   Save, AlertTriangle, Users, GraduationCap, ArrowUpDown, Filter,
-  Shield, Lock, Eye, FileText, Download, Loader2, Wallet
+  Shield, Lock, Eye, FileText, Download, Loader2, Wallet, ScanLine, QrCode, Printer
 } from 'lucide-react';
+import StudentIdScanner from './StudentIdScanner';
 import { buildApiUrl, supabase } from '@/lib/supabase';
+import { parseStudentCode } from '@/lib/studentCode';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useAuth } from '@/contexts/AuthContext';
 import type { Student } from '@/types/chat';
@@ -128,6 +130,8 @@ const StudentManagement: React.FC = () => {
   const [reportCardTeacherComment, setReportCardTeacherComment] = useState('');
   const [reportCardNotes, setReportCardNotes] = useState('');
   const [isBuildingReport, setIsBuildingReport] = useState(false);
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [idCardStudent, setIdCardStudent] = useState<Student | null>(null);
 
   const canEdit = isAdmin;
   // Support staff are limited to the school fees payment status view.
@@ -327,6 +331,25 @@ const StudentManagement: React.FC = () => {
     }
   };
 
+  const downloadIdCards = async (path: string, filename: string) => {
+    try {
+      const response = await fetch(buildApiUrl(path));
+      if (!response.ok) {
+        throw new Error(`Failed to build ID cards (${response.status})`);
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err: unknown) {
+      console.error('ID card download failed:', err);
+      alert(getErrorMessage(err) || 'Failed to build ID cards.');
+    }
+  };
+
   const grades = Array.from(new Set([...students.map(s => s.grade_level), 9, 10, 11, 12])).sort((a, b) => a - b);
   const avgGpa = students.length ? (students.reduce((s, st) => s + (st.gpa || 0), 0) / students.length).toFixed(2) : '0';
   const avgAtt = students.length ? (students.reduce((s, st) => s + (st.attendance_rate || 0), 0) / students.length).toFixed(1) : '0';
@@ -398,14 +421,29 @@ const StudentManagement: React.FC = () => {
               )}
             </div>
           </div>
-          {canEdit && (
+          <div className="flex items-center gap-2">
             <button
-              onClick={openAdd}
-              className="flex items-center gap-2 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-xl px-4 py-2.5 text-sm font-medium hover:shadow-lg hover:shadow-indigo-200 dark:hover:shadow-indigo-900/30 transition-all hover:scale-[1.02]"
+              onClick={() =>
+                downloadIdCards(
+                  `/api/id-cards.pdf?layout=a4${gradeFilter !== null ? `&grade=${gradeFilter}` : ''}`,
+                  `student-id-cards${gradeFilter !== null ? `-grade-${gradeFilter}` : ''}.pdf`,
+                )
+              }
+              title="Print QR ID cards for the current grade filter, ten per A4 sheet"
+              className="flex items-center gap-2 rounded-xl border border-gray-200 dark:border-gray-700 px-4 py-2.5 text-sm font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
             >
-              <Plus className="w-4 h-4" /> Add Student
+              <Printer className="w-4 h-4 text-emerald-500" />
+              Print ID Cards
             </button>
-          )}
+            {canEdit && (
+              <button
+                onClick={openAdd}
+                className="flex items-center gap-2 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-xl px-4 py-2.5 text-sm font-medium hover:shadow-lg hover:shadow-indigo-200 dark:hover:shadow-indigo-900/30 transition-all hover:scale-[1.02]"
+              >
+                <Plus className="w-4 h-4" /> Add Student
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Stats cards */}
@@ -440,6 +478,14 @@ const StudentManagement: React.FC = () => {
               className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg pl-10 pr-3 py-2 text-sm focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-200"
             />
           </div>
+          <button
+            onClick={() => setScannerOpen(true)}
+            title="Scan a student ID card"
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+          >
+            <ScanLine className="w-4 h-4 text-indigo-500" />
+            Scan ID
+          </button>
           <div className="flex items-center gap-1">
             <Filter className="w-4 h-4 text-gray-400" />
             <button
@@ -548,14 +594,24 @@ const StudentManagement: React.FC = () => {
                   </td>
                   {canView && (
                     <td className="px-4 py-3">
-                      <button
-                        onClick={() => openReportCardBuilder(s)}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-indigo-200 dark:border-indigo-800 text-[11px] font-medium text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 transition-colors"
-                        title="Build report card PDF"
-                      >
-                        <FileText className="w-3.5 h-3.5" />
-                        PDF
-                      </button>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={() => openReportCardBuilder(s)}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-indigo-200 dark:border-indigo-800 text-[11px] font-medium text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 transition-colors"
+                          title="Build report card PDF"
+                        >
+                          <FileText className="w-3.5 h-3.5" />
+                          PDF
+                        </button>
+                        <button
+                          onClick={() => setIdCardStudent(s)}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-emerald-200 dark:border-emerald-800 text-[11px] font-medium text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 transition-colors"
+                          title="Preview and print the QR ID card"
+                        >
+                          <QrCode className="w-3.5 h-3.5" />
+                          ID
+                        </button>
+                      </div>
                     </td>
                   )}
                   {canEdit && (
@@ -581,6 +637,67 @@ const StudentManagement: React.FC = () => {
           {isAdmin && ' (admin mode)'}
         </p>
       </div>
+
+      {/* ID Card Preview */}
+      {idCardStudent && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setIdCardStudent(null)}>
+          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl p-6 max-w-sm w-full" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-11 h-11 rounded-2xl bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center">
+                <QrCode className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
+              </div>
+              <div>
+                <h3 className="font-semibold text-gray-800 dark:text-white">Student ID Card</h3>
+                <p className="text-xs text-gray-400">
+                  {idCardStudent.first_name} {idCardStudent.last_name} • {idCardStudent.student_id}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-col items-center bg-gray-50 dark:bg-gray-900/40 border border-gray-100 dark:border-gray-700 rounded-xl p-4">
+              <img
+                src={buildApiUrl(`/api/id-cards/${idCardStudent.id}.png`)}
+                alt={`QR code for ${idCardStudent.student_id}`}
+                className="w-44 h-44 bg-white rounded-lg"
+              />
+              <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-3 text-center">
+                Point a phone camera at this code to check it scans before printing a batch.
+              </p>
+            </div>
+
+            <div className="flex gap-2 mt-5">
+              <button
+                onClick={() => setIdCardStudent(null)}
+                className="flex-1 px-4 py-2.5 rounded-xl border border-gray-200 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+              >
+                Close
+              </button>
+              <button
+                onClick={() =>
+                  downloadIdCards(
+                    `/api/id-cards/${idCardStudent.id}.pdf`,
+                    `${idCardStudent.student_id}-id-card.pdf`,
+                  )
+                }
+                className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 text-white text-sm font-medium hover:shadow-lg transition-all"
+              >
+                <Download className="w-4 h-4" /> Card PDF
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <StudentIdScanner
+        isOpen={scannerOpen}
+        onClose={() => setScannerOpen(false)}
+        onScan={code => {
+          setSearch(parseStudentCode(code));
+          setGradeFilter(null);
+          setScannerOpen(false);
+        }}
+        hint="Scan the QR code on the plastic card to jump straight to that student's record."
+      />
 
       {/* Delete Confirmation Modal */}
       {deleteConfirm && canEdit && (

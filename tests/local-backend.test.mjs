@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createAppRuntime } from '../server/local-backend.mjs';
+import QRCode from 'qrcode';
+
+import { createAppRuntime, parseStudentCode } from '../server/local-backend.mjs';
+import { buildQrPayload, buildQrPng } from '../server/reports/id-card.mjs';
 import { gradeScore, resolveGradingScheme } from '../server/reports/grading-config.mjs';
 
 const startTestRuntime = async (options = {}) => {
@@ -414,6 +417,180 @@ test('fee status endpoint returns payment data only, with no other student infor
         assert.ok(allowedFields.has(field), `unexpected field leaked to fee status: ${field}`);
       }
     }
+  } finally {
+    await cleanup();
+  }
+});
+
+test('scanned student ID card payloads normalise to a student number', () => {
+  assert.equal(parseStudentCode('STU-2026-001'), 'STU-2026-001');
+  assert.equal(parseStudentCode('  STU-2026-001  '), 'STU-2026-001');
+  assert.equal(parseStudentCode('{"student_id":"STU-2026-004"}'), 'STU-2026-004');
+  assert.equal(parseStudentCode('https://school.example/students/STU-2026-007'), 'STU-2026-007');
+  assert.equal(parseStudentCode('https://school.example/s?student_id=STU-2026-009'), 'STU-2026-009');
+  assert.equal(parseStudentCode('{not valid json'), '{not valid json');
+  assert.equal(parseStudentCode(''), '');
+  assert.equal(parseStudentCode(null), '');
+});
+
+test('scanning a student ID card returns that student fee status only', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    await dispatch(runtime, 'POST', '/api/db', {
+      table: 'invoices',
+      operation: 'insert',
+      payload: {
+        id: 'invoice-scan-1',
+        student_id: 'student-003',
+        invoice_number: 'INV-SCAN-1',
+        status: 'issued',
+        total_amount: 600000,
+        balance_due: 0,
+        currency: 'UGX',
+        due_date: '2030-03-01',
+        line_items: [],
+      },
+    });
+
+    const students = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students',
+      operation: 'select',
+      columns: '*',
+      filters: [{ field: 'id', operator: 'eq', value: 'student-003' }],
+      single: true,
+    });
+    const studentNumber = students.body.data.student_id;
+
+    const byNumber = await dispatch(runtime, 'POST', '/api/functions/fee-status', { code: studentNumber });
+    assert.equal(byNumber.status, 200);
+    assert.equal(byNumber.body.data.matched, true);
+    assert.equal(byNumber.body.data.students.length, 1);
+    assert.equal(byNumber.body.data.students[0].student_number, studentNumber);
+    assert.equal(byNumber.body.data.students[0].status, 'cleared');
+
+    // Lower case, a QR URL payload, and the internal id all resolve to the same student.
+    const lowerCase = await dispatch(runtime, 'POST', '/api/functions/fee-status', {
+      code: studentNumber.toLowerCase(),
+    });
+    assert.equal(lowerCase.body.data.students[0].student_id, 'student-003');
+
+    const fromQr = await dispatch(runtime, 'POST', '/api/functions/fee-status', {
+      code: `https://school.example/students/${studentNumber}`,
+    });
+    assert.equal(fromQr.body.data.students[0].student_id, 'student-003');
+
+    const byInternalId = await dispatch(runtime, 'POST', '/api/functions/fee-status', { code: 'student-003' });
+    assert.equal(byInternalId.body.data.students[0].student_id, 'student-003');
+
+    const unknown = await dispatch(runtime, 'POST', '/api/functions/fee-status', { code: 'STU-9999-999' });
+    assert.equal(unknown.body.data.matched, false);
+    assert.deepEqual(unknown.body.data.students, []);
+
+    // A blank code still returns the full list rather than an empty one.
+    const all = await dispatch(runtime, 'POST', '/api/functions/fee-status', { code: '   ' });
+    assert.equal(all.body.data.students.length, 15);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('ID card QR payloads default to the student number and can be a scannable URL', () => {
+  const student = { student_id: 'STU-2026-001' };
+
+  assert.equal(buildQrPayload(student, ''), 'STU-2026-001');
+  assert.equal(buildQrPayload(student, 'https://school.example/s'), 'https://school.example/s/STU-2026-001');
+  assert.equal(buildQrPayload(student, 'https://school.example/s/'), 'https://school.example/s/STU-2026-001');
+
+  // Whatever form the card carries, the scanner resolves it back to the student number.
+  assert.equal(parseStudentCode(buildQrPayload(student, 'https://school.example/s')), 'STU-2026-001');
+});
+
+test('generated QR symbols are well formed enough for a phone camera to lock on', async () => {
+  const payload = 'STU-2026-001';
+  const symbol = QRCode.create(payload, { errorCorrectionLevel: 'Q' });
+  const { size, data } = symbol.modules;
+  const moduleAt = (row, column) => data[row * size + column];
+
+  assert.ok(symbol.version >= 1);
+  assert.equal(size, 21);
+
+  // The three finder patterns are what a camera uses to locate and orient the symbol.
+  const finderOrigins = [
+    [0, 0],
+    [0, size - 7],
+    [size - 7, 0],
+  ];
+  for (const [originRow, originColumn] of finderOrigins) {
+    for (let row = 0; row < 7; row += 1) {
+      for (let column = 0; column < 7; column += 1) {
+        const onOuterRing = row === 0 || row === 6 || column === 0 || column === 6;
+        const inInnerBlock = row >= 2 && row <= 4 && column >= 2 && column <= 4;
+        const expectedDark = onOuterRing || inInnerBlock;
+        assert.equal(
+          Boolean(moduleAt(originRow + row, originColumn + column)),
+          expectedDark,
+          `finder pattern module mismatch at ${originRow + row},${originColumn + column}`,
+        );
+      }
+    }
+  }
+
+  const png = await buildQrPng(payload);
+  assert.equal(png.subarray(1, 4).toString(), 'PNG');
+  // A quiet zone is required for detection; margin 2 keeps the symbol clear of the card edge.
+  assert.ok(png.length > 500);
+
+  const other = await buildQrPng('STU-2026-002');
+  assert.notEqual(png.toString('base64'), other.toString('base64'));
+});
+
+test('ID cards render as PDFs for one student and for a whole class', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const single = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/id-cards/student-001.pdf',
+      searchParams: new URLSearchParams(),
+    });
+    assert.equal(single.status, 200);
+    assert.equal(single.headers['Content-Type'], 'application/pdf');
+    assert.equal(single.body.subarray(0, 4).toString(), '%PDF');
+    assert.match(single.headers['Content-Disposition'], /STU-2026-001-id-card\.pdf/);
+
+    const qr = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/id-cards/student-001.png',
+      searchParams: new URLSearchParams(),
+    });
+    assert.equal(qr.status, 200);
+    assert.equal(qr.headers['Content-Type'], 'image/png');
+    assert.equal(qr.body.subarray(1, 4).toString(), 'PNG');
+
+    const batch = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/id-cards.pdf',
+      searchParams: new URLSearchParams({ layout: 'a4' }),
+    });
+    assert.equal(batch.status, 200);
+    assert.equal(batch.body.subarray(0, 4).toString(), '%PDF');
+    // Fifteen seeded students tile onto two A4 sheets at ten per sheet.
+    assert.ok(batch.body.length > single.body.length);
+
+    const missing = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/id-cards/does-not-exist.pdf',
+      searchParams: new URLSearchParams(),
+    });
+    assert.equal(missing.status, 404);
+
+    const emptySelection = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/id-cards.pdf',
+      searchParams: new URLSearchParams({ grade: '99' }),
+    });
+    assert.equal(emptySelection.status, 404);
   } finally {
     await cleanup();
   }

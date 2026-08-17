@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { createDatabaseConnection, waitForDatabase } from './db/connection.mjs';
 import { initializeDatabase } from './db/schema.mjs';
 import { buildReportCardPdf } from './reports/report-card.mjs';
+import { buildIdCardPdf, buildQrPayload, buildQrPng } from './reports/id-card.mjs';
 import { getPublicGradingOptions } from './reports/grading-config.mjs';
 import { generateLlmSearchReply, getPublicModelCatalog, resolveModelSelection } from './services/llm-models.mjs';
 import { getPaymentStatus, initiatePayment, recordPaymentCallback } from './services/payment-gateway.mjs';
@@ -738,13 +739,57 @@ const resolveFeeStatus = ({ invoiceCount, totalPaid, balanceDue, earliestUnpaidD
   return totalPaid > 0 ? 'partial' : 'unpaid';
 };
 
+// Student ID cards may be scanned, typed, or read by a keyboard-wedge scanner, so the payload
+// can arrive as a bare student number, a JSON blob, or a URL. Reduce all of them to the number.
+export const parseStudentCode = (raw) => {
+  const text = String(raw ?? '').trim();
+  if (!text) return '';
+
+  if (text.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(text);
+      const fromJson = parsed.student_id || parsed.studentId || parsed.id || parsed.code;
+      if (fromJson) return String(fromJson).trim();
+    } catch {
+      // Fall through and treat the payload as plain text.
+    }
+  }
+
+  if (/^https?:\/\//i.test(text)) {
+    try {
+      const url = new URL(text);
+      const fromQuery =
+        url.searchParams.get('student_id') || url.searchParams.get('studentId') || url.searchParams.get('id');
+      if (fromQuery) return fromQuery.trim();
+      const lastSegment = url.pathname.split('/').filter(Boolean).pop();
+      if (lastSegment) return decodeURIComponent(lastSegment).trim();
+    } catch {
+      // Fall through and treat the payload as plain text.
+    }
+  }
+
+  return text;
+};
+
 // Returns fee payment status only — no contact, academic, medical or behavioural data.
 // This is the single student-facing endpoint the support_staff role is allowed to read.
-const handleFeeStatusFunction = async (database) => {
+const handleFeeStatusFunction = async (database, body = {}) => {
+  const code = parseStudentCode(body.code);
+
   const [students, invoices, payments] = await Promise.all([
-    database.query(
-      'SELECT id, student_id, first_name, last_name, grade_level, class_section FROM students ORDER BY last_name, first_name',
-    ),
+    code
+      ? database.query(
+          `
+            SELECT id, student_id, first_name, last_name, grade_level, class_section
+            FROM students
+            WHERE UPPER(student_id) = UPPER($1) OR id = $1
+            LIMIT 1
+          `,
+          [code],
+        )
+      : database.query(
+          'SELECT id, student_id, first_name, last_name, grade_level, class_section FROM students ORDER BY last_name, first_name',
+        ),
     database.query('SELECT student_id, status, total_amount, balance_due, currency, due_date FROM invoices'),
     database.query('SELECT student_id, amount, currency, paid_at FROM payments'),
   ]);
@@ -816,7 +861,7 @@ const handleFeeStatusFunction = async (database) => {
     }),
   }));
 
-  return { students: rows };
+  return code ? { students: rows, code, matched: rows.length > 0 } : { students: rows };
 };
 
 const handleAiChatFunction = async (database, body, httpClient) => {
@@ -982,6 +1027,93 @@ const handleReportCardRequest = async (database, pathname, searchParams) => {
   };
 };
 
+const notFound = (message) => ({ type: 'json', status: 404, body: { error: message } });
+
+const handleIdCardRequest = async (database, pathname, searchParams) => {
+  const qrMatch = pathname.match(/^\/api\/id-cards\/([^/]+)\.png$/);
+  if (qrMatch) {
+    const student = await fetchStudentById(database, decodeURIComponent(qrMatch[1]));
+    if (!student) {
+      return notFound('Student not found');
+    }
+
+    const png = await buildQrPng(buildQrPayload(student, searchParams.get('qrBaseUrl') || undefined));
+    return {
+      type: 'binary',
+      status: 200,
+      headers: {
+        'Content-Type': 'image/png',
+        'Cache-Control': 'no-store',
+      },
+      body: png,
+    };
+  }
+
+  const singleMatch = pathname.match(/^\/api\/id-cards\/([^/]+)\.pdf$/);
+  const batchMatch = pathname === '/api/id-cards.pdf';
+  if (!singleMatch && !batchMatch) {
+    return null;
+  }
+
+  const layout = searchParams.get('layout') === 'a4' ? 'a4' : 'card';
+  const schoolName = searchParams.get('schoolName') || undefined;
+  const qrBaseUrl = searchParams.get('qrBaseUrl') || undefined;
+
+  let students;
+  let filename;
+
+  if (singleMatch) {
+    const student = await fetchStudentById(database, decodeURIComponent(singleMatch[1]));
+    if (!student) {
+      return notFound('Student not found');
+    }
+    students = [student];
+    filename = `${student.student_id}-id-card.pdf`;
+  } else {
+    const conditions = [];
+    const values = [];
+    const grade = searchParams.get('grade');
+    const section = searchParams.get('section');
+
+    if (grade) {
+      values.push(Number(grade));
+      conditions.push(`grade_level = $${values.length}`);
+    }
+    if (section) {
+      values.push(section);
+      conditions.push(`class_section = $${values.length}`);
+    }
+
+    const result = await database.query(
+      `
+        SELECT * FROM students
+        ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
+        ORDER BY last_name, first_name
+      `,
+      values,
+    );
+
+    if (result.rows.length === 0) {
+      return notFound('No students match that ID card selection');
+    }
+
+    students = result.rows.map(formatRow);
+    filename = `student-id-cards${grade ? `-grade-${grade}` : ''}${section ? `-${section}` : ''}.pdf`;
+  }
+
+  const pdfBytes = await buildIdCardPdf({ students, layout, schoolName, qrBaseUrl });
+
+  return {
+    type: 'binary',
+    status: 200,
+    headers: {
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+    },
+    body: Buffer.from(pdfBytes),
+  };
+};
+
 export const createAppRuntime = async ({
   connectionString,
   useInMemoryDatabase = false,
@@ -1004,6 +1136,11 @@ export const createAppRuntime = async ({
       const reportCardResponse = await handleReportCardRequest(database, pathname, searchParams);
       if (reportCardResponse) {
         return reportCardResponse;
+      }
+
+      const idCardResponse = await handleIdCardRequest(database, pathname, searchParams);
+      if (idCardResponse) {
+        return idCardResponse;
       }
 
       if (method === 'GET' && pathname === '/api/health') {
@@ -1034,7 +1171,7 @@ export const createAppRuntime = async ({
       }
 
       if (method === 'POST' && pathname === '/api/functions/fee-status') {
-        const data = await handleFeeStatusFunction(database);
+        const data = await handleFeeStatusFunction(database, body);
         return { type: 'json', status: 200, body: { data } };
       }
 
