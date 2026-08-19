@@ -114,7 +114,7 @@ export const provisionTenant = async (
     await tenantDb.close();
   }
 
-  return markTenantActive(control, id, addDays(now, periodDays).toISOString());
+  return markTenantActive(control, id, addDays(now, periodDays).toISOString(), dbName, dbUrl);
 };
 
 export const checkAvailability = async (control, subdomain) => {

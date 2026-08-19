@@ -91,18 +91,22 @@ export const insertPendingTenant = async (control, { subdomain, schoolName, cont
   return rows[0] || null;
 };
 
-export const markTenantActive = async (control, subdomain, periodEnd) => {
+export const markTenantActive = async (control, subdomain, periodEnd, dbName, dbUrl) => {
+  // Also (re)sets db_name/db_url here: the pending row created at signup carries empty values, so
+  // activation is where the real connection details are written.
   const { rows } = await control.query(
     `
       UPDATE tenants
       SET status = 'active',
+          db_name = $3,
+          db_url = $4,
           activated_at = COALESCE(activated_at, NOW()),
           current_period_end = $2,
           updated_at = NOW()
       WHERE subdomain = $1
       RETURNING ${TENANT_COLUMNS}
     `,
-    [subdomain, periodEnd],
+    [subdomain, periodEnd, dbName, dbUrl],
   );
   return rows[0] || null;
 };

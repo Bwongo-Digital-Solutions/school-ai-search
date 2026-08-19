@@ -2506,6 +2506,12 @@ test('a school that pays is provisioned, served, and suspended when it lapses', 
     assert.equal(paid.body.data.provisioned, true);
     assert.equal((await P({ action: 'status', subdomain: 'kampala-high' })).body.data.tenant.status, 'active');
 
+    // The tenant's real connection details are persisted at activation (an empty db_url would make
+    // routing to the tenant fail against a real Postgres server).
+    const tenantRow = (await runtime.control.query("SELECT db_name, db_url FROM tenants WHERE subdomain = 'kampala-high'")).rows[0];
+    assert.ok(tenantRow.db_url && tenantRow.db_url.length > 0, 'db_url must be persisted');
+    assert.ok(tenantRow.db_name.includes('kampala'), 'db_name is derived from the subdomain');
+
     // Its subdomain now routes to a real (isolated) database.
     route = await runtime.resolveDatabase('kampala-high.eschool.app', undefined);
     assert.equal(route.status, 'active');
