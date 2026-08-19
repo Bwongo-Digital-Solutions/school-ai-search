@@ -22,7 +22,13 @@ interface AuthContextType {
   signIn: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   signUp: (email: string, password: string, displayName: string) => Promise<{ success: boolean; error?: string }>;
   signOut: () => void;
-  logAudit: (action: string, entityId?: string, entityName?: string, changes?: JsonRecord) => Promise<void>;
+  logAudit: (
+    action: string,
+    entityId?: string,
+    entityName?: string,
+    changes?: JsonRecord,
+    entityType?: string,
+  ) => Promise<void>;
   fetchAuditLog: (limit?: number) => Promise<AuditLogEntry[]>;
   fetchUsers: () => Promise<UserProfile[]>;
   updateUserRole: (userId: string, newRole: UserRole) => Promise<{ success: boolean; error?: string }>;
@@ -111,7 +117,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     localStorage.removeItem(SESSION_KEY);
   }, []);
 
-  const logAudit = useCallback(async (action: string, entityId?: string, entityName?: string, changes?: JsonRecord) => {
+  const logAudit = useCallback(async (
+    action: string,
+    entityId?: string,
+    entityName?: string,
+    changes?: JsonRecord,
+    entityType = 'student',
+  ) => {
     if (!user) return;
     try {
       await supabase.functions.invoke('auth', {
@@ -121,7 +133,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           userName: user.display_name,
           userRole: user.role,
           auditAction: action,
-          entityType: 'student',
+          entityType,
           entityId,
           entityName,
           changes,

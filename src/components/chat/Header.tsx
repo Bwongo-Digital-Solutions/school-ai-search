@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import {
   Menu, Download, Settings, HelpCircle,
   Moon, Sun, X, ChevronDown, LogOut, User, Shield, HardHat,
-  MessageSquare, Users, Clock, ClipboardList, UserCog, Wallet
+  MessageSquare, Users, Clock, ClipboardList, UserCog, Wallet, Landmark
 } from 'lucide-react';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useAuth } from '@/contexts/AuthContext';
@@ -147,6 +147,18 @@ const Header: React.FC = () => {
             >
               <Wallet className="w-3.5 h-3.5" /> Fees
             </button>
+            {isAdmin && (
+              <button
+                onClick={() => setActiveView('finance')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                  activeView === 'finance'
+                    ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <Landmark className="w-3.5 h-3.5" /> Finance
+              </button>
+            )}
             {isAdmin && (
               <button
                 onClick={() => setActiveView('users')}
@@ -352,6 +364,14 @@ const Header: React.FC = () => {
                       >
                         <Wallet className="w-3.5 h-3.5" /> School Fees Status
                       </button>
+                      {isAdmin && (
+                        <button
+                          onClick={() => { setActiveView('finance'); setShowUserMenu(false); }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                        >
+                          <Landmark className="w-3.5 h-3.5" /> Fee Management
+                        </button>
+                      )}
                       {isAdmin && (
                         <button
                           onClick={() => { setActiveView('users'); setShowUserMenu(false); }}

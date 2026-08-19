@@ -9,16 +9,20 @@ import { createDatabaseConnection, waitForDatabase } from './db/connection.mjs';
 import { initializeDatabase } from './db/schema.mjs';
 import { buildReportCardPdf } from './reports/report-card.mjs';
 import { buildIdCardPdf, buildQrPayload, buildQrPng } from './reports/id-card.mjs';
+import { buildFeeReceiptPdf, buildFeeStatementPdf } from './reports/fee-receipt.mjs';
 import { getPublicGradingOptions } from './reports/grading-config.mjs';
 import { generateLlmSearchReply, getPublicModelCatalog, resolveModelSelection } from './services/llm-models.mjs';
 import { getPaymentStatus, initiatePayment, recordPaymentCallback } from './services/payment-gateway.mjs';
 import { generateAssistantReply } from './services/student-chat.mjs';
+import { handleFeesFunction } from './services/fees.mjs';
+import { toAmount, toIsoDate } from './services/fee-math.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ROOT_DIR = resolve(__dirname, '..');
 const DEFAULT_STATIC_ROOT = process.env.LOCAL_STATIC_ROOT || join(ROOT_DIR, 'dist');
-const DEFAULT_HOST = process.env.LOCAL_BACKEND_HOST || '127.0.0.1';
+// const DEFAULT_HOST = process.env.LOCAL_BACKEND_HOST || '127.0.0.1';
+const DEFAULT_HOST = process.env.LOCAL_BACKEND_HOST || '0.0.0.0';
 const DEFAULT_PORT = Number(process.env.LOCAL_BACKEND_PORT || process.env.PORT || 8787);
 
 // Keep in sync with the users.role CHECK constraint in server/db/schema.mjs and src/lib/roles.ts.
@@ -214,6 +218,9 @@ const TABLES = {
       'amount',
       'currency',
       'due_date',
+      'description',
+      'status',
+      'created_at',
     ],
   },
   payments: {
@@ -221,12 +228,14 @@ const TABLES = {
       'id',
       'student_id',
       'fee_structure_id',
+      'invoice_id',
       'amount',
       'currency',
       'payment_method',
       'reference',
       'paid_at',
       'received_by',
+      'notes',
     ],
   },
   invoices: {
@@ -241,11 +250,62 @@ const TABLES = {
       'due_date',
       'issued_at',
       'line_items',
+      'fee_structure_id',
+      'academic_year',
+      'term',
+      'gross_amount',
+      'discount_total',
+      'notes',
+      'billing_key',
     ],
     jsonColumns: ['line_items'],
   },
   receipts: {
-    columns: ['id', 'payment_id', 'receipt_number', 'amount', 'currency', 'issued_at'],
+    columns: [
+      'id',
+      'payment_id',
+      'student_id',
+      'receipt_number',
+      'amount',
+      'currency',
+      'issued_at',
+      'issued_by',
+    ],
+  },
+  // Readable through /api/db for listing, but every mutation goes through /api/functions/fees so
+  // it is role-checked, transactional and audited — /api/db has no role check at all.
+  fee_bursaries: {
+    columns: [
+      'id',
+      'student_id',
+      'name',
+      'sponsor',
+      'discount_type',
+      'discount_value',
+      'fee_structure_id',
+      'academic_year',
+      'term',
+      'start_date',
+      'end_date',
+      'status',
+      'notes',
+      'approved_by',
+      'created_at',
+    ],
+  },
+  student_fee_standings: {
+    columns: [
+      'id',
+      'student_id',
+      'standing',
+      'note',
+      'review_date',
+      'status',
+      'set_by',
+      'set_at',
+      'cleared_by',
+      'cleared_at',
+    ],
   },
   payment_transactions: {
     columns: [
@@ -721,17 +781,6 @@ const handleAuthFunction = async (database, body) => {
   return { error: `Unsupported auth action: ${action}` };
 };
 
-const toIsoDate = (value) => {
-  if (!value) return null;
-  const date = value instanceof Date ? value : new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
-};
-
-const toAmount = (value) => {
-  const amount = Number(value);
-  return Number.isFinite(amount) ? amount : 0;
-};
-
 const resolveFeeStatus = ({ invoiceCount, totalPaid, balanceDue, earliestUnpaidDueDate }) => {
   if (invoiceCount === 0) return 'no_invoices';
   if (balanceDue <= 0) return 'cleared';
@@ -1114,6 +1163,112 @@ const handleIdCardRequest = async (database, pathname, searchParams) => {
   };
 };
 
+const pdfResponse = (bytes, filename) => ({
+  type: 'binary',
+  status: 200,
+  headers: {
+    'Content-Type': 'application/pdf',
+    'Content-Disposition': `attachment; filename="${filename}"`,
+  },
+  body: Buffer.from(bytes),
+});
+
+/**
+ * Fee receipts and statements. Both are admin-only, checked from the query string because a GET
+ * carries no body — the same trust-the-client model as every other role check here, but it does
+ * stop a support-staff browser from pulling a student's full fee history.
+ */
+const handleFeeDocumentRequest = async (database, pathname, searchParams) => {
+  const receiptMatch = pathname.match(/^\/api\/fees\/receipts\/([^/]+)\.pdf$/);
+  const statementMatch = pathname.match(/^\/api\/fees\/statements\/([^/]+)\.pdf$/);
+  if (!receiptMatch && !statementMatch) {
+    return null;
+  }
+
+  if (searchParams.get('requesterRole') !== 'admin') {
+    return { type: 'json', status: 403, body: { error: 'Unauthorized' } };
+  }
+
+  const school = searchParams.get('schoolName') || undefined;
+
+  if (receiptMatch) {
+    const paymentId = decodeURIComponent(receiptMatch[1]);
+    const result = await database.query(
+      `
+        SELECT
+          p.*,
+          r.receipt_number, r.issued_at AS receipt_issued_at, r.amount AS receipt_amount,
+          r.currency AS receipt_currency,
+          s.student_id AS student_number, s.first_name, s.last_name, s.grade_level, s.class_section
+        FROM payments p
+        JOIN students s ON s.id = p.student_id
+        LEFT JOIN receipts r ON r.payment_id = p.id
+        WHERE p.id = $1
+        LIMIT 1
+      `,
+      [paymentId],
+    );
+
+    const row = result.rows[0];
+    if (!row) return notFound('Payment not found');
+    if (!row.receipt_number) return notFound('No receipt has been issued for this payment');
+
+    const allocations = row.invoice_id
+      ? (
+          await database.query('SELECT invoice_number, balance_due FROM invoices WHERE id = $1', [row.invoice_id])
+        ).rows.map((invoice) => ({
+          invoice_number: invoice.invoice_number,
+          applied: toAmount(row.amount),
+          balance_due: toAmount(invoice.balance_due),
+        }))
+      : [];
+
+    const pdfBytes = await buildFeeReceiptPdf({
+      school,
+      student: {
+        full_name: `${row.first_name} ${row.last_name}`,
+        student_number: row.student_number,
+        grade_level: row.grade_level,
+        class_section: row.class_section,
+      },
+      payment: row,
+      receipt: {
+        receipt_number: row.receipt_number,
+        issued_at: row.receipt_issued_at,
+        amount: row.receipt_amount,
+        currency: row.receipt_currency,
+      },
+      allocations,
+    });
+
+    return pdfResponse(pdfBytes, `${row.receipt_number}.pdf`);
+  }
+
+  const studentId = decodeURIComponent(statementMatch[1]);
+  const ledger = await handleFeesFunction(database, {
+    action: 'student_ledger',
+    requesterRole: 'admin',
+    studentId,
+  });
+  if (ledger.error) return notFound(ledger.error);
+
+  const from = toIsoDate(searchParams.get('from'));
+  const to = toIsoDate(searchParams.get('to'));
+  const entries = ledger.entries.filter(
+    (entry) => (!from || entry.date >= from) && (!to || entry.date <= to),
+  );
+
+  const pdfBytes = await buildFeeStatementPdf({
+    school,
+    student: ledger.student,
+    entries,
+    summary: ledger.summary,
+    asOf: to || new Date(),
+  });
+
+  return pdfResponse(pdfBytes, `${ledger.student.student_number}-fee-statement.pdf`);
+};
+
 export const createAppRuntime = async ({
   connectionString,
   useInMemoryDatabase = false,
@@ -1141,6 +1296,11 @@ export const createAppRuntime = async ({
       const idCardResponse = await handleIdCardRequest(database, pathname, searchParams);
       if (idCardResponse) {
         return idCardResponse;
+      }
+
+      const feeDocumentResponse = await handleFeeDocumentRequest(database, pathname, searchParams);
+      if (feeDocumentResponse) {
+        return feeDocumentResponse;
       }
 
       if (method === 'GET' && pathname === '/api/health') {
@@ -1173,6 +1333,13 @@ export const createAppRuntime = async ({
       if (method === 'POST' && pathname === '/api/functions/fee-status') {
         const data = await handleFeeStatusFunction(database, body);
         return { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/fees') {
+        const data = await handleFeesFunction(database, body);
+        return data?.error
+          ? { type: 'json', status: 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/ai-chat') {
@@ -1293,7 +1460,26 @@ export const startServer = async (options = {}) => {
 };
 
 if (process.argv[1] === __filename) {
-  const { address } = await startServer();
-  const port = typeof address === 'object' && address ? address.port : DEFAULT_PORT;
-  console.log(`Local backend listening on http://${DEFAULT_HOST}:${port}`);
+  // USE_IN_MEMORY_DB runs the same code path against pg-mem, for demos and machines
+  // without a PostgreSQL instance. Data is discarded when the process exits.
+  const useInMemoryDatabase = process.env.USE_IN_MEMORY_DB === 'true' || process.argv.includes('--in-memory');
+
+  try {
+    const { address } = await startServer({ useInMemoryDatabase });
+    const port = typeof address === 'object' && address ? address.port : DEFAULT_PORT;
+    console.log(`Local backend listening on http://${DEFAULT_HOST}:${port}`);
+    if (useInMemoryDatabase) {
+      console.log('Using the in-memory database — records are seeded fresh and lost on exit.');
+    }
+  } catch (error) {
+    if (error?.code === 'ECONNREFUSED') {
+      const target = process.env.DATABASE_URL || 'postgres://127.0.0.1:5432';
+      console.error(`\nCannot reach PostgreSQL at ${target}\n`);
+      console.error('Start a database, or run without one:');
+      console.error('  docker compose -f docker-compose.dev.yml up db   # real PostgreSQL');
+      console.error('  npm run start:memory                            # in-memory, data lost on exit\n');
+      process.exit(1);
+    }
+    throw error;
+  }
 }

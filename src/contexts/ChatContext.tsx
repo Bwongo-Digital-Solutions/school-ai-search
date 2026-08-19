@@ -4,7 +4,9 @@ import { useAuth } from '@/contexts/AuthContext';
 import type { Message, Conversation, Attachment, Student, AiModelOption } from '@/types/chat';
 import type { JsonRecord } from '@/types/auth';
 
-type ActiveView = 'chat' | 'students' | 'records' | 'users' | 'audit' | 'fees';
+// 'fees' is the read-only payment status view every signed-in role can reach.
+// 'finance' is the admin fee management workspace.
+type ActiveView = 'chat' | 'students' | 'records' | 'users' | 'audit' | 'fees' | 'finance';
 
 
 interface ChatContextType {

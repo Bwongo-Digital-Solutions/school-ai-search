@@ -1178,3 +1178,835 @@ test('ai search reports actionable Ollama connection errors', async () => {
     await cleanup();
   }
 });
+
+/* ========================================================================== */
+/* School fees management                                                     */
+/* ========================================================================== */
+
+const feesCall = (runtime, action, body = {}) =>
+  dispatch(runtime, 'POST', '/api/functions/fees', {
+    action,
+    requesterRole: 'admin',
+    actorEmail: 'admin@school.ug',
+    actorName: 'Admin User',
+    ...body,
+  });
+
+const countRows = async (runtime, table) => {
+  const result = await dispatch(runtime, 'POST', '/api/db', {
+    table,
+    operation: 'select',
+    columns: '*',
+  });
+  return result.body.data.length;
+};
+
+// A fixed clock, so a rating assertion cannot start failing tomorrow.
+const AS_OF = '2026-06-30';
+const daysBefore = (days) =>
+  new Date(Date.parse(AS_OF) - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+test('fee math rates payment reliability from invoice and payment history', async () => {
+  const { computePaymentRating, resolveEffectiveStanding, gradeForScore } = await import(
+    '../server/services/fee-math.mjs'
+  );
+
+  const rate = (invoices, payments) => computePaymentRating({ invoices, payments, asOf: AS_OF });
+
+  // Nothing billed at all.
+  const blank = rate([], []);
+  assert.equal(blank.standing, 'unrated');
+  assert.equal(blank.score, null);
+  assert.equal(blank.grade, null);
+  assert.equal(blank.confidence, 'none');
+  assert.equal(blank.reason, 'no_billing_history');
+
+  // Billed for a future term, nothing due yet. This must not read as a perfect record.
+  const notYetDue = rate([{ id: 'i1', total_amount: 1000, balance_due: 1000, due_date: '2026-12-01' }], []);
+  assert.equal(notYetDue.standing, 'unrated');
+  assert.equal(notYetDue.reason, 'no_billing_history');
+
+  // Two invoices settled on or before their due date.
+  const punctual = rate(
+    [
+      { id: 'i1', total_amount: 1000, balance_due: 0, due_date: daysBefore(60) },
+      { id: 'i2', total_amount: 1000, balance_due: 0, due_date: daysBefore(30) },
+    ],
+    [
+      { invoice_id: 'i1', amount: 1000, paid_at: daysBefore(62) },
+      { invoice_id: 'i2', amount: 1000, paid_at: daysBefore(30) },
+    ],
+  );
+  assert.equal(punctual.score, 100);
+  assert.equal(punctual.grade, 'A');
+  assert.equal(punctual.standing, 'excellent');
+  assert.equal(punctual.metrics.onTimeCount, 2);
+  assert.equal(punctual.metrics.lateCount, 0);
+
+  // Settled 20 days late, nothing left owing: punctuality alone carries the penalty.
+  const late = rate(
+    [{ id: 'i1', total_amount: 1000, balance_due: 0, due_date: daysBefore(50) }],
+    [{ invoice_id: 'i1', amount: 1000, paid_at: daysBefore(30) }],
+  );
+  assert.equal(late.penalties.punctuality, 30);
+  assert.equal(late.penalties.exposure, 0);
+  assert.equal(late.penalties.delinquency, 0);
+  assert.equal(late.score, 70);
+  assert.equal(late.grade, 'B');
+
+  // Wholly unpaid and 100 days past due: exposure and delinquency both max out.
+  const unpaid = rate([{ id: 'i1', total_amount: 1000, balance_due: 1000, due_date: daysBefore(100) }], []);
+  assert.equal(unpaid.penalties.exposure, 30);
+  assert.equal(unpaid.penalties.delinquency, 30);
+  assert.equal(unpaid.score, 40);
+  assert.equal(unpaid.grade, 'D');
+  assert.equal(unpaid.standing, 'watch');
+
+  // All three penalties biting at once is what it takes to reach the bottom grade.
+  const delinquent = rate(
+    [
+      { id: 'i1', total_amount: 1000, balance_due: 0, due_date: daysBefore(80) },
+      { id: 'i2', total_amount: 1000, balance_due: 1000, due_date: daysBefore(100) },
+    ],
+    [{ invoice_id: 'i1', amount: 1000, paid_at: daysBefore(40) }],
+  );
+  assert.equal(delinquent.penalties.punctuality, 40);
+  assert.equal(delinquent.penalties.exposure, 15);
+  assert.equal(delinquent.penalties.delinquency, 30);
+  assert.equal(delinquent.score, 15);
+  assert.equal(delinquent.grade, 'E');
+  assert.equal(delinquent.standing, 'delinquent');
+
+  // The delinquency penalty stays clamped as the debt ages further.
+  const older = rate([{ id: 'i1', total_amount: 1000, balance_due: 1000, due_date: daysBefore(400) }], []);
+  assert.equal(older.penalties.delinquency, 30);
+
+  // Half the money that has come due is still outstanding, and nothing is late.
+  const halfOwing = rate(
+    [
+      { id: 'i1', total_amount: 1000, balance_due: 0, due_date: daysBefore(20) },
+      { id: 'i2', total_amount: 1000, balance_due: 1000, due_date: AS_OF },
+    ],
+    [{ invoice_id: 'i1', amount: 1000, paid_at: daysBefore(25) }],
+  );
+  assert.equal(halfOwing.penalties.exposure, 15);
+  assert.equal(halfOwing.score, 85);
+  assert.equal(halfOwing.grade, 'A');
+
+  // Grade boundaries.
+  for (const [score, grade] of [
+    [85, 'A'], [84, 'B'], [70, 'B'], [69, 'C'], [55, 'C'], [54, 'D'], [40, 'D'], [39, 'E'], [0, 'E'],
+  ]) {
+    assert.equal(gradeForScore(score).grade, grade, `score ${score} should grade ${grade}`);
+  }
+
+  // Confidence rises with the number of scoreable settlements.
+  const settled = (count) =>
+    rate(
+      Array.from({ length: count }, (_, index) => ({
+        id: `i${index}`,
+        total_amount: 1000,
+        balance_due: 0,
+        due_date: daysBefore(30),
+      })),
+      Array.from({ length: count }, (_, index) => ({
+        invoice_id: `i${index}`,
+        amount: 1000,
+        paid_at: daysBefore(31),
+      })),
+    );
+  assert.equal(settled(1).confidence, 'low');
+  assert.equal(settled(3).confidence, 'medium');
+  assert.equal(settled(5).confidence, 'high');
+
+  // An invoice settled without a linked payment says nothing about punctuality either way.
+  const untraced = rate([{ id: 'i1', total_amount: 1000, balance_due: 0, due_date: daysBefore(30) }], []);
+  assert.equal(untraced.metrics.untracedSettledCount, 1);
+  assert.equal(untraced.metrics.onTimeCount, 0);
+
+  // The manual override wins, while the computed rating stays visible for reference.
+  const computed = delinquent;
+  const overridden = resolveEffectiveStanding({
+    computed,
+    override: {
+      id: 'st1',
+      student_id: 's1',
+      standing: 'good',
+      note: 'Guardian on an agreed schedule',
+      review_date: daysBefore(5),
+      set_by: 'Admin User',
+      set_at: `${daysBefore(10)}T00:00:00.000Z`,
+    },
+    asOf: AS_OF,
+  });
+  assert.equal(overridden.standing, 'good');
+  assert.equal(overridden.source, 'manual');
+  assert.equal(overridden.computed.standing, 'delinquent');
+  assert.equal(overridden.computed.score, 15);
+  // A past review date flags the override for attention but must never expire it on its own.
+  assert.equal(overridden.override.review_due, true);
+  assert.equal(overridden.standing, 'good');
+
+  const future = resolveEffectiveStanding({
+    computed,
+    override: { id: 'st1', student_id: 's1', standing: 'good', note: 'x', review_date: '2027-01-01' },
+    asOf: AS_OF,
+  });
+  assert.equal(future.override.review_due, false);
+
+  const plain = resolveEffectiveStanding({ computed, override: null, asOf: AS_OF });
+  assert.equal(plain.source, 'computed');
+  assert.equal(plain.standing, 'delinquent');
+  assert.equal(plain.computed.score, 15);
+  assert.equal(plain.override, null);
+});
+
+test('fee math applies bursaries without ever driving an invoice negative', async () => {
+  const { applyBursariesToAmount, buildInvoiceLineItems } = await import('../server/services/fee-math.mjs');
+
+  const structure = { id: 'fs1', name: 'Grade 10 Day', academic_year: '2026/2027', term: 'Term 1' };
+  const apply = (bursaries, gross = 1000000) =>
+    applyBursariesToAmount({ gross, bursaries, structure, issueDate: AS_OF });
+
+  const percentage = (value, extra = {}) => ({
+    id: `b-${value}-${extra.id || ''}`,
+    name: 'Bursary',
+    status: 'active',
+    discount_type: 'percentage',
+    discount_value: value,
+    ...extra,
+  });
+
+  const single = apply([percentage(25)]);
+  assert.equal(single.discountTotal, 250000);
+  assert.equal(single.net, 750000);
+
+  // Percentages sum rather than compound: 50% + 30% is 80% off, not 65%.
+  const stacked = apply([percentage(50, { id: 'a' }), percentage(30, { id: 'b' })]);
+  assert.equal(stacked.discountTotal, 800000);
+  assert.equal(stacked.net, 200000);
+
+  // And they cap at 100%, so the invoice bottoms out at zero rather than going negative.
+  const over = apply([percentage(60, { id: 'a' }), percentage(60, { id: 'b' })]);
+  assert.equal(over.discountTotal, 1000000);
+  assert.equal(over.net, 0);
+
+  // A fixed amount larger than what is left is clamped to the gross.
+  const mixed = apply([
+    percentage(50, { id: 'a' }),
+    { id: 'b-fixed', name: 'Fixed', status: 'active', discount_type: 'fixed', discount_value: 900000 },
+  ]);
+  assert.equal(mixed.discountTotal, 1000000);
+  assert.equal(mixed.net, 0);
+
+  // Apportioned discount lines always sum back to the total that was applied.
+  assert.equal(
+    mixed.discounts.reduce((sum, discount) => sum + discount.amount, 0),
+    mixed.discountTotal,
+  );
+
+  // Scope filters.
+  assert.equal(apply([percentage(25, { fee_structure_id: 'other' })]).discountTotal, 0);
+  assert.equal(apply([percentage(25, { academic_year: '2020/2021' })]).discountTotal, 0);
+  assert.equal(apply([percentage(25, { term: 'Term 3' })]).discountTotal, 0);
+  assert.equal(apply([percentage(25, { end_date: daysBefore(1) })]).discountTotal, 0);
+  assert.equal(apply([percentage(25, { start_date: '2027-01-01' })]).discountTotal, 0);
+  assert.equal(apply([percentage(25, { status: 'ended' })]).discountTotal, 0);
+  // A bursary scoped to nothing in particular is a wildcard and applies everywhere.
+  assert.equal(apply([percentage(25, { fee_structure_id: null, academic_year: null, term: null })]).discountTotal, 250000);
+  // An exactly matching scope applies too.
+  assert.equal(
+    apply([percentage(25, { fee_structure_id: 'fs1', academic_year: '2026/2027', term: 'Term 1' })]).discountTotal,
+    250000,
+  );
+
+  // Line items carry discounts as negatives, so they sum to the net payable.
+  const applied = apply([percentage(25)]);
+  const lineItems = buildInvoiceLineItems({ structure, gross: applied.gross, discounts: applied.discounts });
+  assert.equal(lineItems.length, 2);
+  assert.equal(lineItems[0].type, 'fee');
+  assert.equal(lineItems[1].type, 'discount');
+  assert.ok(lineItems[1].amount < 0);
+  assert.equal(
+    lineItems.reduce((sum, item) => sum + item.amount, 0),
+    applied.net,
+  );
+  assert.equal(applied.gross - applied.discountTotal, applied.net);
+});
+
+test('fees endpoint refuses every action to non-admins without writing anything', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const { FEES_ACTIONS } = await import('../server/services/fees.mjs');
+    assert.ok(FEES_ACTIONS.length >= 15, 'expected the full fees action catalogue');
+
+    for (const action of FEES_ACTIONS) {
+      for (const requesterRole of ['teacher', 'support_staff', undefined]) {
+        const response = await dispatch(runtime, 'POST', '/api/functions/fees', {
+          action,
+          requesterRole,
+          // Payloads that would otherwise succeed, to prove the guard runs first.
+          name: 'Smuggled tier',
+          academicYear: '2026/2027',
+          term: 'Term 1',
+          amount: 1000,
+          studentId: 'student-001',
+          confirm: true,
+          standing: 'delinquent',
+          note: 'unauthorised',
+        });
+        assert.equal(response.status, 400, `${action} as ${requesterRole} should be rejected`);
+        assert.equal(response.body.error, 'Unauthorized');
+      }
+    }
+
+    const unknown = await feesCall(runtime, 'drop_everything');
+    assert.equal(unknown.status, 400);
+    assert.equal(unknown.body.error, 'Unsupported fees action: drop_everything');
+
+    // Nothing leaked past the guard.
+    for (const table of ['invoices', 'payments', 'receipts', 'fee_structures', 'fee_bursaries', 'student_fee_standings']) {
+      assert.equal(await countRows(runtime, table), 0, `${table} should still be empty`);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test('bulk billing is idempotent, applies bursaries, and leaves fee status untouched', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const structure = await feesCall(runtime, 'save_fee_structure', {
+      name: 'Grade 10 Day Tuition',
+      gradeLevel: 10,
+      studentType: 'day',
+      academicYear: '2026/2027',
+      term: 'Term 1',
+      amount: 1500000,
+      dueDate: '2026-09-01',
+    });
+    assert.equal(structure.status, 200);
+    const feeStructureId = structure.body.data.structure.id;
+
+    // Validation.
+    assert.equal((await feesCall(runtime, 'save_fee_structure', { name: '', academicYear: '2026/2027', term: 'Term 1', amount: 1 })).status, 400);
+    assert.equal((await feesCall(runtime, 'save_fee_structure', { name: 'x', academicYear: '2026/2027', term: 'Term 1', amount: 0 })).status, 400);
+    assert.equal((await feesCall(runtime, 'save_fee_structure', { name: 'x', academicYear: '', term: 'Term 1', amount: 1 })).status, 400);
+
+    const grade10 = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students',
+      operation: 'select',
+      columns: '*',
+      filters: [{ field: 'grade_level', operator: 'eq', value: 10 }],
+    });
+    const active = grade10.body.data.filter((student) => student.status === 'active');
+    assert.ok(active.length >= 2, 'seed data should hold several active grade 10 students');
+    const sponsored = active[0];
+
+    await feesCall(runtime, 'save_bursary', {
+      studentId: sponsored.id,
+      name: 'Hardship Grant',
+      discountType: 'percentage',
+      discountValue: 25,
+    });
+
+    const preview = await feesCall(runtime, 'preview_billing_run', { feeStructureId });
+    assert.equal(preview.status, 200);
+    assert.equal(preview.body.data.rows.length, active.length);
+    assert.ok(preview.body.data.rows.every((row) => row.already_invoiced === false));
+    const previewSponsored = preview.body.data.rows.find((row) => row.student_id === sponsored.id);
+    assert.equal(previewSponsored.net, 1125000);
+    assert.equal(previewSponsored.discount_total, 375000);
+
+    // An unconfirmed run must not bill anyone.
+    const unconfirmed = await feesCall(runtime, 'run_billing', { feeStructureId });
+    assert.equal(unconfirmed.status, 400);
+    assert.equal(unconfirmed.body.error, 'Billing run must be confirmed');
+    assert.equal(await countRows(runtime, 'invoices'), 0);
+
+    const billed = await feesCall(runtime, 'run_billing', { feeStructureId, confirm: true });
+    assert.equal(billed.status, 200);
+    assert.equal(billed.body.data.created, active.length);
+    assert.equal(billed.body.data.skipped, 0);
+
+    const numbers = billed.body.data.invoices.map((invoice) => invoice.invoice_number);
+    assert.equal(new Set(numbers).size, numbers.length, 'invoice numbers must be unique');
+    for (const number of numbers) assert.match(number, /^INV-\d{4}-\d{6}$/);
+    for (const invoice of billed.body.data.invoices) {
+      assert.equal(invoice.status, 'issued');
+      assert.equal(invoice.balance_due, invoice.total_amount);
+      // Line items always reconcile to the net payable.
+      const lineTotal = invoice.line_items.reduce((sum, item) => sum + item.amount, 0);
+      assert.equal(lineTotal, invoice.total_amount);
+      assert.equal(invoice.gross_amount - invoice.discount_total, invoice.total_amount);
+    }
+
+    const sponsoredInvoice = billed.body.data.invoices.find((invoice) => invoice.student_id === sponsored.id);
+    assert.equal(sponsoredInvoice.total_amount, 1125000);
+    assert.equal(sponsoredInvoice.gross_amount, 1500000);
+    assert.equal(sponsoredInvoice.discount_total, 375000);
+    assert.ok(sponsoredInvoice.line_items.some((item) => item.type === 'discount' && item.amount === -375000));
+
+    // Re-running must not double-bill, however many times someone presses the button.
+    const again = await feesCall(runtime, 'run_billing', { feeStructureId, confirm: true });
+    assert.equal(again.body.data.created, 0);
+    assert.equal(again.body.data.skipped, active.length);
+    assert.equal(await countRows(runtime, 'invoices'), active.length);
+
+    const afterPreview = await feesCall(runtime, 'preview_billing_run', { feeStructureId });
+    assert.ok(afterPreview.body.data.rows.every((row) => row.already_invoiced === true));
+    assert.ok(afterPreview.body.data.rows.every((row) => /^INV-\d{4}-\d{6}$/.test(row.existing_invoice_number)));
+
+    // An archived structure cannot be billed again.
+    await feesCall(runtime, 'delete_fee_structure', { id: feeStructureId });
+    const archived = await feesCall(runtime, 'run_billing', { feeStructureId, confirm: true });
+    assert.equal(archived.status, 400);
+    // It was archived rather than deleted, because invoices already point at it.
+    const structures = await feesCall(runtime, 'list_fee_structures', { includeArchived: true });
+    assert.equal(structures.body.data.structures[0].status, 'archived');
+    assert.equal(structures.body.data.structures[0].invoice_count, active.length);
+
+    // The support-staff-facing endpoint must keep its shape and its field allow-list.
+    const feeStatus = await dispatch(runtime, 'POST', '/api/functions/fee-status', {});
+    assert.equal(feeStatus.status, 200);
+    assert.equal(feeStatus.body.data.students.length, 15);
+    const allowed = [
+      'student_id', 'student_number', 'full_name', 'grade_level', 'class_section', 'currency',
+      'invoice_count', 'total_invoiced', 'total_paid', 'balance_due', 'next_due_date',
+      'last_payment_at', 'status',
+    ];
+    for (const row of feeStatus.body.data.students) {
+      assert.deepEqual(Object.keys(row).sort(), [...allowed].sort());
+    }
+    const sponsoredStatus = feeStatus.body.data.students.find((row) => row.student_id === sponsored.id);
+    assert.equal(sponsoredStatus.total_invoiced, 1125000);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('recording a payment reconciles invoices and issues a receipt', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const structure = await feesCall(runtime, 'save_fee_structure', {
+      name: 'Grade 9 Boarding',
+      gradeLevel: 9,
+      academicYear: '2026/2027',
+      term: 'Term 1',
+      amount: 1000000,
+      dueDate: '2026-09-01',
+    });
+    const feeStructureId = structure.body.data.structure.id;
+    const billed = await feesCall(runtime, 'run_billing', { feeStructureId, confirm: true });
+    const invoice = billed.body.data.invoices[0];
+    const studentId = invoice.student_id;
+
+    // Validation first.
+    assert.equal((await feesCall(runtime, 'record_payment', { studentId, amount: 0, paymentMethod: 'Cash' })).status, 400);
+    assert.equal((await feesCall(runtime, 'record_payment', { studentId, amount: -1, paymentMethod: 'Cash' })).status, 400);
+    assert.equal((await feesCall(runtime, 'record_payment', { studentId, amount: 100, paymentMethod: '' })).status, 400);
+    assert.equal((await feesCall(runtime, 'record_payment', { studentId: 'nobody', amount: 100, paymentMethod: 'Cash' })).status, 400);
+
+    const otherInvoice = billed.body.data.invoices.find((row) => row.student_id !== studentId);
+    const crossed = await feesCall(runtime, 'record_payment', {
+      studentId,
+      invoiceId: otherInvoice.id,
+      amount: 100,
+      paymentMethod: 'Cash',
+    });
+    assert.equal(crossed.status, 400);
+    assert.equal(crossed.body.error, 'Invoice does not belong to this student');
+
+    // Part payment against a named invoice.
+    const part = await feesCall(runtime, 'record_payment', {
+      studentId,
+      invoiceId: invoice.id,
+      amount: 400000,
+      paymentMethod: 'Cash',
+    });
+    assert.equal(part.status, 200);
+    assert.equal(part.body.data.allocations.length, 1);
+    assert.equal(part.body.data.allocations[0].applied, 400000);
+    assert.equal(part.body.data.allocations[0].balance_due, 600000);
+    assert.equal(part.body.data.allocations[0].status, 'partial');
+    assert.match(part.body.data.receipt.receipt_number, /^RCT-\d{4}-\d{6}$/);
+    assert.equal(part.body.data.payment.invoice_id, invoice.id);
+    assert.equal(part.body.data.creditAmount, 0);
+
+    // Settling the remainder closes the invoice.
+    const rest = await feesCall(runtime, 'record_payment', {
+      studentId,
+      invoiceId: invoice.id,
+      amount: 600000,
+      paymentMethod: 'Bank Transfer',
+    });
+    assert.equal(rest.body.data.allocations[0].balance_due, 0);
+    assert.equal(rest.body.data.allocations[0].status, 'paid');
+
+    // Receipt numbers stay unique across payments in the same year.
+    assert.notEqual(part.body.data.receipt.receipt_number, rest.body.data.receipt.receipt_number);
+    assert.equal(await countRows(runtime, 'receipts'), 2);
+
+    // Auto-allocation spreads across open invoices, oldest due date first.
+    const second = await feesCall(runtime, 'save_fee_structure', {
+      name: 'Grade 9 Term 2',
+      gradeLevel: 9,
+      academicYear: '2026/2027',
+      term: 'Term 2',
+      amount: 500000,
+      dueDate: '2026-12-01',
+    });
+    await feesCall(runtime, 'run_billing', { feeStructureId: second.body.data.structure.id, confirm: true });
+
+    const third = await feesCall(runtime, 'save_fee_structure', {
+      name: 'Grade 9 Term 3',
+      gradeLevel: 9,
+      academicYear: '2026/2027',
+      term: 'Term 3',
+      amount: 500000,
+      dueDate: '2027-03-01',
+    });
+    await feesCall(runtime, 'run_billing', { feeStructureId: third.body.data.structure.id, confirm: true });
+
+    const spread = await feesCall(runtime, 'record_payment', {
+      studentId,
+      amount: 700000,
+      paymentMethod: 'Mobile Money',
+    });
+    assert.equal(spread.body.data.allocations.length, 2);
+    assert.equal(spread.body.data.allocations[0].applied, 500000);
+    assert.equal(spread.body.data.allocations[0].status, 'paid');
+    assert.equal(spread.body.data.allocations[1].applied, 200000);
+    assert.equal(spread.body.data.allocations[1].status, 'partial');
+    // Split across invoices, so no single invoice owns the payment row.
+    assert.equal(spread.body.data.payment.invoice_id, null);
+
+    // Overpayment clears everything and reports the credit rather than silently absorbing it.
+    const over = await feesCall(runtime, 'record_payment', {
+      studentId,
+      amount: 1000000,
+      paymentMethod: 'Cash',
+    });
+    assert.equal(over.body.data.creditAmount, 700000);
+    assert.ok(over.body.data.allocations.every((allocation) => allocation.status === 'paid'));
+    assert.equal(over.body.data.payment.amount, 1000000);
+
+    // The money trail is written server-side, not left to the browser.
+    const audit = await dispatch(runtime, 'POST', '/api/functions/auth', { action: 'get_audit_log', limit: 100 });
+    const paymentLogs = audit.body.data.logs.filter((log) => log.entity_type === 'payment');
+    assert.ok(paymentLogs.length >= 4);
+    assert.equal(paymentLogs[0].action, 'payment_recorded');
+    assert.ok(audit.body.data.logs.some((log) => log.action === 'billing_run' && log.entity_type === 'invoice'));
+
+    // Ledger reconciles.
+    const ledger = await feesCall(runtime, 'student_ledger', { studentId });
+    assert.equal(ledger.status, 200);
+    assert.equal(ledger.body.data.summary.balance_due, 0);
+    assert.equal(ledger.body.data.entries[ledger.body.data.entries.length - 1].balance <= 0, true);
+    assert.equal(ledger.body.data.receipts.length, 4);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('fee receipts and statements render as PDFs for admins only', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const structure = await feesCall(runtime, 'save_fee_structure', {
+      name: 'Grade 11 Day',
+      gradeLevel: 11,
+      academicYear: '2026/2027',
+      term: 'Term 1',
+      amount: 800000,
+      dueDate: '2026-09-01',
+    });
+    const billed = await feesCall(runtime, 'run_billing', {
+      feeStructureId: structure.body.data.structure.id,
+      confirm: true,
+    });
+    const invoice = billed.body.data.invoices[0];
+
+    const paid = await feesCall(runtime, 'record_payment', {
+      studentId: invoice.student_id,
+      invoiceId: invoice.id,
+      amount: 800000,
+      paymentMethod: 'Cash',
+    });
+    const paymentId = paid.body.data.payment.id;
+
+    const receipt = await runtime.dispatch({
+      method: 'GET',
+      pathname: `/api/fees/receipts/${paymentId}.pdf`,
+      searchParams: new URLSearchParams({ requesterRole: 'admin' }),
+    });
+    assert.equal(receipt.status, 200);
+    assert.equal(receipt.type, 'binary');
+    assert.equal(receipt.headers['Content-Type'], 'application/pdf');
+    assert.ok(receipt.body.length > 500);
+
+    const statement = await runtime.dispatch({
+      method: 'GET',
+      pathname: `/api/fees/statements/${invoice.student_id}.pdf`,
+      searchParams: new URLSearchParams({ requesterRole: 'admin' }),
+    });
+    assert.equal(statement.status, 200);
+    assert.equal(statement.type, 'binary');
+    assert.ok(statement.body.length > 500);
+
+    // A support-staff browser must not be able to pull a full fee statement.
+    for (const role of ['support_staff', 'teacher']) {
+      const denied = await runtime.dispatch({
+        method: 'GET',
+        pathname: `/api/fees/statements/${invoice.student_id}.pdf`,
+        searchParams: new URLSearchParams({ requesterRole: role }),
+      });
+      assert.equal(denied.status, 403);
+    }
+
+    const anonymous = await runtime.dispatch({
+      method: 'GET',
+      pathname: `/api/fees/receipts/${paymentId}.pdf`,
+      searchParams: new URLSearchParams(),
+    });
+    assert.equal(anonymous.status, 403);
+
+    const missing = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/fees/receipts/nope.pdf',
+      searchParams: new URLSearchParams({ requesterRole: 'admin' }),
+    });
+    assert.equal(missing.status, 404);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('an admin standing override supersedes the computed rating and can be cleared', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const studentId = 'student-001';
+
+    assert.equal((await feesCall(runtime, 'set_standing', { studentId, standing: 'vip', note: 'x' })).status, 400);
+    const noNote = await feesCall(runtime, 'set_standing', { studentId, standing: 'watch', note: '  ' });
+    assert.equal(noNote.status, 400);
+    assert.equal(noNote.body.error, 'A note explaining the override is required');
+    assert.equal((await feesCall(runtime, 'set_standing', { studentId: 'ghost', standing: 'watch', note: 'x' })).status, 400);
+
+    const set = await feesCall(runtime, 'set_standing', {
+      studentId,
+      standing: 'watch',
+      note: 'Guardian promised clearance by end of Term 2',
+      reviewDate: '2026-01-01',
+      asOf: AS_OF,
+    });
+    assert.equal(set.status, 200);
+    assert.equal(set.body.data.effective.source, 'manual');
+    assert.equal(set.body.data.effective.standing, 'watch');
+    assert.ok(set.body.data.effective.computed, 'the computed rating stays available for reference');
+
+    // Overriding again supersedes rather than accumulating: exactly one live row per student.
+    const replaced = await feesCall(runtime, 'set_standing', {
+      studentId,
+      standing: 'delinquent',
+      note: 'Arrangement lapsed',
+    });
+    assert.equal(replaced.body.data.effective.standing, 'delinquent');
+
+    const rows = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'student_fee_standings',
+      operation: 'select',
+      columns: '*',
+      filters: [{ field: 'student_id', operator: 'eq', value: studentId }],
+    });
+    assert.equal(rows.body.data.length, 2, 'the superseded override is kept as history');
+    const live = rows.body.data.filter((row) => row.status === 'active');
+    assert.equal(live.length, 1);
+    assert.equal(live[0].standing, 'delinquent');
+    const cleared = rows.body.data.find((row) => row.status === 'cleared');
+    assert.ok(cleared.cleared_at, 'the superseded row records when it was cleared');
+    assert.equal(cleared.cleared_by, 'Admin User');
+
+    // A past review date raises a flag without changing the standing.
+    const due = await feesCall(runtime, 'list_standings', { reviewDueOnly: true, asOf: AS_OF });
+    assert.equal(due.body.data.rows.length, 0, 'the live override carries no review date');
+
+    await feesCall(runtime, 'set_standing', {
+      studentId,
+      standing: 'watch',
+      note: 'Review at the end of term',
+      reviewDate: daysBefore(5),
+    });
+    const nowDue = await feesCall(runtime, 'list_standings', { reviewDueOnly: true, asOf: AS_OF });
+    assert.equal(nowDue.body.data.rows.length, 1);
+    assert.equal(nowDue.body.data.rows[0].student_id, studentId);
+    assert.equal(nowDue.body.data.rows[0].standing, 'watch');
+    assert.equal(nowDue.body.data.rows[0].override.review_due, true);
+
+    const filtered = await feesCall(runtime, 'list_standings', { standing: 'watch', asOf: AS_OF });
+    assert.ok(filtered.body.data.rows.every((row) => row.standing === 'watch'));
+
+    const clear = await feesCall(runtime, 'clear_standing', { studentId });
+    assert.equal(clear.body.data.cleared, true);
+    assert.equal(clear.body.data.effective.source, 'computed');
+    assert.equal(clear.body.data.effective.override, null);
+
+    // Clearing again is a no-op rather than an error.
+    assert.equal((await feesCall(runtime, 'clear_standing', { studentId })).body.data.cleared, false);
+
+    const audit = await dispatch(runtime, 'POST', '/api/functions/auth', { action: 'get_audit_log', limit: 100 });
+    assert.ok(audit.body.data.logs.some((log) => log.entity_type === 'fee_standing' && log.action === 'fee_standing_set'));
+    assert.ok(audit.body.data.logs.some((log) => log.action === 'fee_standing_cleared'));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the arrears report ages outstanding balances into buckets', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const studentId = 'student-001';
+    const invoice = async (number, amount, dueDate) => {
+      await dispatch(runtime, 'POST', '/api/db', {
+        table: 'invoices',
+        operation: 'insert',
+        columns: '*',
+        single: true,
+        payload: {
+          student_id: studentId,
+          invoice_number: number,
+          status: 'issued',
+          total_amount: amount,
+          balance_due: amount,
+          currency: 'UGX',
+          due_date: dueDate,
+        },
+      });
+    };
+
+    await invoice('INV-TEST-000001', 100000, daysBefore(10));
+    await invoice('INV-TEST-000002', 200000, daysBefore(45));
+    await invoice('INV-TEST-000003', 400000, daysBefore(200));
+    await invoice('INV-TEST-000004', 800000, '2027-01-01');
+
+    const report = await feesCall(runtime, 'arrears_report', { asOf: AS_OF });
+    assert.equal(report.status, 200);
+    const row = report.body.data.rows.find((entry) => entry.student_id === studentId);
+
+    assert.equal(row.days_1_30, 100000);
+    assert.equal(row.days_31_60, 200000);
+    assert.equal(row.days_61_90, 0);
+    assert.equal(row.days_90_plus, 400000);
+    assert.equal(row.current, 800000);
+    assert.equal(row.total_outstanding, 1500000);
+    assert.equal(row.days_overdue, 200);
+    assert.equal(row.oldest_due_date, daysBefore(200));
+
+    // Totals reconcile to the rows they summarise.
+    assert.equal(report.body.data.totals.total, report.body.data.rows.reduce((sum, entry) => sum + entry.total_outstanding, 0));
+    assert.equal(report.body.data.totals.days_90_plus, 400000);
+
+    // Bucket boundaries.
+    const { agingBucketFor } = await import('../server/services/fee-math.mjs');
+    assert.equal(agingBucketFor(0), 'current');
+    assert.equal(agingBucketFor(1), 'days_1_30');
+    assert.equal(agingBucketFor(30), 'days_1_30');
+    assert.equal(agingBucketFor(31), 'days_31_60');
+    assert.equal(agingBucketFor(60), 'days_31_60');
+    assert.equal(agingBucketFor(61), 'days_61_90');
+    assert.equal(agingBucketFor(90), 'days_61_90');
+    assert.equal(agingBucketFor(91), 'days_90_plus');
+
+    // Filters.
+    const filtered = await feesCall(runtime, 'arrears_report', { asOf: AS_OF, minBalance: 2000000 });
+    assert.equal(filtered.body.data.rows.length, 0);
+    const byGrade = await feesCall(runtime, 'arrears_report', { asOf: AS_OF, gradeLevel: 12 });
+    assert.ok(byGrade.body.data.rows.every((entry) => entry.grade_level === 12));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('gateway payments are reconciled and receipted exactly once', async () => {
+  const { runtime, cleanup } = await startTestRuntime({
+    httpClient: async () => new Response(JSON.stringify({}), { status: 200 }),
+  });
+
+  try {
+    await dispatch(runtime, 'POST', '/api/db', {
+      table: 'invoices',
+      operation: 'insert',
+      columns: '*',
+      single: true,
+      payload: {
+        id: 'invoice-gw',
+        student_id: 'student-002',
+        invoice_number: 'INV-GW-000001',
+        status: 'issued',
+        total_amount: 500000,
+        balance_due: 500000,
+        currency: 'UGX',
+        due_date: '2026-09-01',
+      },
+    });
+
+    const initiated = await dispatch(runtime, 'POST', '/api/functions/payments', {
+      action: 'initiate',
+      provider: 'mtn_momo',
+      studentId: 'student-002',
+      invoiceId: 'invoice-gw',
+      amount: 200000,
+      phoneNumber: '+256700000000',
+    });
+    assert.equal(initiated.status, 200);
+    const reference = initiated.body.data.transaction.external_reference;
+
+    const callback = () =>
+      dispatch(runtime, 'POST', '/api/functions/payments', {
+        action: 'callback',
+        externalReference: reference,
+        status: 'successful',
+      });
+
+    await callback();
+    // A provider replaying the same callback must not pay the invoice twice.
+    await callback();
+
+    const payments = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'payments',
+      operation: 'select',
+      columns: '*',
+      filters: [{ field: 'reference', operator: 'eq', value: reference }],
+    });
+    assert.equal(payments.body.data.length, 1);
+    assert.equal(payments.body.data[0].invoice_id, 'invoice-gw');
+
+    const invoice = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'invoices',
+      operation: 'select',
+      columns: '*',
+      filters: [{ field: 'id', operator: 'eq', value: 'invoice-gw' }],
+      single: true,
+    });
+    assert.equal(invoice.body.data.balance_due, 300000);
+    assert.equal(invoice.body.data.status, 'partial');
+
+    // Every payment in the system gets a receipt, including the ones the gateway records.
+    const receipts = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'receipts',
+      operation: 'select',
+      columns: '*',
+      filters: [{ field: 'payment_id', operator: 'eq', value: payments.body.data[0].id }],
+    });
+    assert.equal(receipts.body.data.length, 1);
+    assert.match(receipts.body.data[0].receipt_number, /^RCT-\d{4}-\d{6}$/);
+    assert.equal(receipts.body.data[0].issued_by, 'payment_gateway');
+  } finally {
+    await cleanup();
+  }
+});

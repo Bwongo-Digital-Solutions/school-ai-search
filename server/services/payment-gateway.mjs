@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { withTransaction } from '../db/connection.mjs';
+import { issueReceipt } from './fee-documents.mjs';
 
 const DEFAULT_CURRENCY = process.env.PAYMENT_CURRENCY || 'UGX';
 const PAYMENT_MODE = process.env.PAYMENT_GATEWAY_MODE || 'mock';
@@ -242,23 +244,28 @@ const fetchTransaction = async (database, paymentReference) => {
   return rows[0] || null;
 };
 
-const recordSuccessfulPayment = async (database, transaction) => {
-  const existing = await database.query('SELECT id FROM payments WHERE reference = $1 LIMIT 1', [
+// Runs inside a transaction: the payment, the invoice reconciliation and the receipt have to
+// land together or not at all, otherwise an interruption leaves money recorded against an
+// unreconciled invoice, or with no receipt to hand the payer.
+const recordSuccessfulPayment = async (executor, transaction) => {
+  // The provider can deliver the same callback more than once, so a replay must not double-pay.
+  const existing = await executor.query('SELECT id FROM payments WHERE reference = $1 LIMIT 1', [
     transaction.external_reference,
   ]);
   if (existing.rows[0]) return existing.rows[0].id;
 
   const paymentId = randomUUID();
-  await database.query(
+  await executor.query(
     `
       INSERT INTO payments (
-        id, student_id, fee_structure_id, amount, currency, payment_method, reference, received_by
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        id, student_id, fee_structure_id, invoice_id, amount, currency, payment_method, reference, received_by
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
     `,
     [
       paymentId,
       transaction.student_id,
       null,
+      transaction.invoice_id || null,
       transaction.amount,
       transaction.currency,
       transaction.provider,
@@ -268,7 +275,7 @@ const recordSuccessfulPayment = async (database, transaction) => {
   );
 
   if (transaction.invoice_id) {
-    await database.query(
+    await executor.query(
       `
         UPDATE invoices
         SET
@@ -280,6 +287,15 @@ const recordSuccessfulPayment = async (database, transaction) => {
     );
   }
 
+  await issueReceipt(executor, {
+    paymentId,
+    studentId: transaction.student_id,
+    amount: transaction.amount,
+    currency: transaction.currency,
+    issuedAt: null,
+    issuedBy: 'payment_gateway',
+  });
+
   return paymentId;
 };
 
@@ -289,35 +305,37 @@ const updateTransactionStatus = async (database, transaction, status, patch = {}
     ...(patch.metadata || {}),
   };
 
-  const { rows } = await database.query(
-    `
-      UPDATE payment_transactions
-      SET
-        status = $1,
-        status_reason = $2,
-        customer_message = COALESCE($3, customer_message),
-        provider_reference = COALESCE($4, provider_reference),
-        metadata = $5,
-        updated_at = NOW()
-      WHERE id = $6
-      RETURNING *
-    `,
-    [
-      status,
-      patch.statusReason || transaction.status_reason || null,
-      patch.customerMessage || null,
-      patch.providerReference || null,
-      JSON.stringify(metadata),
-      transaction.id,
-    ],
-  );
+  return withTransaction(database, async (executor) => {
+    const { rows } = await executor.query(
+      `
+        UPDATE payment_transactions
+        SET
+          status = $1,
+          status_reason = $2,
+          customer_message = COALESCE($3, customer_message),
+          provider_reference = COALESCE($4, provider_reference),
+          metadata = $5,
+          updated_at = NOW()
+        WHERE id = $6
+        RETURNING *
+      `,
+      [
+        status,
+        patch.statusReason || transaction.status_reason || null,
+        patch.customerMessage || null,
+        patch.providerReference || null,
+        JSON.stringify(metadata),
+        transaction.id,
+      ],
+    );
 
-  const updated = rows[0];
-  if (updated && updated.status === 'successful') {
-    await recordSuccessfulPayment(database, updated);
-  }
+    const updated = rows[0];
+    if (updated && updated.status === 'successful') {
+      await recordSuccessfulPayment(executor, updated);
+    }
 
-  return updated;
+    return updated;
+  });
 };
 
 export const initiatePayment = async ({ database, body, httpClient = fetch }) => {

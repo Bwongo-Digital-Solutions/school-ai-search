@@ -263,6 +263,12 @@ CREATE TABLE IF NOT EXISTS fee_structures (
   due_date DATE
 );
 
+-- A tier that has already produced invoices is archived rather than deleted, so historical
+-- invoices keep pointing at the terms they were actually raised under.
+ALTER TABLE fee_structures ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+ALTER TABLE fee_structures ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE fee_structures ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
 CREATE TABLE IF NOT EXISTS payments (
   id TEXT PRIMARY KEY,
   student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
@@ -274,6 +280,8 @@ CREATE TABLE IF NOT EXISTS payments (
   paid_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   received_by TEXT
 );
+
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS invoices (
   id TEXT PRIMARY KEY,
@@ -288,6 +296,24 @@ CREATE TABLE IF NOT EXISTS invoices (
   line_items JSONB NOT NULL DEFAULT '[]'::jsonb
 );
 
+-- total_amount stays NET of any bursary so every existing reader (the fee-status aggregation,
+-- resolveFeeStatus, the gateway's balance arithmetic) keeps working untouched. gross_amount and
+-- discount_total are carried alongside purely for reporting.
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS fee_structure_id TEXT REFERENCES fee_structures(id) ON DELETE SET NULL;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS academic_year TEXT;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS term TEXT;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS gross_amount NUMERIC(12, 2);
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS discount_total NUMERIC(12, 2) NOT NULL DEFAULT 0;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT '';
+-- NULL for hand-made invoices, '<fee_structure_id>:<student_id>' for generated ones. A unique
+-- index permits unlimited NULLs, so this makes a billing run idempotent — re-running it cannot
+-- double-bill anyone, even if two admins press the button at the same moment.
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS billing_key TEXT;
+
+-- Declared after invoices exists, since it points at them. Without this link the rating cannot
+-- tell whether a family paid on time, only that money arrived at some point.
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS invoice_id TEXT REFERENCES invoices(id) ON DELETE SET NULL;
+
 CREATE TABLE IF NOT EXISTS receipts (
   id TEXT PRIMARY KEY,
   payment_id TEXT NOT NULL REFERENCES payments(id) ON DELETE CASCADE,
@@ -295,6 +321,46 @@ CREATE TABLE IF NOT EXISTS receipts (
   amount NUMERIC(12, 2) NOT NULL,
   currency TEXT NOT NULL DEFAULT 'UGX',
   issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE receipts ADD COLUMN IF NOT EXISTS student_id TEXT REFERENCES students(id) ON DELETE CASCADE;
+ALTER TABLE receipts ADD COLUMN IF NOT EXISTS issued_by TEXT;
+
+-- Scholarships, sponsorships and sibling discounts. A NULL fee_structure_id, academic_year or
+-- term is a wildcard, so a whole-school hardship grant is a single row.
+CREATE TABLE IF NOT EXISTS fee_bursaries (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  sponsor TEXT NOT NULL DEFAULT '',
+  discount_type TEXT NOT NULL DEFAULT 'percentage' CHECK (discount_type IN ('percentage', 'fixed')),
+  discount_value NUMERIC(12, 2) NOT NULL DEFAULT 0,
+  fee_structure_id TEXT REFERENCES fee_structures(id) ON DELETE SET NULL,
+  academic_year TEXT,
+  term TEXT,
+  start_date DATE,
+  end_date DATE,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'ended')),
+  notes TEXT NOT NULL DEFAULT '',
+  approved_by TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- An admin's manual override of the computed payment rating. Kept as an event log rather than
+-- columns on students for three reasons: superseded rows are the audit trail; students is loaded
+-- wholesale into the AI chat prompt, and a note like "guardian disputes the bill" must never go
+-- there; and the students table stays untouched.
+CREATE TABLE IF NOT EXISTS student_fee_standings (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  standing TEXT NOT NULL CHECK (standing IN ('excellent', 'good', 'fair', 'watch', 'delinquent')),
+  note TEXT NOT NULL DEFAULT '',
+  review_date DATE,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cleared')),
+  set_by TEXT NOT NULL DEFAULT '',
+  set_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  cleared_by TEXT,
+  cleared_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS payment_transactions (
@@ -463,6 +529,18 @@ CREATE INDEX IF NOT EXISTS idx_payment_transactions_provider_reference ON paymen
 CREATE INDEX IF NOT EXISTS idx_library_loans_student_status ON library_loans(student_id, status);
 CREATE INDEX IF NOT EXISTS idx_transport_assignments_student ON transport_assignments(student_id);
 CREATE INDEX IF NOT EXISTS idx_hostel_assignments_student ON hostel_assignments(student_id);
+-- Enforces "one live override per student"; superseded rows stay as history.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_student_fee_standings_active
+  ON student_fee_standings(student_id) WHERE status = 'active';
+-- Backs billing-run idempotency. NULLs are unconstrained, so hand-made invoices are unaffected.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_billing_key ON invoices(billing_key);
+CREATE INDEX IF NOT EXISTS idx_invoices_due_date ON invoices(due_date);
+CREATE INDEX IF NOT EXISTS idx_invoices_fee_structure ON invoices(fee_structure_id);
+CREATE INDEX IF NOT EXISTS idx_payments_student_paid_at ON payments(student_id, paid_at DESC);
+CREATE INDEX IF NOT EXISTS idx_payments_invoice ON payments(invoice_id);
+CREATE INDEX IF NOT EXISTS idx_receipts_payment ON receipts(payment_id);
+CREATE INDEX IF NOT EXISTS idx_fee_bursaries_student_status ON fee_bursaries(student_id, status);
+CREATE INDEX IF NOT EXISTS idx_student_fee_standings_student ON student_fee_standings(student_id, status);
 `;
 
 const STUDENT_COLUMNS = [

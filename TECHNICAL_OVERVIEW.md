@@ -53,10 +53,13 @@ The local backend lives in `server/local-backend.mjs`.
 | `/api/functions/ai-models` | `POST` | Lists selectable AI search models and provider configuration state. |
 | `/api/functions/voice-to-text` | `POST` | Placeholder voice transcription response. |
 | `/api/functions/payments` | `POST` | Initiates MTN MoMo, Airtel Money, or bank payment requests; checks status; records callbacks. |
+| `/api/functions/fees` | `POST` | Admin-only fee administration, dispatched by an `action` field: fee-structure CRUD, billing preview and run, payment capture, student ledger, arrears aging, bursary CRUD, and payment-standing overrides. Every action requires `requesterRole: "admin"`. |
 | `/api/report-cards/:studentId.pdf` | `GET` | Generates a PDF report card for a student. |
 | `/api/id-cards/:studentId.pdf` | `GET` | Printable QR ID card for one student. `layout=a4` tiles ten per sheet instead of one CR80 card per page. |
 | `/api/id-cards.pdf` | `GET` | Batch ID cards, optionally filtered by `grade` and `section`. |
 | `/api/id-cards/:studentId.png` | `GET` | The bare QR image, for on-screen preview and scan testing. |
+| `/api/fees/receipts/:paymentId.pdf` | `GET` | Printable receipt for one payment. Requires `requesterRole=admin` in the query string. |
+| `/api/fees/statements/:studentId.pdf` | `GET` | Full fee statement with running balance, optionally bounded by `from` and `to`. Requires `requesterRole=admin`. |
 | Static files | `GET` | Serves the built frontend from `dist` in production mode. |
 
 ## Functional Coverage
@@ -70,7 +73,8 @@ The requested school-management areas are represented as backend database resour
 | Attendance Tracking | `attendance_records` and `attendance_alerts`. |
 | Examination & Gradebooks | `exams`, `exam_schedules`, `gradebook_entries`, and PDF report-card generation. |
 | Student Conduct & Lifecycle | `discipline_records`, `student_promotions`, and `student_transfers` for behavior, promotion/graduation, transfer, and withdrawal history. |
-| Financial Management | `fee_structures`, `invoices`, `payments`, and `receipts`. |
+| Financial Management | `fee_structures`, `invoices`, `payments`, `receipts`, and `fee_bursaries`. Admin fee management covers fee-structure CRUD, bulk invoicing, payment capture with numbered receipts, per-student ledgers, arrears aging, and bursaries. |
+| Payment Rating | `student_fee_standings`. A reliability score computed from payment history, which an admin may override with a manual standing. |
 | Communication & Portal Access | `portal_accounts`, `notices`, and `internal_messages`. |
 | Ancillary Services | `library_books`, `library_loans`, `transport_routes`, `transport_assignments`, `hostel_rooms`, `hostel_assignments`, `inventory_items`, and `inventory_transactions`. |
 | Reporting & Analytics | `compliance_reports` and `analytics_snapshots`. |
@@ -103,7 +107,9 @@ Schema creation is handled by `server/db/schema.mjs`.
 | `fee_structures` | Tuition and service fee tiers by grade, student type, year, and term. |
 | `payments` | Tuition, transport, lab, or other payment records. |
 | `invoices` | Student invoices with balances and line items. |
-| `receipts` | Issued receipts linked to payments. |
+| `receipts` | Issued receipts linked to payments, numbered `RCT-<year>-<sequence>`. |
+| `fee_bursaries` | Scholarships, sponsorships, and discounts. A blank fee structure, academic year, or term is a wildcard that matches every invoice. |
+| `student_fee_standings` | Admin overrides of the computed payment rating, kept as an event log. A partial unique index allows only one `active` row per student; superseded rows remain as history. |
 | `payment_transactions` | Gateway transaction tracking for MTN MoMo, Airtel Money, and bank collections. |
 | `portal_accounts` | Parent and student portal login records. |
 | `notices` | Digital notice-board announcements. |
@@ -222,6 +228,8 @@ Development defaults:
 | `LOCAL_BACKEND_PORT` | Backend port. |
 | `LOCAL_STATIC_ROOT` | Static frontend directory for production serving. |
 | `SCHOOL_NAME` | Report-card and school branding name. |
+| `FEE_INVOICE_PREFIX` | Invoice number prefix. Defaults to `INV`, producing `INV-2026-000001`. |
+| `FEE_RECEIPT_PREFIX` | Receipt number prefix. Defaults to `RCT`, producing `RCT-2026-000001`. |
 | `SCHOOL_TAGLINE` | Report-card and school branding tagline. |
 | `APP_PORT` | Host port for the production Docker app. |
 | `DEV_APP_PORT` | Host port for the development frontend. |

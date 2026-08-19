@@ -7,6 +7,7 @@ import AuditLogPanel from './chat/AuditLogPanel';
 import StudentRecordsWorkspace from './chat/StudentRecordsWorkspace';
 import UserAccessPanel from './chat/UserAccessPanel';
 import FeeStatusPanel from './chat/FeeStatusPanel';
+import FeeManagementWorkspace from './chat/FeeManagementWorkspace';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { Shield, Clock, Users as UsersIcon } from 'lucide-react';
@@ -76,6 +77,8 @@ const AppLayout: React.FC = () => {
         return <AuditView />;
       case 'fees':
         return <FeeStatusPanel />;
+      case 'finance':
+        return <FeeManagementWorkspace />;
       default:
         return <ChatWindow />;
     }

@@ -26,6 +26,8 @@ By default:
 
 - three staff roles: administrators (full edit access), teachers (view-only student records), and non-teaching support staff — security, gatekeepers, cooks, cleaners, drivers — who see school fees payment status and nothing else
 - school fees status view listing invoiced, paid, balance, due date, and payment state per student
+- admin fee management: fee-structure tiers per grade/term, bulk invoicing for a whole cohort in one run (re-running never double-bills), cash/bank/cheque/mobile-money payment capture with automatic invoice reconciliation, numbered PDF receipts and fee statements, a per-student ledger with running balance, an arrears report aged into 30/60/90-day buckets, and bursaries (percentage or fixed, per student or school-wide)
+- payment rating: each student is scored 0–100 and graded A–E from their own payment history — how late settled invoices were paid, how much of the money already due is still owed, and how long the oldest unpaid invoice has been overdue. An admin can override the result with a manual standing plus a required reason and an optional review date; the override takes effect everywhere while the computed rating stays on screen for reference
 - student ID card lookup: scan the card QR with the device camera, use a handheld barcode/QR scanner, or type the student number. Support staff get the fees status; teachers and admins jump to the full record
 - printable QR student ID cards generated in-app with the open-source `qrcode` library (MIT): one CR80 card per page for card printers, or ten per A4 sheet for cutting
 - student registration/admission, attendance, academic history, discipline, class allocation, promotion/graduation, transfer, and withdrawal records
@@ -48,11 +50,20 @@ npm install
 npm run dev
 ```
 
+No PostgreSQL to hand? Run against the in-memory database instead. It uses the same code path,
+seeds the demo students on boot, and discards everything when the process exits:
+
+```bash
+npm install
+npm run dev:memory
+```
+
 Useful commands:
 
 ```bash
 npm run build
-npm run start
+npm run start          # needs PostgreSQL at DATABASE_URL
+npm run start:memory   # in-memory database, data lost on exit
 npm run test:backend
 ```
 

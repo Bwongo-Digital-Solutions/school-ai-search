@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev-local.mjs",
+    "dev:memory": "USE_IN_MEMORY_DB=true node scripts/dev-local.mjs",
     "dev:client": "vite",
     "dev:server": "node server/local-backend.mjs",
     "dev:server:watch": "node --watch server/local-backend.mjs",
@@ -13,6 +14,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "start": "node server/local-backend.mjs",
+    "start:memory": "USE_IN_MEMORY_DB=true node server/local-backend.mjs",
     "test:backend": "node --test tests/local-backend.test.mjs"
   },
   "dependencies": {

@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Clock, Loader2, Receipt, RefreshCw, ScanLine, Search, Wallet, X } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
+import { formatAmount, formatDate } from '@/lib/format';
+import StatTile from '@/components/common/StatTile';
 import StudentIdScanner from './StudentIdScanner';
 import type { FeeStatus, StudentFeeStatus } from '@/types/fees';
 
@@ -32,25 +34,6 @@ const STATUS_STYLES: Record<FeeStatus, { label: string; badge: string; icon: Rea
     icon: Receipt,
   },
 };
-
-const formatAmount = (amount: number, currency: string) =>
-  `${currency} ${Math.round(amount).toLocaleString()}`;
-
-const formatDate = (value: string | null) => {
-  if (!value) return '—';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? '—' : date.toISOString().slice(0, 10);
-};
-
-const StatTile = ({ label, value, icon: Icon }: { label: string; value: string; icon: React.ElementType }) => (
-  <div className="bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 rounded-lg px-4 py-3">
-    <div className="flex items-center gap-2 text-xs text-gray-400">
-      <Icon className="w-3.5 h-3.5 text-indigo-500" />
-      {label}
-    </div>
-    <p className="text-lg font-bold text-gray-800 dark:text-white mt-1">{value}</p>
-  </div>
-);
 
 const FeeStatusPanel: React.FC = () => {
   const { isAuthenticated } = useAuth();
