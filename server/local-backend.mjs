@@ -11,6 +11,7 @@ import { createTenantRegistry } from './db/tenants.mjs';
 import { createControlConnection, initializeControlSchema, getTenantBySubdomain, listTenants, lookupTenantRoute } from './db/control.mjs';
 import { createSubscriptionCharge } from './services/payment-gateway.mjs';
 import { isPaymentWebhook, isWebhookSignatureValid } from './security/webhooks.mjs';
+import { renderActivationEmail, sendEmail } from './services/email.mjs';
 import {
   checkAvailability,
   confirmSubscriptionPayment,
@@ -1442,7 +1443,10 @@ const handleProvisionFunction = async (provisioning, body = {}, httpClient) => {
       { externalReference: body.externalReference || body.reference, status: body.status },
       provisioning.provisionOptions,
     );
-    if (result.provisioned) provisioning.onProvisioned(result.subdomain);
+    if (result.provisioned) {
+      provisioning.onProvisioned(result.subdomain);
+      await provisioning.notifyActivated(result.tenant, httpClient);
+    }
     return result;
   }
 
@@ -1510,6 +1514,17 @@ export const createAppRuntime = async ({
         initiateCharge: createSubscriptionCharge,
         provisionOptions,
         onProvisioned: (subdomain) => tenants.invalidate(subdomain),
+        // Best-effort "your school is ready" email; a failed send never fails provisioning, and
+        // it is a no-op in mock email mode (the default).
+        notifyActivated: async (tenant, client) => {
+          if (!tenant?.contact_email) return;
+          try {
+            const message = renderActivationEmail({ schoolName: tenant.school_name, subdomain: tenant.subdomain });
+            await sendEmail({ to: tenant.contact_email, ...message }, { httpClient: provisionOptions.sendEmailClient || client });
+          } catch (error) {
+            console.warn('Activation email failed:', error instanceof Error ? error.message : error);
+          }
+        },
       }
     : null;
 

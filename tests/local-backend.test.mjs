@@ -2590,3 +2590,73 @@ test('payment webhooks require a valid signature when a secret is configured', a
     else process.env.PAYMENT_WEBHOOK_SECRET = saved;
   }
 });
+
+test('a "your school is ready" email is sent when a school is activated', async () => {
+  const email = await import('../server/services/email.mjs');
+  const { createDatabaseConnection } = await import('../server/db/connection.mjs');
+  const { initializeDatabase } = await import('../server/db/schema.mjs');
+
+  // Pure render.
+  const message = email.renderActivationEmail({ schoolName: 'Kampala High', subdomain: 'kampala-high', rootDomain: 'eschool.app' });
+  assert.match(message.subject, /Kampala High is ready/);
+  assert.equal(message.url, 'https://kampala-high.eschool.app');
+  assert.match(message.html, /kampala-high\.eschool\.app/);
+
+  const saved = { mode: process.env.EMAIL_MODE, key: process.env.EMAIL_API_KEY, amount: process.env.SUBSCRIPTION_AMOUNT, template: process.env.TENANT_DB_URL_TEMPLATE };
+  process.env.EMAIL_MODE = 'http';
+  process.env.EMAIL_API_KEY = 'test-key';
+  process.env.SUBSCRIPTION_AMOUNT = '500000';
+  process.env.TENANT_DB_URL_TEMPLATE = 'memory://{db}';
+
+  try {
+    // Mock mode sends nothing.
+    process.env.EMAIL_MODE = 'mock';
+    assert.equal((await email.sendEmail({ to: 'a@b.c', subject: 's', html: 'h' })).sent, false);
+    process.env.EMAIL_MODE = 'http';
+
+    // http mode posts to the provider (captured here, not the network).
+    let captured = null;
+    const httpClient = async (url, options) => {
+      captured = { url, body: JSON.parse(options.body), auth: options.headers.Authorization };
+      return new Response('{}', { status: 200 });
+    };
+    const direct = await email.sendEmail({ to: 'admin@kh.ug', subject: 'Hi', html: '<b>Hi</b>', text: 'Hi' }, { httpClient });
+    assert.equal(direct.sent, true);
+    assert.equal(captured.body.to, 'admin@kh.ug');
+    assert.equal(captured.auth, 'Bearer test-key');
+
+    // End-to-end: a paid callback provisions the school and sends the activation email to its
+    // contact address.
+    const tenantDbs = new Map();
+    const initialized = new WeakSet();
+    let activationEmail = null;
+    const runtime = await createAppRuntime({
+      useInMemoryDatabase: true,
+      useInMemoryControl: true,
+      provisionOptions: {
+        createPhysicalDatabase: async () => {},
+        createConnection: ({ connectionString }) => {
+          if (!tenantDbs.has(connectionString)) tenantDbs.set(connectionString, createDatabaseConnection({ useInMemoryDatabase: true }));
+          return tenantDbs.get(connectionString);
+        },
+        init: async (db) => { if (!initialized.has(db)) { initialized.add(db); await initializeDatabase(db); } },
+        sendEmailClient: async (url, options) => { activationEmail = JSON.parse(options.body); return new Response('{}', { status: 200 }); },
+      },
+    });
+    const P = (body) => runtime.dispatch({ method: 'POST', pathname: '/api/provision', body });
+    try {
+      const signup = await P({ action: 'signup', subdomain: 'kampala-high', schoolName: 'Kampala High', contactEmail: 'admin@kh.ug', provider: 'mtn_momo', phoneNumber: '+256700000000' });
+      await P({ action: 'callback', externalReference: signup.body.data.reference, status: 'successful' });
+      assert.ok(activationEmail, 'an activation email should have been sent');
+      assert.equal(activationEmail.to, 'admin@kh.ug');
+      assert.match(activationEmail.subject, /Kampala High is ready/);
+    } finally {
+      await runtime.close();
+    }
+  } finally {
+    process.env.EMAIL_MODE = saved.mode;
+    process.env.EMAIL_API_KEY = saved.key;
+    process.env.SUBSCRIPTION_AMOUNT = saved.amount;
+    process.env.TENANT_DB_URL_TEMPLATE = saved.template;
+  }
+});
