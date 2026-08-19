@@ -69,6 +69,15 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS approval_status TEXT NOT NULL DEFAULT
 ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
 ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin', 'teacher', 'support_staff'));
 
+-- A staff member's specialisation within their role, which decides what a student ID scan
+-- reveals to them: an admin may keep the books (bursar), and support staff split into the
+-- gate (askari), the dormitories (matron) and the kitchen (cook). NULL means the role carries
+-- no specialisation, which is how every account created before this migration reads.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS designation TEXT;
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_designation_check;
+ALTER TABLE users ADD CONSTRAINT users_designation_check
+  CHECK (designation IS NULL OR designation IN ('bursar', 'askari', 'matron', 'cook'));
+
 -- The school's global identity: one row (id = 'default'), edited by an admin under Settings and
 -- read by every document (report cards, ID cards, receipts, statements, finance reports) and the
 -- app header. In a multi-tenant deployment each tenant database carries its own row.
@@ -497,6 +506,34 @@ CREATE TABLE IF NOT EXISTS hostel_assignments (
   end_date DATE,
   status TEXT NOT NULL DEFAULT 'active'
 );
+
+-- One row per movement through the school gate, written when the askari scans an ID card.
+-- The authoriser is the person who permitted the movement (a parent, the matron, a teacher)
+-- and is recorded as free text, because that person is often not a system user.
+CREATE TABLE IF NOT EXISTS gate_passes (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  direction TEXT NOT NULL CHECK (direction IN ('out', 'in')),
+  authorised_by TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  recorded_by TEXT NOT NULL DEFAULT '',
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- One row per meal a student has actually been served, written when the cook scans an ID
+-- card at the serving point. The absence of a row is what "has not eaten" means, so the
+-- unique index is what stops a second helping being recorded as a first.
+CREATE TABLE IF NOT EXISTS meal_records (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  meal_date DATE NOT NULL,
+  meal TEXT NOT NULL CHECK (meal IN ('breakfast', 'lunch', 'supper')),
+  served_by TEXT NOT NULL DEFAULT '',
+  served_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS meal_records_student_meal_idx
+  ON meal_records (student_id, meal_date, meal);
 
 CREATE TABLE IF NOT EXISTS inventory_items (
   id TEXT PRIMARY KEY,

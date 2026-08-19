@@ -2755,3 +2755,191 @@ test('attendance is unique per student per day', async () => {
     await cleanup();
   }
 });
+
+test('a scan card carries only the sections the staff profile grants', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const card = (role, designation) => dispatch(runtime, 'POST', '/api/functions/student-card', {
+    code: 'STU-2026-001', role, designation,
+  });
+
+  try {
+    const bursar = await card('admin', 'bursar');
+    assert.equal(bursar.status, 200);
+    assert.equal(bursar.body.data.profile.label, 'Bursar');
+    assert.deepEqual(bursar.body.data.sections, ['fees', 'bio', 'class', 'dormitory', 'parents']);
+
+    // The gate needs to know who the student is and whether they may leave — nothing else.
+    const askari = await card('support_staff', 'askari');
+    assert.deepEqual(askari.body.data.sections, ['class', 'gate_pass']);
+    assert.equal('fees' in askari.body.data, false);
+    assert.equal('parents' in askari.body.data, false);
+    assert.equal('bio' in askari.body.data, false);
+
+    // The kitchen sees the meal card and no personal record at all.
+    const cook = await card('support_staff', 'cook');
+    assert.deepEqual(cook.body.data.sections, ['class', 'meal_card']);
+    assert.equal('fees' in cook.body.data, false);
+    assert.equal(cook.body.data.meal_card.meals.length, 3);
+
+    const matron = await card('support_staff', 'matron');
+    assert.deepEqual(matron.body.data.sections, ['bio', 'class', 'dormitory', 'parents']);
+    assert.equal('fees' in matron.body.data, false);
+
+    // Support staff with no designation keep the fees-only card they had before designations.
+    const plain = await card('support_staff', null);
+    assert.deepEqual(plain.body.data.sections, ['fees']);
+
+    // An unknown designation falls back to the role rather than granting anything extra.
+    const bogus = await card('support_staff', 'headmaster');
+    assert.deepEqual(bogus.body.data.sections, ['fees']);
+
+    const missing = await card('teacher', null);
+    assert.equal(missing.status, 200);
+    const unknown = await dispatch(runtime, 'POST', '/api/functions/student-card', {
+      code: 'NOT-A-STUDENT', role: 'teacher',
+    });
+    assert.equal(unknown.status, 404);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('exam clearance follows the fees balance', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const clearance = async (code) => {
+    const res = await dispatch(runtime, 'POST', '/api/functions/student-card', { code, role: 'teacher' });
+    return res.body.data.exam_clearance;
+  };
+
+  try {
+    // Nothing invoiced yet, so there is nothing to clear and the student is not held back.
+    const unbilled = await clearance('STU-2026-001');
+    assert.equal(unbilled.cleared, true);
+    assert.equal(unbilled.reason, 'No fees invoiced');
+
+    await dispatch(runtime, 'POST', '/api/db', {
+      table: 'invoices', operation: 'insert', columns: '*', single: true,
+      payload: {
+        id: 'inv-exam-1', student_id: 'student-001', invoice_number: 'INV-EXAM-1',
+        status: 'partial', total_amount: 900000, balance_due: 400000, currency: 'UGX',
+      },
+    });
+
+    const owing = await clearance('STU-2026-001');
+    assert.equal(owing.cleared, false);
+    assert.equal(owing.balance_due, 400000);
+
+    await dispatch(runtime, 'POST', '/api/db', {
+      table: 'invoices', operation: 'update', columns: '*', single: true,
+      filters: [{ field: 'id', operator: 'eq', value: 'inv-exam-1' }],
+      payload: { balance_due: 0, status: 'paid' },
+    });
+
+    const settled = await clearance('STU-2026-001');
+    assert.equal(settled.cleared, true);
+    assert.equal(settled.reason, 'Fees cleared');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('gate passes track whether a student is on the premises', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const pass = (payload) => dispatch(runtime, 'POST', '/api/functions/gate-pass', payload);
+  const onPremises = async () => {
+    const res = await dispatch(runtime, 'POST', '/api/functions/student-card', {
+      code: 'STU-2026-001', role: 'support_staff', designation: 'askari',
+    });
+    return res.body.data.gate_pass.on_premises;
+  };
+
+  try {
+    // A student nobody has signed out is on the premises.
+    assert.equal(await onPremises(), true);
+
+    const missingAuthoriser = await pass({ code: 'STU-2026-001', direction: 'out' });
+    assert.equal(missingAuthoriser.status, 400);
+
+    const badDirection = await pass({ code: 'STU-2026-001', direction: 'sideways', authorisedBy: 'Matron' });
+    assert.equal(badDirection.status, 400);
+
+    const out = await pass({
+      code: 'STU-2026-001', direction: 'out', authorisedBy: 'Matron', reason: 'Clinic', recordedBy: 'Askari',
+    });
+    assert.equal(out.status, 200);
+    assert.equal(out.body.data.pass.authorised_by, 'Matron');
+    assert.equal(await onPremises(), false);
+
+    await pass({ code: 'STU-2026-001', direction: 'in', authorisedBy: 'Matron', recordedBy: 'Askari' });
+    assert.equal(await onPremises(), true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a meal is served once per student per day', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const serve = (meal) => dispatch(runtime, 'POST', '/api/functions/meal-record', {
+    code: 'STU-2026-001', meal, servedBy: 'Cook',
+  });
+  const mealCard = async () => {
+    const res = await dispatch(runtime, 'POST', '/api/functions/student-card', {
+      code: 'STU-2026-001', role: 'support_staff', designation: 'cook',
+    });
+    return res.body.data.meal_card;
+  };
+
+  try {
+    const before = await mealCard();
+    assert.deepEqual(before.meals.map((m) => m.eaten), [false, false, false]);
+
+    assert.equal((await serve('brunch')).status, 400);
+
+    const first = await serve('lunch');
+    assert.equal(first.status, 200);
+    assert.equal(first.body.data.already_served, false);
+
+    // Re-scanning a student who has eaten reports the original serving rather than a new one.
+    const again = await serve('lunch');
+    assert.equal(again.status, 200);
+    assert.equal(again.body.data.already_served, true);
+
+    const after = await mealCard();
+    assert.deepEqual(
+      after.meals.map((m) => [m.meal, m.eaten]),
+      [['breakfast', false], ['lunch', true], ['supper', false]],
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('designations are constrained to the role that owns them', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const auth = (payload) => dispatch(runtime, 'POST', '/api/functions/auth', payload);
+
+  try {
+    await auth({ action: 'signup', email: 'head@school.local', password: 'password123', displayName: 'Head' });
+    await auth({ action: 'signup', email: 'cook@school.local', password: 'password123', displayName: 'Cook' });
+    await runtime.database.query(
+      "UPDATE users SET role = 'support_staff', approval_status = 'approved' WHERE auth_email = 'cook@school.local'",
+    );
+
+    const ok = await auth({ action: 'set_designation', email: 'cook@school.local', designation: 'cook' });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.data.user.designation, 'cook');
+
+    // A bursar keeps the books, so it belongs to an admin and not to support staff.
+    const wrongRole = await auth({ action: 'set_designation', email: 'cook@school.local', designation: 'bursar' });
+    assert.equal(wrongRole.status, 400);
+
+    // The designation reaches the app through the ordinary sign-in payload.
+    const signin = await auth({ action: 'signin', email: 'cook@school.local', password: 'password123' });
+    assert.equal(signin.body.data.user.designation, 'cook');
+
+    const cleared = await auth({ action: 'set_designation', email: 'cook@school.local', designation: '' });
+    assert.equal(cleared.body.data.user.designation, null);
+  } finally {
+    await cleanup();
+  }
+});
