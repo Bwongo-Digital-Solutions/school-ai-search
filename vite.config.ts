@@ -18,7 +18,7 @@ const buildNumber = (() => {
   }
 })();
 
-const developerContacts = process.env.DEVELOPER_CONTACTS || "e-School · support@e-school.app";
+const developerContacts = process.env.DEVELOPER_CONTACTS || "e-School · tmkmart@gmail.com";
 
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => ({

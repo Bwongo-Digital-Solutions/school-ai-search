@@ -63,20 +63,27 @@ export const resolveTenantId = (host, headerTenant) => {
  */
 export const createTenantRegistry = ({
   registry = parseTenantRegistry(),
+  lookup = null,
   createConnection = createDatabaseConnection,
   init = initializeDatabase,
 } = {}) => {
   const cache = new Map();
-  const enabled = registry.size > 0;
+  // Enabled by a static TENANTS list, or by a control-database lookup (self-service provisioning).
+  const enabled = registry.size > 0 || typeof lookup === 'function';
 
-  const getConnection = (tenantId) => {
+  // Find a tenant's route: static env entries are always active; otherwise ask the control DB,
+  // which also carries the subscription status.
+  const findEntry = async (tenantId) => {
+    if (registry.has(tenantId)) return { ...registry.get(tenantId), status: 'active' };
+    if (lookup) return (await lookup(tenantId)) || null;
+    return null;
+  };
+
+  const getConnection = (tenantId, url, ssl) => {
     if (cache.has(tenantId)) return cache.get(tenantId);
-    const entry = registry.get(tenantId);
-    if (!entry) return null;
-
     // Cache the in-flight promise so concurrent first requests share one pool + one schema build.
     const pending = (async () => {
-      const database = createConnection({ connectionString: entry.url, ssl: entry.ssl });
+      const database = createConnection({ connectionString: url, ssl });
       await init(database);
       return database;
     })();
@@ -87,17 +94,29 @@ export const createTenantRegistry = ({
   return {
     enabled,
     /**
-     * Returns { tenantId, database }. In single-tenant mode (or for the default tenant) that is the
-     * shared defaultDatabase. An unknown tenant resolves to a null database → the caller 404s.
+     * Returns { tenantId, database, status }. Single-tenant mode and the default tenant get the
+     * shared defaultDatabase. An unknown subdomain yields a null database (caller 404s); a suspended
+     * tenant yields a null database with status 'suspended' (caller returns a renewal notice).
      */
     async resolve(host, headerTenant, defaultDatabase) {
       const tenantId = resolveTenantId(host, headerTenant);
-      if (!enabled) return { tenantId: DEFAULT_TENANT, database: defaultDatabase };
+      if (!enabled) return { tenantId: DEFAULT_TENANT, database: defaultDatabase, status: 'active' };
       if (tenantId === DEFAULT_TENANT && !registry.has(DEFAULT_TENANT)) {
-        return { tenantId, database: defaultDatabase };
+        return { tenantId, database: defaultDatabase, status: 'active' };
       }
-      const database = await getConnection(tenantId);
-      return { tenantId, database: database || null };
+
+      const entry = await findEntry(tenantId);
+      if (!entry) return { tenantId, database: null, status: 'unknown' };
+      if (entry.status === 'suspended' || entry.status === 'pending') {
+        return { tenantId, database: null, status: entry.status };
+      }
+
+      const database = await getConnection(tenantId, entry.url, entry.ssl);
+      return { tenantId, database, status: entry.status };
+    },
+    // Drop a cached pool after a status change or (re)provision so the next request re-resolves.
+    invalidate(tenantId) {
+      cache.delete(normalizeTenantId(tenantId));
     },
     async close() {
       for (const pending of cache.values()) {

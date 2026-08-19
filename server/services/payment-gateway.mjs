@@ -428,6 +428,47 @@ export const initiatePayment = async ({ database, body, httpClient = fetch }) =>
   };
 };
 
+/**
+ * A database-free charge for platform subscriptions (tenant provisioning). It talks only to the
+ * provider and returns a reference; the control database is the ledger, so nothing is written to
+ * any tenant's payment_transactions. Uses the same provider dispatch and mock mode as student fees.
+ */
+export const createSubscriptionCharge = async ({
+  provider,
+  amount,
+  currency = DEFAULT_CURRENCY,
+  phoneNumber,
+  bankCode,
+  description = 'eSchool subscription',
+  accountReference,
+  httpClient = fetch,
+  callbackUrl = process.env.PAYMENT_CALLBACK_URL || null,
+}) => {
+  const normalizedPhone = phoneNumber ? normalizePhone(phoneNumber) : null;
+  assertPaymentPayload({ studentId: 'platform', provider, amount, phoneNumber: normalizedPhone, bankCode });
+
+  const transaction = {
+    id: randomUUID(),
+    provider,
+    amount: Number(amount),
+    currency: String(currency).trim().toUpperCase(),
+    phone_number: normalizedPhone,
+    bank_code: bankCode || null,
+    account_reference: accountReference || 'subscription',
+    external_reference: createPaymentReference(),
+    metadata: { description },
+  };
+
+  const providerResult = await initiateProviderPayment({ transaction, description, callbackUrl, httpClient });
+  return {
+    external_reference: transaction.external_reference,
+    status: providerResult.status,
+    providerReference: providerResult.providerReference,
+    customerMessage: providerResult.customerMessage,
+    metadata: providerResult.metadata,
+  };
+};
+
 export const getPaymentStatus = async ({ database, paymentReference, httpClient = fetch }) => {
   const transaction = await fetchTransaction(database, paymentReference);
   if (!transaction) throw new Error('Payment transaction not found');

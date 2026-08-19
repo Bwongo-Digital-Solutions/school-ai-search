@@ -20,4 +20,4 @@ const readVersion = () => {
 
 export const APP_VERSION = readVersion();
 export const BUILD_NUMBER = process.env.BUILD_NUMBER || 'dev';
-export const DEVELOPER_CONTACTS = process.env.DEVELOPER_CONTACTS || 'e-School · support@e-school.app';
+export const DEVELOPER_CONTACTS = process.env.DEVELOPER_CONTACTS || 'e-School · tmkmart@gmail.com';

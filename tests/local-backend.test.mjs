@@ -2435,3 +2435,158 @@ test('configured tenants get isolated databases', async () => {
     await tenants.close();
   }
 });
+
+test('a school that pays is provisioned, served, and suspended when it lapses', async () => {
+  const { createDatabaseConnection } = await import('../server/db/connection.mjs');
+
+  // Configure subscription pricing + an in-memory tenant URL scheme for the test.
+  const saved = {
+    amount: process.env.SUBSCRIPTION_AMOUNT,
+    template: process.env.TENANT_DB_URL_TEMPLATE,
+    mode: process.env.PAYMENT_GATEWAY_MODE,
+  };
+  process.env.SUBSCRIPTION_AMOUNT = '500000';
+  process.env.TENANT_DB_URL_TEMPLATE = 'memory://{db}';
+  process.env.PAYMENT_GATEWAY_MODE = 'mock';
+
+  // The two production-only steps are mocked: CREATE DATABASE is a no-op, and each tenant URL maps
+  // to its own in-memory database (remembered so request routing reuses it). `init` runs once per
+  // database instance — real Postgres tolerates re-running the idempotent schema, but pg-mem cannot
+  // re-parse the whole schema, so we model that idempotency here.
+  const { initializeDatabase } = await import('../server/db/schema.mjs');
+  const tenantDbs = new Map();
+  const initialized = new WeakSet();
+  const provisionOptions = {
+    createPhysicalDatabase: async () => {},
+    createConnection: ({ connectionString }) => {
+      if (!tenantDbs.has(connectionString)) tenantDbs.set(connectionString, createDatabaseConnection({ useInMemoryDatabase: true }));
+      return tenantDbs.get(connectionString);
+    },
+    init: async (db) => {
+      if (initialized.has(db)) return;
+      initialized.add(db);
+      await initializeDatabase(db);
+    },
+  };
+
+  const runtime = await createAppRuntime({ useInMemoryDatabase: true, useInMemoryControl: true, provisionOptions });
+  const P = (body) => runtime.dispatch({ method: 'POST', pathname: '/api/provision', body });
+
+  try {
+    assert.equal(runtime.provisioningEnabled, true);
+
+    // Availability + validation.
+    assert.equal((await P({ action: 'availability', subdomain: 'kampala-high' })).body.data.available, true);
+    assert.equal((await P({ action: 'availability', subdomain: 'www' })).body.data.available, false);
+    assert.equal((await P({ action: 'availability', subdomain: 'a b' })).body.data.available, false);
+
+    // Signup starts a pending tenant + a subscription charge.
+    const signup = await P({
+      action: 'signup',
+      subdomain: 'kampala-high',
+      schoolName: 'Kampala High',
+      contactEmail: 'admin@kh.ug',
+      provider: 'mtn_momo',
+      phoneNumber: '+256700000000',
+    });
+    assert.equal(signup.status, 200);
+    assert.equal(signup.body.data.purpose, 'provision');
+    const reference = signup.body.data.reference;
+    assert.ok(reference);
+
+    // Now taken; still pending (unpaid) so its subdomain is not yet served.
+    assert.equal((await P({ action: 'availability', subdomain: 'kampala-high' })).body.data.available, false);
+    assert.equal((await P({ action: 'status', subdomain: 'kampala-high' })).body.data.tenant.status, 'pending');
+    let route = await runtime.resolveDatabase('kampala-high.eschool.app', undefined);
+    assert.equal(route.status, 'pending');
+    assert.equal(route.database, null);
+
+    // The paid callback provisions the school and activates it.
+    const paid = await P({ action: 'callback', externalReference: reference, status: 'successful' });
+    assert.equal(paid.body.data.provisioned, true);
+    assert.equal((await P({ action: 'status', subdomain: 'kampala-high' })).body.data.tenant.status, 'active');
+
+    // Its subdomain now routes to a real (isolated) database.
+    route = await runtime.resolveDatabase('kampala-high.eschool.app', undefined);
+    assert.equal(route.status, 'active');
+    assert.ok(route.database);
+    assert.equal((await route.database.query('SELECT COUNT(*)::int AS n FROM students')).rows[0].n, 15);
+
+    // Replaying the callback is idempotent — no double provisioning.
+    assert.equal((await P({ action: 'callback', externalReference: reference, status: 'successful' })).body.data.alreadyProcessed, true);
+
+    // An unknown subdomain has no database (server 404s it).
+    const ghost = await runtime.resolveDatabase('ghost.eschool.app', undefined);
+    assert.equal(ghost.database, null);
+    assert.equal(ghost.status, 'unknown');
+
+    // Lapse the subscription and sweep: the school is suspended and its subdomain stops serving.
+    await runtime.control.query("UPDATE tenants SET current_period_end = NOW() - INTERVAL '400 days', status = 'past_due' WHERE subdomain = 'kampala-high'");
+    const swept = await P({ action: 'sweep', requesterRole: 'admin' });
+    assert.equal(swept.body.data.suspended, 1);
+    const suspended = await runtime.resolveDatabase('kampala-high.eschool.app', undefined);
+    assert.equal(suspended.status, 'suspended');
+    assert.equal(suspended.database, null);
+
+    // list/sweep are admin-only.
+    assert.equal((await P({ action: 'list', requesterRole: 'teacher' })).body.error, 'Unauthorized');
+    assert.equal((await P({ action: 'sweep', requesterRole: 'teacher' })).body.error, 'Unauthorized');
+    assert.equal((await P({ action: 'list', requesterRole: 'admin' })).body.data.tenants.length, 1);
+
+    // Renewal reactivates the suspended school.
+    const renew = await P({ action: 'signup', subdomain: 'kampala-high', provider: 'mtn_momo', phoneNumber: '+256700000000' });
+    await P({ action: 'callback', externalReference: renew.body.data.reference, status: 'successful' });
+    assert.equal((await P({ action: 'status', subdomain: 'kampala-high' })).body.data.tenant.status, 'active');
+  } finally {
+    await runtime.close();
+    process.env.SUBSCRIPTION_AMOUNT = saved.amount;
+    process.env.TENANT_DB_URL_TEMPLATE = saved.template;
+    process.env.PAYMENT_GATEWAY_MODE = saved.mode;
+  }
+});
+
+test('provisioning is inert without a control database', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  try {
+    assert.equal(runtime.provisioningEnabled, false);
+    const denied = await dispatch(runtime, 'POST', '/api/provision', { action: 'availability', subdomain: 'x' });
+    assert.equal(denied.status, 400);
+    assert.match(denied.body.error, /not enabled/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('payment webhooks require a valid signature when a secret is configured', async () => {
+  const { isWebhookSignatureValid, isPaymentWebhook, webhookVerificationEnabled } = await import('../server/security/webhooks.mjs');
+  const { createHmac } = await import('node:crypto');
+  const saved = process.env.PAYMENT_WEBHOOK_SECRET;
+
+  try {
+    // Only payment/subscription callbacks are treated as webhooks.
+    assert.equal(isPaymentWebhook('/api/provision', { action: 'callback' }), true);
+    assert.equal(isPaymentWebhook('/api/functions/payments', { action: 'callback' }), true);
+    assert.equal(isPaymentWebhook('/api/provision', { action: 'signup' }), false);
+    assert.equal(isPaymentWebhook('/api/functions/fees', { action: 'callback' }), false);
+
+    // With no secret, verification is disabled (mock/dev) and everything passes.
+    delete process.env.PAYMENT_WEBHOOK_SECRET;
+    assert.equal(webhookVerificationEnabled(), false);
+    assert.equal(isWebhookSignatureValid('{"any":"body"}', undefined), true);
+
+    // With a secret, a correct HMAC-SHA256 of the raw body is required.
+    process.env.PAYMENT_WEBHOOK_SECRET = 'top-secret';
+    assert.equal(webhookVerificationEnabled(), true);
+    const raw = '{"action":"callback","externalReference":"PAY-1","status":"successful"}';
+    const good = createHmac('sha256', 'top-secret').update(raw, 'utf8').digest('hex');
+    assert.equal(isWebhookSignatureValid(raw, good), true);
+    assert.equal(isWebhookSignatureValid(raw, `sha256=${good}`), true);
+    assert.equal(isWebhookSignatureValid(raw, 'deadbeef'), false);
+    assert.equal(isWebhookSignatureValid(raw, undefined), false);
+    // A tampered body no longer matches the signature.
+    assert.equal(isWebhookSignatureValid(raw.replace('PAY-1', 'PAY-2'), good), false);
+  } finally {
+    if (saved === undefined) delete process.env.PAYMENT_WEBHOOK_SECRET;
+    else process.env.PAYMENT_WEBHOOK_SECRET = saved;
+  }
+});

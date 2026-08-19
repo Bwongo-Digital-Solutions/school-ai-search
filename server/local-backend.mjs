@@ -8,6 +8,16 @@ import { fileURLToPath } from 'node:url';
 import { createDatabaseConnection, waitForDatabase } from './db/connection.mjs';
 import { initializeDatabase } from './db/schema.mjs';
 import { createTenantRegistry } from './db/tenants.mjs';
+import { createControlConnection, initializeControlSchema, getTenantBySubdomain, listTenants, lookupTenantRoute } from './db/control.mjs';
+import { createSubscriptionCharge } from './services/payment-gateway.mjs';
+import { isPaymentWebhook, isWebhookSignatureValid } from './security/webhooks.mjs';
+import {
+  checkAvailability,
+  confirmSubscriptionPayment,
+  normalizeSubdomain,
+  startSubscription,
+  sweepSubscriptions,
+} from './services/provisioning.mjs';
 import { buildReportCardPdf } from './reports/report-card.mjs';
 import { buildIdCardPdf, buildQrPayload, buildQrPng } from './reports/id-card.mjs';
 import { buildFeeReceiptPdf, buildFeeStatementPdf } from './reports/fee-receipt.mjs';
@@ -417,12 +427,17 @@ const readRequestBody = async (request) => {
     chunks.push(chunk);
   }
 
-  if (chunks.length === 0) {
-    return {};
+  const raw = chunks.length ? Buffer.concat(chunks).toString('utf8') : '';
+  let body = {};
+  if (raw) {
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      body = {};
+    }
   }
-
-  const rawBody = Buffer.concat(chunks).toString('utf8');
-  return rawBody ? JSON.parse(rawBody) : {};
+  // The raw text is kept so payment webhooks can be signature-verified before it is trusted.
+  return { raw, body };
 };
 
 const serveStatic = async (requestPath, response, staticRoot) => {
@@ -1392,10 +1407,74 @@ const handleFeeDocumentRequest = async (database, pathname, searchParams) => {
   return pdfResponse(pdfBytes, `${ledger.student.student_number}-fee-statement.pdf`);
 };
 
+/**
+ * Self-service tenant provisioning, dispatched by an `action`. Public actions (availability,
+ * signup, callback, status) power the sign-up + pay flow; list and sweep are admin/cron only.
+ * Inert (returns an error) unless a control database is configured.
+ */
+const handleProvisionFunction = async (provisioning, body = {}, httpClient) => {
+  if (!provisioning) return { error: 'Self-service provisioning is not enabled on this deployment' };
+  const { control } = provisioning;
+  const action = body?.action;
+
+  if (action === 'availability') {
+    return checkAvailability(control, body.subdomain);
+  }
+
+  if (action === 'signup') {
+    return startSubscription(
+      control,
+      {
+        subdomain: body.subdomain,
+        schoolName: body.schoolName,
+        contactEmail: body.contactEmail,
+        provider: body.provider,
+        phoneNumber: body.phoneNumber,
+        bankCode: body.bankCode,
+      },
+      { initiateCharge: provisioning.initiateCharge, httpClient },
+    );
+  }
+
+  if (action === 'callback') {
+    const result = await confirmSubscriptionPayment(
+      control,
+      { externalReference: body.externalReference || body.reference, status: body.status },
+      provisioning.provisionOptions,
+    );
+    if (result.provisioned) provisioning.onProvisioned(result.subdomain);
+    return result;
+  }
+
+  if (action === 'status') {
+    const tenant = await getTenantBySubdomain(control, normalizeSubdomain(body.subdomain));
+    return {
+      tenant: tenant
+        ? { subdomain: tenant.subdomain, status: tenant.status, current_period_end: tenant.current_period_end }
+        : null,
+    };
+  }
+
+  if (action === 'list') {
+    if (body.requesterRole !== 'admin') return { error: 'Unauthorized' };
+    return { tenants: await listTenants(control) };
+  }
+
+  if (action === 'sweep') {
+    if (body.requesterRole !== 'admin') return { error: 'Unauthorized' };
+    return sweepSubscriptions(control);
+  }
+
+  return { error: `Unsupported provision action: ${action}` };
+};
+
 export const createAppRuntime = async ({
   connectionString,
   useInMemoryDatabase = false,
   httpClient = fetch,
+  controlDatabase = null,
+  useInMemoryControl = false,
+  provisionOptions = {},
 } = {}) => {
   const defaultDatabase = createDatabaseConnection({
     connectionString,
@@ -1405,18 +1484,47 @@ export const createAppRuntime = async ({
   await waitForDatabase(defaultDatabase, useInMemoryDatabase ? { attempts: 1, delayMs: 0 } : undefined);
   await initializeDatabase(defaultDatabase);
 
-  // Empty unless TENANTS is configured, in which case requests route to a per-subdomain database.
-  const tenants = createTenantRegistry();
+  // The control plane (tenant registry + subscriptions). Present only when a control database is
+  // configured (CONTROL_DATABASE_URL, an injected handle, or the in-memory flag for tests). Without
+  // it the app is single-tenant / static-TENANTS exactly as before.
+  const control =
+    controlDatabase ||
+    (useInMemoryControl ? createDatabaseConnection({ useInMemoryDatabase: true }) : createControlConnection());
+  if (control) {
+    await initializeControlSchema(control);
+  }
+
+  // With a control database, subdomains resolve dynamically from it (self-service provisioning);
+  // otherwise the static TENANTS env (if any) is used. The registry shares the provisioning
+  // connection factory so tests can route in-memory tenant databases (production uses the real one).
+  const lookup = control ? (subdomain) => lookupTenantRoute(control, subdomain) : null;
+  const tenants = createTenantRegistry({
+    lookup,
+    ...(provisionOptions.createConnection ? { createConnection: provisionOptions.createConnection } : {}),
+    ...(provisionOptions.init ? { init: provisionOptions.init } : {}),
+  });
+
+  const provisioning = control
+    ? {
+        control,
+        initiateCharge: createSubscriptionCharge,
+        provisionOptions,
+        onProvisioned: (subdomain) => tenants.invalidate(subdomain),
+      }
+    : null;
 
   return {
     database: defaultDatabase,
+    control,
     tenantsEnabled: tenants.enabled,
+    provisioningEnabled: Boolean(provisioning),
     // Used by the HTTP layer to pick the tenant database for a request; single-tenant callers and
     // tests omit host and get the default database.
     resolveDatabase: (host, headerTenant) => tenants.resolve(host, headerTenant, defaultDatabase),
     async close() {
       await defaultDatabase.close();
       await tenants.close();
+      if (control) await control.close();
     },
     async dispatch({ method = 'GET', pathname = '/', searchParams = new URLSearchParams(), body = {}, database = defaultDatabase }) {
       const reportCardResponse = await handleReportCardRequest(database, pathname, searchParams, { method, body });
@@ -1476,6 +1584,13 @@ export const createAppRuntime = async ({
 
       if (method === 'POST' && pathname === '/api/functions/settings') {
         const data = await handleSettingsFunction(database, body);
+        return data?.error
+          ? { type: 'json', status: 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/provision') {
+        const data = await handleProvisionFunction(provisioning, body, httpClient);
         return data?.error
           ? { type: 'json', status: 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
@@ -1549,12 +1664,28 @@ export const createAppServer = async ({
 
     try {
       if (url.pathname.startsWith('/api/')) {
-        const body = request.method === 'POST' ? await readRequestBody(request) : {};
+        const { raw, body } = request.method === 'POST' ? await readRequestBody(request) : { raw: '', body: {} };
+
+        // Payment webhooks (subscription + student fees) must be proven to come from the provider,
+        // or anyone could POST a fake "paid" and provision a school or clear an invoice for free.
+        if (isPaymentWebhook(url.pathname, body) && !isWebhookSignatureValid(raw, request.headers['x-webhook-signature'])) {
+          sendJson(response, 401, { error: 'Invalid webhook signature' });
+          return;
+        }
 
         // Route to the tenant's database by subdomain (or X-Tenant). In single-tenant mode this is
-        // always the default database. An unknown subdomain has no database, so it is rejected.
-        const { database, tenantId } = await runtime.resolveDatabase(request.headers.host, request.headers['x-tenant']);
+        // always the default database. A suspended school (lapsed subscription) is blocked with a
+        // renewal notice; an unknown subdomain is rejected.
+        const { database, tenantId, status } = await runtime.resolveDatabase(request.headers.host, request.headers['x-tenant']);
         if (!database) {
+          if (status === 'suspended') {
+            sendJson(response, 402, { error: 'This school\'s subscription has lapsed. Please renew to continue.', tenant: tenantId, status });
+            return;
+          }
+          if (status === 'pending') {
+            sendJson(response, 402, { error: 'This school is awaiting activation. Complete payment to continue.', tenant: tenantId, status });
+            return;
+          }
           sendJson(response, 404, { error: `Unknown school: ${tenantId}` });
           return;
         }
