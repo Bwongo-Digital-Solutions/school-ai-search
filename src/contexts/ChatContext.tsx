@@ -5,8 +5,8 @@ import type { Message, Conversation, Attachment, Student, AiModelOption } from '
 import type { JsonRecord } from '@/types/auth';
 
 // 'fees' is the read-only payment status view every signed-in role can reach.
-// 'finance' is the admin fee management workspace.
-type ActiveView = 'chat' | 'students' | 'records' | 'users' | 'audit' | 'fees' | 'finance';
+// 'finance' is the admin fee management workspace. 'settings' is the admin branding screen.
+type ActiveView = 'chat' | 'students' | 'records' | 'users' | 'audit' | 'fees' | 'finance' | 'settings';
 
 
 interface ChatContextType {

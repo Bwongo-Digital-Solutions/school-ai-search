@@ -98,6 +98,36 @@ const PRESET_SCHEMES = [
       { min: 0, grade: 'F9', remark: 'Needs Support' },
     ],
   }),
+  // Uganda's competency-based curriculum (new lower secondary, first UCE examined 2024) reports
+  // each subject on an A-E achievement scale, with NCDC's competency descriptors
+  // (Outstanding / Moderate / Basic) in the remark. This is a separate 'uganda-cbc' system so the
+  // classic D1-F9 UNEB scale above stays available for schools that still use it. The exact SBA +
+  // final weighting UNEB applies is not a flat percentage, so these band cut-offs are indicative
+  // and can be overridden via SCHOOL_GRADING_SCHEMES.
+  createScheme({
+    country: 'uganda-cbc',
+    academicLevel: 'secondary',
+    label: 'Uganda Competency-Based (Lower Secondary, UCE)',
+    scale: [
+      { min: 80, grade: 'A', remark: 'Outstanding' },
+      { min: 70, grade: 'B', remark: 'Moderate — Strong' },
+      { min: 60, grade: 'C', remark: 'Moderate' },
+      { min: 50, grade: 'D', remark: 'Basic' },
+      { min: 0, grade: 'E', remark: 'Elementary — Needs Support' },
+    ],
+  }),
+  createScheme({
+    country: 'uganda-cbc',
+    academicLevel: 'primary',
+    label: 'Uganda Competency-Based (Primary)',
+    scale: [
+      { min: 80, grade: 'A', remark: 'Outstanding' },
+      { min: 70, grade: 'B', remark: 'Moderate — Strong' },
+      { min: 60, grade: 'C', remark: 'Moderate' },
+      { min: 50, grade: 'D', remark: 'Basic' },
+      { min: 0, grade: 'E', remark: 'Elementary — Needs Support' },
+    ],
+  }),
   createScheme({
     country: 'kenya',
     academicLevel: 'secondary',

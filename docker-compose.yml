@@ -35,7 +35,7 @@ services:
       LOCAL_STATIC_ROOT: /app/dist
       DATABASE_URL: ${DATABASE_URL:-postgres://schoolapp:schoolapp@db:5432/school_ai_search}
       DATABASE_SSL: "false"
-      SCHOOL_NAME: ${SCHOOL_NAME:-SchoolBot Academy}
+      SCHOOL_NAME: ${SCHOOL_NAME:-eSchool}
       SCHOOL_TAGLINE: ${SCHOOL_TAGLINE:-Academic Excellence and Character}
       AI_DEFAULT_MODEL_ID: ${AI_DEFAULT_MODEL_ID:-local-rules}
       AI_MODEL_CATALOG: ${AI_MODEL_CATALOG:-}

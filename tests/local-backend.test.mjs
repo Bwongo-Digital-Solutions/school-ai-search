@@ -5,7 +5,7 @@ import QRCode from 'qrcode';
 
 import { createAppRuntime, parseStudentCode } from '../server/local-backend.mjs';
 import { buildQrPayload, buildQrPng } from '../server/reports/id-card.mjs';
-import { gradeScore, resolveGradingScheme } from '../server/reports/grading-config.mjs';
+import { gradeScore, getPublicGradingOptions, resolveGradingScheme } from '../server/reports/grading-config.mjs';
 
 const startTestRuntime = async (options = {}) => {
   const runtime = await createAppRuntime({ useInMemoryDatabase: true, ...options });
@@ -295,6 +295,16 @@ test('admins can assign the non-teaching support staff role', async () => {
       displayName: 'Moses Gatekeeper',
     });
     assert.equal(gatekeeper.body.data.user.role, 'teacher');
+    // New non-admin signups start pending; the admin must approve before they can sign in.
+    assert.equal(gatekeeper.body.data.pending, true);
+
+    const approved = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'approve_account',
+      userId: gatekeeper.body.data.user.id,
+      requesterRole: 'admin',
+    });
+    assert.equal(approved.status, 200);
+    assert.equal(approved.body.data.user.approval_status, 'approved');
 
     const promoted = await dispatch(runtime, 'POST', '/api/functions/auth', {
       action: 'update_role',
@@ -613,6 +623,20 @@ test('grading schemes resolve by country and academic level', () => {
     academicLevel: 'nursery',
   });
   assert.equal(gradeScore(72, nursery).grade, 'Meeting');
+
+  // Uganda's competency-based curriculum grades subjects A-E with NCDC competency descriptors,
+  // and is a distinct system from the classic UNEB D1-F9 scale.
+  const cbc = resolveGradingScheme({ country: 'uganda-cbc', academicLevel: 'secondary' });
+  assert.equal(cbc.label, 'Uganda Competency-Based (Lower Secondary, UCE)');
+  assert.deepEqual(gradeScore(84, cbc), { grade: 'A', remark: 'Outstanding' });
+  assert.deepEqual(gradeScore(55, cbc), { grade: 'D', remark: 'Basic' });
+  assert.equal(gradeScore(20, cbc).grade, 'E');
+  // The classic UNEB scale is untouched and still resolves independently.
+  assert.equal(resolveGradingScheme({ country: 'uganda', academicLevel: 'secondary' }).label, 'Uganda Secondary UNEB Scale');
+
+  // It appears in the public options list the API serves.
+  const options = getPublicGradingOptions();
+  assert.ok(options.some((o) => o.country === 'uganda-cbc' && o.academicLevel === 'secondary'));
 });
 
 test('local backend exposes full school management modules through the db API', async () => {
@@ -2008,5 +2032,406 @@ test('gateway payments are reconciled and receipted exactly once', async () => {
     assert.equal(receipts.body.data[0].issued_by, 'payment_gateway');
   } finally {
     await cleanup();
+  }
+});
+
+test('non-admin signups require admin approval before they can sign in', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const auth = (body) => dispatch(runtime, 'POST', '/api/functions/auth', body);
+
+  try {
+    // First account is the founding admin: auto-approved and immediately usable.
+    const admin = await auth({ action: 'signup', email: 'head@school.local', password: 'password123', displayName: 'Head' });
+    assert.equal(admin.body.data.user.role, 'admin');
+    assert.equal(admin.body.data.user.approval_status, 'approved');
+    assert.notEqual(admin.body.data.pending, true);
+    assert.equal((await auth({ action: 'signin', email: 'head@school.local', password: 'password123' })).body.data.user.role, 'admin');
+
+    // A later signup lands pending, and cannot obtain a session.
+    const teacher = await auth({ action: 'signup', email: 'teacher@school.local', password: 'password123', displayName: 'Teacher' });
+    assert.equal(teacher.body.data.pending, true);
+    assert.equal(teacher.body.data.user.approval_status, 'pending');
+    const teacherId = teacher.body.data.user.id;
+
+    const blocked = await auth({ action: 'signin', email: 'teacher@school.local', password: 'password123' });
+    assert.equal(blocked.status, 400);
+    assert.equal(blocked.body.error, 'Your account is awaiting administrator approval.');
+
+    // A wrong password still reads as invalid credentials, not as a pending account.
+    const wrong = await auth({ action: 'signin', email: 'teacher@school.local', password: 'nope' });
+    assert.equal(wrong.body.error, 'Invalid email or password');
+
+    // Approval and rejection are admin-only.
+    for (const action of ['approve_account', 'reject_account']) {
+      const denied = await auth({ action, userId: teacherId, requesterRole: 'teacher' });
+      assert.equal(denied.status, 400);
+      assert.equal(denied.body.error, 'Unauthorized');
+    }
+    // The account survived the unauthorized attempts.
+    assert.equal((await auth({ action: 'get_users' })).body.data.users.length, 2);
+
+    // Approve, and the same credentials now sign in.
+    const approve = await auth({ action: 'approve_account', userId: teacherId, requesterRole: 'admin', requesterEmail: 'head@school.local', requesterName: 'Head' });
+    assert.equal(approve.body.data.user.approval_status, 'approved');
+    assert.equal((await auth({ action: 'signin', email: 'teacher@school.local', password: 'password123' })).body.data.user.role, 'teacher');
+
+    // get_users exposes approval_status for the admin panel.
+    const users = await auth({ action: 'get_users' });
+    assert.ok(users.body.data.users.every((u) => typeof u.approval_status === 'string'));
+
+    // Approvals are audited server-side.
+    const audit = await auth({ action: 'get_audit_log', limit: 20 });
+    assert.ok(audit.body.data.logs.some((l) => l.action === 'account_approved' && l.entity_type === 'user'));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('rejecting an account deletes it, and admins cannot be rejected', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const auth = (body) => dispatch(runtime, 'POST', '/api/functions/auth', body);
+
+  try {
+    const admin = await auth({ action: 'signup', email: 'admin@school.local', password: 'password123', displayName: 'Admin' });
+    const rejectMe = await auth({ action: 'signup', email: 'reject@school.local', password: 'password123', displayName: 'Reject Me' });
+    const rejectId = rejectMe.body.data.user.id;
+
+    const rejected = await auth({ action: 'reject_account', userId: rejectId, requesterRole: 'admin', requesterEmail: 'admin@school.local', requesterName: 'Admin' });
+    assert.equal(rejected.status, 200);
+    assert.equal(rejected.body.data.deleted, true);
+
+    // Gone from the database entirely.
+    const users = await auth({ action: 'get_users' });
+    assert.equal(users.body.data.users.length, 1);
+    assert.ok(!users.body.data.users.some((u) => u.auth_email === 'reject@school.local'));
+
+    // And can no longer authenticate — it reads as unknown credentials, not pending.
+    const gone = await auth({ action: 'signin', email: 'reject@school.local', password: 'password123' });
+    assert.equal(gone.body.error, 'Invalid email or password');
+
+    // Rejecting a second time is a clean "not found", not a crash.
+    assert.equal((await auth({ action: 'reject_account', userId: rejectId, requesterRole: 'admin' })).body.error, 'User not found');
+
+    // An admin account is protected from rejection, so the school cannot be locked out.
+    const protectAdmin = await auth({ action: 'reject_account', userId: admin.body.data.user.id, requesterRole: 'admin' });
+    assert.equal(protectAdmin.status, 400);
+    assert.equal(protectAdmin.body.error, 'Administrator accounts cannot be rejected');
+    assert.equal((await auth({ action: 'get_users' })).body.data.users.length, 1);
+
+    // The rejection was audited.
+    const audit = await auth({ action: 'get_audit_log', limit: 20 });
+    assert.ok(audit.body.data.logs.some((l) => l.action === 'account_rejected' && l.entity_type === 'user'));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('report cards accept an uploaded photo, logo, address and theme colour via POST', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    // A minimal but valid 1x1 PNG, as a browser would hand over an uploaded image.
+    const onePixelPng =
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQAY3Y2wAAAAAElFTkSuQmCC';
+
+    const pdf = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/report-cards/student-001.pdf',
+      searchParams: new URLSearchParams(),
+      body: {
+        term: 'Term 2',
+        academicYear: '2026/2027',
+        gradingCountry: 'uganda',
+        academicLevel: 'secondary',
+        schoolName: 'Bwongo Digital School',
+        schoolAddress: 'P.O. Box 123, Kampala, Uganda',
+        themeColor: '#B5179E',
+        schoolLogo: onePixelPng,
+        studentPhoto: onePixelPng,
+      },
+    });
+    assert.equal(pdf.status, 200);
+    assert.equal(pdf.type, 'binary');
+    assert.equal(pdf.headers['Content-Type'], 'application/pdf');
+    // Embedding two images makes the document meaningfully larger than the text-only card.
+    assert.ok(pdf.body.length > 1000);
+
+    // A malformed image or theme must not break the download — the card still renders.
+    const resilient = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/report-cards/student-001.pdf',
+      searchParams: new URLSearchParams(),
+      body: { schoolLogo: 'data:image/png;base64,not-real', themeColor: 'nonsense' },
+    });
+    assert.equal(resilient.status, 200);
+    assert.ok(resilient.body.length > 500);
+
+    // The POST path still 404s for an unknown student, like the GET path.
+    const missing = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/report-cards/nobody.pdf',
+      searchParams: new URLSearchParams(),
+      body: { themeColor: '#123456' },
+    });
+    assert.equal(missing.status, 404);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('school settings are admin-editable and default-seeded', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const settings = (body) => dispatch(runtime, 'POST', '/api/functions/settings', body);
+
+  try {
+    // A seeded 'default' row exists from first boot.
+    const seeded = await settings({ action: 'get' });
+    assert.equal(seeded.status, 200);
+    assert.equal(seeded.body.data.settings.id, 'default');
+    assert.equal(seeded.body.data.settings.theme_color, '#2952a3');
+
+    // Non-admins cannot update, and nothing is written.
+    const denied = await settings({ action: 'update', requesterRole: 'teacher', schoolName: 'Smuggled' });
+    assert.equal(denied.status, 400);
+    assert.equal(denied.body.error, 'Unauthorized');
+    assert.equal((await settings({ action: 'get' })).body.data.settings.school_name, '');
+
+    // An admin sets the branding; a bad theme colour is normalised to the house default.
+    const saved = await settings({
+      action: 'update',
+      requesterRole: 'admin',
+      actorEmail: 'admin@school.ug',
+      actorName: 'Admin',
+      schoolName: 'Kampala High',
+      tagline: 'Excellence',
+      address: 'P.O. Box 1, Kampala',
+      themeColor: 'not-a-colour',
+      contactPhone: '+256700000000',
+      contactEmail: 'info@kampala.high',
+    });
+    assert.equal(saved.status, 200);
+    assert.equal(saved.body.data.settings.school_name, 'Kampala High');
+    assert.equal(saved.body.data.settings.theme_color, '#2952a3');
+
+    // Update is a full-row replace (the Settings form always submits every field), and a valid
+    // theme colour is stored normalised to lowercase with a leading hash.
+    const themed = await settings({
+      action: 'update',
+      requesterRole: 'admin',
+      schoolName: 'Kampala High',
+      tagline: 'Excellence',
+      address: 'P.O. Box 1, Kampala',
+      themeColor: 'B5179E',
+      contactPhone: '+256700000000',
+      contactEmail: 'info@kampala.high',
+    });
+    assert.equal(themed.body.data.settings.theme_color, '#b5179e');
+
+    // The change persists and is audited server-side.
+    assert.equal((await settings({ action: 'get' })).body.data.settings.contact_email, 'info@kampala.high');
+    const audit = await dispatch(runtime, 'POST', '/api/functions/auth', { action: 'get_audit_log', limit: 20 });
+    assert.ok(audit.body.data.logs.some((l) => l.action === 'settings_updated' && l.entity_type === 'settings'));
+
+    // The students table now round-trips a stored photo.
+    const withPhoto = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students',
+      operation: 'update',
+      columns: '*',
+      single: true,
+      filters: [{ field: 'id', operator: 'eq', value: 'student-001' }],
+      payload: { photo_url: 'data:image/png;base64,iVBORw0KGgo=' },
+    });
+    assert.equal(withPhoto.body.data.photo_url, 'data:image/png;base64,iVBORw0KGgo=');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('documents use the global school settings for branding and the stored student photo', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const onePixelPng =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQAY3Y2wAAAAAElFTkSuQmCC';
+
+  try {
+    // Set global branding once and store a photo on the student.
+    await dispatch(runtime, 'POST', '/api/functions/settings', {
+      action: 'update',
+      requesterRole: 'admin',
+      schoolName: 'Kampala High School',
+      tagline: 'Knowledge is Power',
+      themeColor: '#B5179E',
+    });
+    await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students',
+      operation: 'update',
+      columns: '*',
+      single: true,
+      filters: [{ field: 'id', operator: 'eq', value: 'student-001' }],
+      payload: { photo_url: onePixelPng },
+    });
+
+    // ID card embeds the stored photo alongside the QR (2 images).
+    const idCard = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/id-cards/student-001.pdf',
+      searchParams: new URLSearchParams(),
+    });
+    assert.equal(idCard.status, 200);
+    assert.equal(idCard.type, 'binary');
+    assert.ok(idCard.body.length > 1500, 'a card with a photo is larger than a QR-only card');
+
+    // Report card with no per-request branding falls back to the global settings and the stored
+    // photo — so it embeds an image even though nothing was uploaded in the request.
+    const reportCard = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/report-cards/student-001.pdf',
+      searchParams: new URLSearchParams(),
+      body: { term: 'Term 2', gradingCountry: 'uganda-cbc' },
+    });
+    assert.equal(reportCard.status, 200);
+    assert.ok(reportCard.body.length > 1000, 'the stored photo is embedded from settings/record, not upload');
+
+    // A per-request value still overrides the global default (no crash, valid PDF).
+    const overridden = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/report-cards/student-001.pdf',
+      searchParams: new URLSearchParams(),
+      body: { schoolName: 'One-off Name', themeColor: '#123456' },
+    });
+    assert.equal(overridden.status, 200);
+    assert.ok(overridden.body.length > 500);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('admins can generate a printable financial report, others cannot', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const feesCall = (action, body = {}) =>
+    dispatch(runtime, 'POST', '/api/functions/fees', { action, requesterRole: 'admin', actorName: 'Admin', ...body });
+
+  try {
+    // Bill a cohort and leave a balance so the report has real figures.
+    const structure = await feesCall('save_fee_structure', {
+      name: 'Grade 10 Day', gradeLevel: 10, academicYear: '2026/2027', term: 'Term 1', amount: 1000000, dueDate: '2026-04-01',
+    });
+    await feesCall('run_billing', { feeStructureId: structure.body.data.structure.id, confirm: true });
+
+    const report = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/fees/report.pdf',
+      searchParams: new URLSearchParams({ requesterRole: 'admin' }),
+    });
+    assert.equal(report.status, 200);
+    assert.equal(report.type, 'binary');
+    assert.equal(report.headers['Content-Type'], 'application/pdf');
+    assert.ok(report.body.length > 1000);
+
+    for (const role of ['teacher', 'support_staff']) {
+      const denied = await runtime.dispatch({
+        method: 'GET',
+        pathname: '/api/fees/report.pdf',
+        searchParams: new URLSearchParams({ requesterRole: role }),
+      });
+      assert.equal(denied.status, 403);
+    }
+    const anonymous = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/fees/report.pdf',
+      searchParams: new URLSearchParams(),
+    });
+    assert.equal(anonymous.status, 403);
+
+    // The meta endpoint powers the app footer.
+    const meta = await runtime.dispatch({ method: 'GET', pathname: '/api/meta', searchParams: new URLSearchParams() });
+    assert.equal(meta.status, 200);
+    assert.match(meta.body.data.version, /^\d+\.\d+\.\d+$/);
+    assert.ok(typeof meta.body.data.developer === 'string' && meta.body.data.developer.length > 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('tenant resolution maps subdomains to tenants and defaults safely', async () => {
+  const { resolveTenantId, parseTenantRegistry, createTenantRegistry, DEFAULT_TENANT } = await import(
+    '../server/db/tenants.mjs'
+  );
+
+  // Subdomain routing.
+  assert.equal(resolveTenantId('kampala-high.eschool.app'), 'kampala-high');
+  assert.equal(resolveTenantId('Gulu-SS.eschool.app'), 'gulu-ss');
+  assert.equal(resolveTenantId('kampala-high.eschool.app:8787'), 'kampala-high');
+
+  // Apex, www, localhost and IPs fall back to the default tenant.
+  assert.equal(resolveTenantId('eschool.app'), DEFAULT_TENANT);
+  assert.equal(resolveTenantId('www.eschool.app'), DEFAULT_TENANT);
+  assert.equal(resolveTenantId('localhost'), DEFAULT_TENANT);
+  assert.equal(resolveTenantId('127.0.0.1:8787'), DEFAULT_TENANT);
+  assert.equal(resolveTenantId(''), DEFAULT_TENANT);
+  assert.equal(resolveTenantId(undefined), DEFAULT_TENANT);
+
+  // An explicit X-Tenant header wins over the host.
+  assert.equal(resolveTenantId('kampala-high.eschool.app', 'gulu-ss'), 'gulu-ss');
+
+  // Registry parsing.
+  assert.equal(parseTenantRegistry(undefined).size, 0);
+  assert.equal(parseTenantRegistry('not json').size, 0);
+  const registry = parseTenantRegistry('[{"id":"A","url":"postgres://x/a"},{"id":"b","url":"postgres://x/b"}]');
+  assert.equal(registry.size, 2);
+  assert.equal(registry.get('a').url, 'postgres://x/a');
+
+  // With no registry the router is disabled and everything uses the default database.
+  const singleTenant = createTenantRegistry({ registry: new Map() });
+  assert.equal(singleTenant.enabled, false);
+  const sentinel = { marker: 'default-db' };
+  assert.equal((await singleTenant.resolve('anything.eschool.app', undefined, sentinel)).database, sentinel);
+});
+
+test('configured tenants get isolated databases', async () => {
+  const { createTenantRegistry } = await import('../server/db/tenants.mjs');
+  const { createDatabaseConnection } = await import('../server/db/connection.mjs');
+  const { initializeDatabase } = await import('../server/db/schema.mjs');
+
+  // Each tenant url maps to its own in-memory database.
+  const registry = new Map([
+    ['kampala-high', { url: 'memory://kampala' }],
+    ['gulu-ss', { url: 'memory://gulu' }],
+  ]);
+  const tenants = createTenantRegistry({
+    registry,
+    createConnection: () => createDatabaseConnection({ useInMemoryDatabase: true }),
+    init: initializeDatabase,
+  });
+
+  try {
+    assert.equal(tenants.enabled, true);
+
+    const a = await tenants.resolve('kampala-high.eschool.app', undefined, null);
+    const b = await tenants.resolve('gulu-ss.eschool.app', undefined, null);
+    assert.equal(a.tenantId, 'kampala-high');
+    assert.equal(b.tenantId, 'gulu-ss');
+    assert.notEqual(a.database, b.database);
+
+    // Both start from the same seed.
+    assert.equal((await a.database.query('SELECT COUNT(*)::int AS n FROM students')).rows[0].n, 15);
+    assert.equal((await b.database.query('SELECT COUNT(*)::int AS n FROM students')).rows[0].n, 15);
+
+    // A write in tenant A is invisible in tenant B.
+    await a.database.query(
+      "INSERT INTO students (id, student_id, first_name, last_name, grade_level, class_section) VALUES ('x','X-1','Only','InA', 5, 'A')",
+    );
+    assert.equal((await a.database.query('SELECT COUNT(*)::int AS n FROM students')).rows[0].n, 16);
+    assert.equal((await b.database.query('SELECT COUNT(*)::int AS n FROM students')).rows[0].n, 15);
+
+    // The same tenant resolves to the same cached connection.
+    const aAgain = await tenants.resolve('kampala-high.eschool.app', undefined, null);
+    assert.equal(aAgain.database, a.database);
+
+    // An unknown subdomain has no database, so the server would 404 it.
+    const unknown = await tenants.resolve('ghost-school.eschool.app', undefined, null);
+    assert.equal(unknown.database, null);
+    assert.equal(unknown.tenantId, 'ghost-school');
+  } finally {
+    await tenants.close();
   }
 });

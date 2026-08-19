@@ -456,14 +456,17 @@ const recordPayment = async ({ database, body, actor }) => {
       const newBalance = roundMoney(balance - applied);
       remaining = roundMoney(remaining - applied);
 
+      // Compute the status in JS rather than referencing $1 twice in SQL: real Postgres deduces
+      // conflicting types when the same parameter drives both `balance_due = $1` (numeric) and
+      // `$1 <= 0` (integer), and rejects the statement. pg-mem's looser inference hid this.
       const { rows: updated } = await executor.query(
         `
           UPDATE invoices
-          SET balance_due = $1, status = CASE WHEN $1 <= 0 THEN 'paid' ELSE 'partial' END
-          WHERE id = $2
+          SET balance_due = $1, status = $2
+          WHERE id = $3
           RETURNING invoice_number, balance_due, status
         `,
-        [newBalance, invoice.id],
+        [newBalance, newBalance <= 0 ? 'paid' : 'partial', invoice.id],
       );
 
       allocations.push({

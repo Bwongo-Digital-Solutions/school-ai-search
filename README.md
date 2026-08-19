@@ -35,6 +35,13 @@ By default:
 - conversation and message persistence
 - local AI-style student search responses
 - PDF report card builder from Student Management
+- global school branding set by an admin under **Settings** (name, tagline, address, logo, theme colour, contacts) applied to every report card, receipt, statement, ID card and the app header
+- student photos stored on the record and printed on ID cards and report cards
+- printable, branded PDFs: report cards (with a neat photo/logo header), fee receipts, fee statements, and an admin **financial report** (collections, standings, arrears ageing)
+- account approval: non-admin sign-ups wait for admin approval before they can sign in; rejection deletes the account
+- Uganda competency-based curriculum (A–E) grading alongside the classic UNEB D1–F9 scale
+- multi-tenant ready: host several schools from one deployment with an isolated database per school, selected by subdomain (set `TENANTS`)
+- a product footer on every screen showing "Powered by e-School", version and build number, and developer contacts
 - Docker production image
 - Docker live-reload development stack
 

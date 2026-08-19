@@ -7,6 +7,8 @@ type AuthFunctionResponse = {
   user?: UserProfile;
   logs?: AuditLogEntry[];
   users?: UserProfile[];
+  pending?: boolean;
+  deleted?: boolean;
 };
 
 const getErrorMessage = (error: unknown, fallback: string) =>
@@ -20,7 +22,7 @@ interface AuthContextType {
   isSupportStaff: boolean;
   isLoading: boolean;
   signIn: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
-  signUp: (email: string, password: string, displayName: string) => Promise<{ success: boolean; error?: string }>;
+  signUp: (email: string, password: string, displayName: string) => Promise<{ success: boolean; error?: string; pending?: boolean }>;
   signOut: () => void;
   logAudit: (
     action: string,
@@ -32,6 +34,8 @@ interface AuthContextType {
   fetchAuditLog: (limit?: number) => Promise<AuditLogEntry[]>;
   fetchUsers: () => Promise<UserProfile[]>;
   updateUserRole: (userId: string, newRole: UserRole) => Promise<{ success: boolean; error?: string }>;
+  approveAccount: (userId: string) => Promise<{ success: boolean; error?: string }>;
+  rejectAccount: (userId: string) => Promise<{ success: boolean; error?: string }>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -103,6 +107,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const userProfile = data?.user;
       if (!userProfile) {
         return { success: false, error: 'Sign up failed' };
+      }
+      // A pending account gets no session: the person must wait for an admin to approve them,
+      // then sign in. Only the auto-approved first (admin) account is signed in immediately.
+      if (data?.pending || userProfile.approval_status === 'pending') {
+        return { success: true, pending: true };
       }
       setUser(userProfile);
       localStorage.setItem(SESSION_KEY, JSON.stringify(userProfile));
@@ -185,6 +194,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [user]);
 
+  const decideAccount = useCallback(async (action: 'approve_account' | 'reject_account', userId: string) => {
+    if (!user || user.role !== 'admin') {
+      return { success: false, error: 'Unauthorized' };
+    }
+    try {
+      const { data, error } = await supabase.functions.invoke<AuthFunctionResponse>('auth', {
+        body: { action, userId, requesterRole: user.role, requesterEmail: user.auth_email, requesterName: user.display_name },
+      });
+      if (error || data?.error) {
+        return { success: false, error: data?.error || 'Failed to update account' };
+      }
+      return { success: true };
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err, 'Network error') };
+    }
+  }, [user]);
+
+  const approveAccount = useCallback((userId: string) => decideAccount('approve_account', userId), [decideAccount]);
+  const rejectAccount = useCallback((userId: string) => decideAccount('reject_account', userId), [decideAccount]);
+
   const isAuthenticated = !!user;
   const isAdmin = user?.role === 'admin';
   const isTeacher = user?.role === 'teacher';
@@ -206,6 +235,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         fetchAuditLog,
         fetchUsers,
         updateUserRole,
+        approveAccount,
+        rejectAccount,
       }}
     >
       {children}

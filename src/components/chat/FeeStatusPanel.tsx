@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, CheckCircle2, Clock, Loader2, Receipt, RefreshCw, ScanLine, Search, Wallet, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Clock, FileDown, Loader2, Receipt, RefreshCw, ScanLine, Search, Wallet, X } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
-import { formatAmount, formatDate } from '@/lib/format';
+import { feeDocumentUrl } from '@/lib/fees';
+import { downloadFromUrl } from '@/lib/download';
+import { formatAmount, formatDate, todayIso } from '@/lib/format';
 import StatTile from '@/components/common/StatTile';
 import StudentIdScanner from './StudentIdScanner';
 import type { FeeStatus, StudentFeeStatus } from '@/types/fees';
@@ -36,7 +38,7 @@ const STATUS_STYLES: Record<FeeStatus, { label: string; badge: string; icon: Rea
 };
 
 const FeeStatusPanel: React.FC = () => {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isAdmin, user } = useAuth();
   const [rows, setRows] = useState<StudentFeeStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -60,6 +62,14 @@ const FeeStatusPanel: React.FC = () => {
     }
     setLoading(false);
   }, []);
+
+  const downloadReport = useCallback(async () => {
+    try {
+      await downloadFromUrl(feeDocumentUrl('/api/fees/report.pdf', user), `financial-report-${todayIso()}.pdf`);
+    } catch (err) {
+      alert(`Failed to generate report: ${err instanceof Error ? err.message : 'Unexpected error'}`);
+    }
+  }, [user]);
 
   const lookUpCode = useCallback(async (code: string) => {
     setScannerOpen(false);
@@ -140,6 +150,15 @@ const FeeStatusPanel: React.FC = () => {
               <ScanLine className="w-4 h-4" />
               Scan Student ID
             </button>
+            {isAdmin && (
+              <button
+                onClick={downloadReport}
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50"
+              >
+                <FileDown className="w-4 h-4" />
+                Financial Report
+              </button>
+            )}
             <button
               onClick={loadFeeStatus}
               disabled={loading}

@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import {
   Search, Plus, Pencil, Trash2, X, ChevronUp, ChevronDown,
   Save, AlertTriangle, Users, GraduationCap, ArrowUpDown, Filter,
-  Shield, Lock, Eye, FileText, Download, Loader2, Wallet, ScanLine, QrCode, Printer
+  Shield, Lock, Eye, FileText, Download, Loader2, Wallet, ScanLine, QrCode, Printer, ImagePlus, Palette
 } from 'lucide-react';
 import StudentIdScanner from './StudentIdScanner';
 import { buildApiUrl, supabase } from '@/lib/supabase';
@@ -17,7 +17,7 @@ const EMPTY_STUDENT = {
   phone: '', parent_name: '', parent_phone: '', parent_email: '',
   address: '', enrollment_date: new Date().toISOString().split('T')[0],
   status: 'active', gpa: 0, attendance_rate: 100, subjects: [] as string[],
-  notes: '',
+  notes: '', photo_url: '',
 };
 
 type StudentFormState = typeof EMPTY_STUDENT;
@@ -25,7 +25,8 @@ type SortKey = 'first_name' | 'last_name' | 'grade_level' | 'gpa' | 'attendance_
 
 const GRADING_COUNTRIES = [
   { value: 'international', label: 'International' },
-  { value: 'uganda', label: 'Uganda' },
+  { value: 'uganda', label: 'Uganda (UNEB, D1–F9)' },
+  { value: 'uganda-cbc', label: 'Uganda (Competency-Based, A–E)' },
   { value: 'kenya', label: 'Kenya' },
   { value: 'united-states', label: 'United States' },
   { value: 'united-kingdom', label: 'United Kingdom' },
@@ -49,6 +50,51 @@ const inferAcademicLevel = (gradeLevel: number) => {
   if (gradeLevel <= 7) return 'primary';
   if (gradeLevel <= 13) return 'secondary';
   return 'tertiary';
+};
+
+const DEFAULT_REPORT_THEME = '#2952a3';
+const REPORT_BRANDING_KEY = 'schoolbot_report_branding';
+
+// Uploaded images are inlined into the report-card request as base64 data URLs, so they need no
+// storage of their own. Keep them small — the whole request is held in memory on both ends.
+const MAX_REPORT_IMAGE_BYTES = 2 * 1024 * 1024;
+
+const readFileAsDataUrl = (file: File): Promise<string> =>
+  new Promise((resolve, reject) => {
+    if (file.size > MAX_REPORT_IMAGE_BYTES) {
+      reject(new Error('Image must be 2MB or smaller.'));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Could not read the selected image.'));
+    reader.readAsDataURL(file);
+  });
+
+// School-wide branding (name, tagline, address, logo, theme) is reused across every report card,
+// so remember the last values in the browser rather than re-entering them each time.
+type ReportBranding = {
+  schoolName: string;
+  schoolTagline: string;
+  schoolAddress: string;
+  themeColor: string;
+  schoolLogo: string;
+};
+
+const loadReportBranding = (): Partial<ReportBranding> => {
+  try {
+    return JSON.parse(localStorage.getItem(REPORT_BRANDING_KEY) || '{}');
+  } catch {
+    return {};
+  }
+};
+
+const saveReportBranding = (branding: ReportBranding) => {
+  try {
+    localStorage.setItem(REPORT_BRANDING_KEY, JSON.stringify(branding));
+  } catch {
+    // Storage may be full or blocked; the report still generates, branding just isn't remembered.
+  }
 };
 
 const getErrorMessage = (error: unknown) => (error instanceof Error ? error.message : 'Unknown error');
@@ -130,6 +176,10 @@ const StudentManagement: React.FC = () => {
   const [reportCardTeacherComment, setReportCardTeacherComment] = useState('');
   const [reportCardNotes, setReportCardNotes] = useState('');
   const [isBuildingReport, setIsBuildingReport] = useState(false);
+  const [reportCardAddress, setReportCardAddress] = useState('');
+  const [reportCardThemeColor, setReportCardThemeColor] = useState(DEFAULT_REPORT_THEME);
+  const [reportCardLogo, setReportCardLogo] = useState('');
+  const [reportCardPhoto, setReportCardPhoto] = useState('');
   const [scannerOpen, setScannerOpen] = useState(false);
   const [idCardStudent, setIdCardStudent] = useState<Student | null>(null);
 
@@ -205,6 +255,7 @@ const StudentManagement: React.FC = () => {
       address: s.address || '', enrollment_date: s.enrollment_date || '',
       status: s.status || 'active', gpa: s.gpa ?? 0, attendance_rate: s.attendance_rate ?? 100,
       subjects: Array.isArray(s.subjects) ? s.subjects : [], notes: s.notes || '',
+      photo_url: s.photo_url || '',
     });
     setEditingId(s.id);
     setErrors({});
@@ -269,18 +320,38 @@ const StudentManagement: React.FC = () => {
   };
 
   const openReportCardBuilder = (student: Student) => {
+    const branding = loadReportBranding();
     setReportCardStudent(student);
     setReportCardTerm('Term 1');
     setReportCardYear(getDefaultAcademicYear());
     setReportCardAcademicLevel(inferAcademicLevel(student.grade_level));
     setReportCardGradingCountry('international');
     setReportCardTitle('');
-    setReportCardSchoolName('');
-    setReportCardSchoolTagline('');
+    // Reuse the school's saved branding; a fresh browser falls back to server defaults.
+    setReportCardSchoolName(branding.schoolName || '');
+    setReportCardSchoolTagline(branding.schoolTagline || '');
+    setReportCardAddress(branding.schoolAddress || '');
+    setReportCardThemeColor(branding.themeColor || DEFAULT_REPORT_THEME);
+    setReportCardLogo(branding.schoolLogo || '');
+    setReportCardPhoto('');
     setReportCardTeacherName('');
     setReportCardHeadTeacherName('');
     setReportCardTeacherComment('');
     setReportCardNotes(student.notes || '');
+  };
+
+  const handleReportImageUpload = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+    setter: (value: string) => void,
+  ) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    try {
+      setter(await readFileAsDataUrl(file));
+    } catch (err: unknown) {
+      alert(getErrorMessage(err) || 'Could not read the selected image.');
+    }
   };
 
   const handleReportCardDownload = async () => {
@@ -288,16 +359,22 @@ const StudentManagement: React.FC = () => {
 
     setIsBuildingReport(true);
     try {
-      const params = new URLSearchParams({
+      // Images and the theme are too large or awkward for a query string, so the whole set is
+      // sent as a JSON POST body instead. The server accepts both shapes.
+      const payload: Record<string, string> = {
         term: reportCardTerm,
         academicYear: reportCardYear,
         gradingCountry: reportCardGradingCountry,
         academicLevel: reportCardAcademicLevel,
-      });
-      const optionalReportFields = {
+        themeColor: reportCardThemeColor,
+      };
+      const optionalReportFields: Record<string, string> = {
         reportTitle: reportCardTitle,
         schoolName: reportCardSchoolName,
         schoolTagline: reportCardSchoolTagline,
+        schoolAddress: reportCardAddress,
+        schoolLogo: reportCardLogo,
+        studentPhoto: reportCardPhoto,
         teacherName: reportCardTeacherName,
         headTeacherName: reportCardHeadTeacherName,
         teacherComment: reportCardTeacherComment,
@@ -306,11 +383,24 @@ const StudentManagement: React.FC = () => {
       Object.entries(optionalReportFields).forEach(([key, value]) => {
         const trimmedValue = value.trim();
         if (trimmedValue) {
-          params.set(key, trimmedValue);
+          payload[key] = trimmedValue;
         }
       });
 
-      const response = await fetch(buildApiUrl(`/api/report-cards/${reportCardStudent.id}.pdf?${params.toString()}`));
+      // Remember the school-wide branding for next time (not the per-student photo).
+      saveReportBranding({
+        schoolName: reportCardSchoolName.trim(),
+        schoolTagline: reportCardSchoolTagline.trim(),
+        schoolAddress: reportCardAddress.trim(),
+        themeColor: reportCardThemeColor,
+        schoolLogo: reportCardLogo,
+      });
+
+      const response = await fetch(buildApiUrl(`/api/report-cards/${reportCardStudent.id}.pdf`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
       if (!response.ok) {
         throw new Error(`Failed to build report card (${response.status})`);
       }
@@ -776,6 +866,86 @@ const StudentManagement: React.FC = () => {
               </div>
 
               <div>
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">School Address</label>
+                <input
+                  type="text"
+                  value={reportCardAddress}
+                  onChange={e => setReportCardAddress(e.target.value)}
+                  placeholder="P.O. Box 123, Kampala, Uganda"
+                  className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5 flex items-center gap-1.5">
+                  <Palette className="w-3.5 h-3.5 text-indigo-500" /> Theme Color
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="color"
+                    value={reportCardThemeColor}
+                    onChange={e => setReportCardThemeColor(e.target.value)}
+                    aria-label="Report theme color"
+                    className="h-10 w-12 rounded-lg border border-gray-200 dark:border-gray-600 bg-transparent cursor-pointer"
+                  />
+                  <input
+                    type="text"
+                    value={reportCardThemeColor}
+                    onChange={e => setReportCardThemeColor(e.target.value)}
+                    placeholder="#2952a3"
+                    className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                  />
+                </div>
+                <p className="text-[11px] text-gray-400 mt-1">Colours the school name, headings, and table on the report card.</p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">School Logo</label>
+                  <div className="flex items-center gap-3">
+                    {reportCardLogo ? (
+                      <img src={reportCardLogo} alt="School logo preview" className="w-12 h-12 rounded-lg object-contain border border-gray-200 dark:border-gray-600 bg-white" />
+                    ) : (
+                      <div className="w-12 h-12 rounded-lg border border-dashed border-gray-300 dark:border-gray-600 flex items-center justify-center text-gray-300 dark:text-gray-600">
+                        <ImagePlus className="w-5 h-5" />
+                      </div>
+                    )}
+                    <div className="flex flex-col gap-1">
+                      <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 dark:border-gray-600 text-xs text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer w-fit">
+                        <ImagePlus className="w-3.5 h-3.5" /> {reportCardLogo ? 'Change' : 'Upload'}
+                        <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={e => handleReportImageUpload(e, setReportCardLogo)} />
+                      </label>
+                      {reportCardLogo && (
+                        <button type="button" onClick={() => setReportCardLogo('')} className="text-xs text-red-500 hover:underline text-left">Remove</button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Student Photo</label>
+                  <div className="flex items-center gap-3">
+                    {reportCardPhoto ? (
+                      <img src={reportCardPhoto} alt="Student photo preview" className="w-12 h-14 rounded-lg object-cover border border-gray-200 dark:border-gray-600 bg-white" />
+                    ) : (
+                      <div className="w-12 h-14 rounded-lg border border-dashed border-gray-300 dark:border-gray-600 flex items-center justify-center text-gray-300 dark:text-gray-600">
+                        <ImagePlus className="w-5 h-5" />
+                      </div>
+                    )}
+                    <div className="flex flex-col gap-1">
+                      <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 dark:border-gray-600 text-xs text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer w-fit">
+                        <ImagePlus className="w-3.5 h-3.5" /> {reportCardPhoto ? 'Change' : 'Upload'}
+                        <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={e => handleReportImageUpload(e, setReportCardPhoto)} />
+                      </label>
+                      {reportCardPhoto && (
+                        <button type="button" onClick={() => setReportCardPhoto('')} className="text-xs text-red-500 hover:underline text-left">Remove</button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div>
                 <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Term</label>
                 <select
                   value={reportCardTerm}
@@ -922,6 +1092,35 @@ const StudentManagement: React.FC = () => {
             </div>
 
             <div className="px-6 py-5 space-y-6">
+              {/* Student photo — reused on ID cards and report cards */}
+              <div>
+                <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Student Photo</h4>
+                <div className="flex items-center gap-3">
+                  {form.photo_url ? (
+                    <img src={form.photo_url} alt="Student photo" className="w-16 h-20 rounded-lg object-cover border border-gray-200 dark:border-gray-600 bg-white" />
+                  ) : (
+                    <div className="w-16 h-20 rounded-lg border border-dashed border-gray-300 dark:border-gray-600 flex items-center justify-center text-gray-300 dark:text-gray-600">
+                      <ImagePlus className="w-6 h-6" />
+                    </div>
+                  )}
+                  <div className="flex flex-col gap-1">
+                    <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 dark:border-gray-600 text-xs text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer w-fit">
+                      <ImagePlus className="w-3.5 h-3.5" /> {form.photo_url ? 'Change' : 'Upload'}
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg"
+                        className="hidden"
+                        onChange={e => handleReportImageUpload(e, (value: string) => setForm(prev => ({ ...prev, photo_url: value })))}
+                      />
+                    </label>
+                    {form.photo_url && (
+                      <button type="button" onClick={() => setForm(prev => ({ ...prev, photo_url: '' }))} className="text-xs text-red-500 hover:underline text-left">Remove</button>
+                    )}
+                    <span className="text-[11px] text-gray-400">Appears on the student's ID card and report card.</span>
+                  </div>
+                </div>
+              </div>
+
               {/* Basic Info */}
               <div>
                 <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Basic Information</h4>

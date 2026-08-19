@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   AlertTriangle,
   BookOpen,
+  FileDown,
   Gauge,
   GraduationCap,
   Landmark,
@@ -12,8 +13,9 @@ import {
   Wallet,
 } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
-import { callFees } from '@/lib/fees';
-import { formatAmount } from '@/lib/format';
+import { callFees, feeDocumentUrl } from '@/lib/fees';
+import { downloadFromUrl } from '@/lib/download';
+import { formatAmount, todayIso } from '@/lib/format';
 import StatTile from '@/components/common/StatTile';
 import type { FeesSummary } from '@/types/feeAdmin';
 import FeeStructuresTab from './fees/FeeStructuresTab';
@@ -117,6 +119,15 @@ const FeeManagementWorkspace: React.FC = () => {
                 <Loader2 className="w-3.5 h-3.5 animate-spin" /> {busy}…
               </span>
             )}
+            <button
+              onClick={() => runAction('Generating financial report', async () => {
+                await downloadFromUrl(feeDocumentUrl('/api/fees/report.pdf', user), `financial-report-${todayIso()}.pdf`);
+              })}
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 text-white text-sm font-medium hover:shadow-lg transition-all disabled:opacity-50"
+              disabled={Boolean(busy)}
+            >
+              <FileDown className="w-4 h-4" /> Financial Report
+            </button>
             <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-medium bg-purple-50 dark:bg-purple-900/20 text-purple-600 dark:text-purple-400 border border-purple-200 dark:border-purple-800">
               <Shield className="w-3 h-3" /> Admin Only
             </span>

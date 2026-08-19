@@ -44,6 +44,9 @@ ALTER TABLE students ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEF
 ALTER TABLE students ADD COLUMN IF NOT EXISTS graduation_date DATE;
 ALTER TABLE students ADD COLUMN IF NOT EXISTS transfer_date DATE;
 ALTER TABLE students ADD COLUMN IF NOT EXISTS alumni_notes TEXT NOT NULL DEFAULT '';
+-- Passport photo as a base64 data URL, uploaded on the student form and reused on ID cards and
+-- report cards so it is captured once rather than per document.
+ALTER TABLE students ADD COLUMN IF NOT EXISTS photo_url TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
@@ -55,9 +58,32 @@ CREATE TABLE IF NOT EXISTS users (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Non-admin signups need administrator approval before they can sign in. The default is
+-- 'approved' so existing accounts are grandfathered in on migration; the signup handler is the
+-- only writer for new accounts and sets this explicitly ('approved' for the first/admin account,
+-- 'pending' otherwise). A rejected account is deleted outright, so only 'pending' and 'approved'
+-- are ever stored.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS approval_status TEXT NOT NULL DEFAULT 'approved';
+
 -- Widen the role list on databases created before 'support_staff' (non-teaching staff) existed.
 ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
 ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin', 'teacher', 'support_staff'));
+
+-- The school's global identity: one row (id = 'default'), edited by an admin under Settings and
+-- read by every document (report cards, ID cards, receipts, statements, finance reports) and the
+-- app header. In a multi-tenant deployment each tenant database carries its own row.
+CREATE TABLE IF NOT EXISTS school_settings (
+  id TEXT PRIMARY KEY DEFAULT 'default',
+  school_name TEXT NOT NULL DEFAULT '',
+  tagline TEXT NOT NULL DEFAULT '',
+  address TEXT NOT NULL DEFAULT '',
+  logo TEXT NOT NULL DEFAULT '',
+  theme_color TEXT NOT NULL DEFAULT '#2952a3',
+  contact_phone TEXT NOT NULL DEFAULT '',
+  contact_email TEXT NOT NULL DEFAULT '',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_by TEXT NOT NULL DEFAULT ''
+);
 
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,
@@ -569,6 +595,29 @@ const STUDENT_COLUMNS = [
 export const initializeDatabase = async (database) => {
   await database.query(SCHEMA_SQL);
   await ensureStudentsSeeded(database);
+  await ensureSchoolSettingsSeeded(database);
+};
+
+// Guarantee the single settings row exists, seeded from the school's env branding so an existing
+// deployment keeps its identity until an admin edits it under Settings.
+const ensureSchoolSettingsSeeded = async (database) => {
+  const { rows } = await database.query("SELECT COUNT(*)::int AS count FROM school_settings WHERE id = 'default'");
+  if ((rows[0]?.count ?? 0) > 0) {
+    return;
+  }
+
+  await database.query(
+    `
+      INSERT INTO school_settings (id, school_name, tagline, address)
+      VALUES ('default', $1, $2, $3)
+      ON CONFLICT (id) DO NOTHING
+    `,
+    [
+      process.env.SCHOOL_NAME || '',
+      process.env.SCHOOL_TAGLINE || '',
+      process.env.SCHOOL_ADDRESS || '',
+    ],
+  );
 };
 
 const ensureStudentsSeeded = async (database) => {

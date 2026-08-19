@@ -69,7 +69,13 @@ const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
           return;
         }
         const result = await signUp(email, password, displayName);
-        if (result.success) {
+        if (result.success && result.pending) {
+          // A pending account is not signed in — the modal stays open so the person sees why.
+          setSuccess('Account created. An administrator must approve it before you can sign in.');
+          setEmail('');
+          setPassword('');
+          setDisplayName('');
+        } else if (result.success) {
           setSuccess('Account created successfully!');
           setTimeout(() => {
             onClose();

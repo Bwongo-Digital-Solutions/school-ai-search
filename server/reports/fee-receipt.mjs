@@ -1,6 +1,6 @@
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 
-const SCHOOL_NAME = process.env.SCHOOL_NAME || 'SchoolBot Academy';
+const SCHOOL_NAME = process.env.SCHOOL_NAME || 'eSchool';
 const SCHOOL_TAGLINE = process.env.SCHOOL_TAGLINE || '';
 
 const A4_WIDTH = 595.28;
@@ -12,6 +12,14 @@ const MUTED = rgb(0.45, 0.47, 0.53);
 const RULE = rgb(0.82, 0.84, 0.88);
 const BRAND = rgb(0.31, 0.27, 0.9);
 const ZEBRA = rgb(0.97, 0.97, 0.99);
+
+// '#RGB' / '#RRGGBB' → rgb, falling back to the default brand so a bad theme value never fails.
+const parseHexColor = (value, fallback = BRAND) => {
+  const hex = String(value || '').trim().replace(/^#/, '');
+  const full = hex.length === 3 ? hex.split('').map((c) => c + c).join('') : hex;
+  if (!/^[0-9a-fA-F]{6}$/.test(full)) return fallback;
+  return rgb(parseInt(full.slice(0, 2), 16) / 255, parseInt(full.slice(2, 4), 16) / 255, parseInt(full.slice(4, 6), 16) / 255);
+};
 
 const truncate = (text, maxCharacters) => {
   const value = String(text ?? '');
@@ -27,11 +35,11 @@ const isoDate = (value) => {
   return Number.isNaN(date.getTime()) ? '—' : date.toISOString().slice(0, 10);
 };
 
-const drawHeader = (page, fonts, { title, schoolName, subtitle }) => {
+const drawHeader = (page, fonts, { title, schoolName, subtitle, tagline, brand = BRAND }) => {
   const { regular, bold } = fonts;
   let y = A4_HEIGHT - MARGIN;
 
-  page.drawRectangle({ x: 0, y: y - 6, width: A4_WIDTH, height: 6, color: BRAND });
+  page.drawRectangle({ x: 0, y: y - 6, width: A4_WIDTH, height: 6, color: brand });
 
   page.drawText(truncate(schoolName || SCHOOL_NAME, 46), {
     x: MARGIN,
@@ -40,12 +48,13 @@ const drawHeader = (page, fonts, { title, schoolName, subtitle }) => {
     font: bold,
     color: INK,
   });
-  if (SCHOOL_TAGLINE) {
-    page.drawText(truncate(SCHOOL_TAGLINE, 70), { x: MARGIN, y: y - 50, size: 9, font: regular, color: MUTED });
+  const resolvedTagline = tagline || SCHOOL_TAGLINE;
+  if (resolvedTagline) {
+    page.drawText(truncate(resolvedTagline, 70), { x: MARGIN, y: y - 50, size: 9, font: regular, color: MUTED });
   }
 
   const titleWidth = bold.widthOfTextAtSize(title, 15);
-  page.drawText(title, { x: A4_WIDTH - MARGIN - titleWidth, y: y - 34, size: 15, font: bold, color: BRAND });
+  page.drawText(title, { x: A4_WIDTH - MARGIN - titleWidth, y: y - 34, size: 15, font: bold, color: brand });
   if (subtitle) {
     const subtitleWidth = regular.widthOfTextAtSize(subtitle, 9);
     page.drawText(subtitle, {
@@ -80,7 +89,7 @@ const drawFields = (page, fonts, y, fields) => {
 };
 
 /** A receipt for one payment, listing which invoices the money was applied to. */
-export const buildFeeReceiptPdf = async ({ school, student, payment, receipt, allocations = [] }) => {
+export const buildFeeReceiptPdf = async ({ school, tagline, themeColor, student, payment, receipt, allocations = [] }) => {
   const pdf = await PDFDocument.create();
   const page = pdf.addPage([A4_WIDTH, A4_HEIGHT]);
   const fonts = {
@@ -88,11 +97,14 @@ export const buildFeeReceiptPdf = async ({ school, student, payment, receipt, al
     bold: await pdf.embedFont(StandardFonts.HelveticaBold),
   };
   const currency = receipt.currency || payment.currency || 'UGX';
+  const brand = parseHexColor(themeColor);
 
   let y = drawHeader(page, fonts, {
     title: 'FEES RECEIPT',
     schoolName: school,
     subtitle: receipt.receipt_number,
+    tagline,
+    brand,
   });
 
   y = drawFields(page, fonts, y, [
@@ -153,7 +165,7 @@ export const buildFeeReceiptPdf = async ({ school, student, payment, receipt, al
 };
 
 /** A full fee statement: every invoice and payment, with a running balance. */
-export const buildFeeStatementPdf = async ({ school, student, entries = [], summary = {}, asOf }) => {
+export const buildFeeStatementPdf = async ({ school, tagline, themeColor, student, entries = [], summary = {}, asOf }) => {
   const pdf = await PDFDocument.create();
   const fonts = {
     regular: null,
@@ -164,11 +176,14 @@ export const buildFeeStatementPdf = async ({ school, student, entries = [], summ
   fonts.bold = await pdf.embedFont(StandardFonts.HelveticaBold);
 
   const currency = summary.currency || 'UGX';
+  const brand = parseHexColor(themeColor);
 
   let y = drawHeader(page, fonts, {
     title: 'FEE STATEMENT',
     schoolName: school,
     subtitle: `As at ${isoDate(asOf)}`,
+    tagline,
+    brand,
   });
 
   y = drawFields(page, fonts, y, [

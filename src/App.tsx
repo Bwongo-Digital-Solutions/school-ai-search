@@ -7,6 +7,7 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { ThemeProvider } from "@/components/theme-provider";
 import { ChatProvider } from "@/contexts/ChatContext";
 import { AuthProvider } from "@/contexts/AuthContext";
+import { SettingsProvider } from "@/contexts/SettingsContext";
 import Index from "./pages/Index";
 import NotFound from "./pages/NotFound";
 
@@ -17,6 +18,7 @@ const App = () => (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <AuthProvider>
+          <SettingsProvider>
           <ChatProvider>
             <Toaster />
             <Sonner />
@@ -27,6 +29,7 @@ const App = () => (
               </Routes>
             </BrowserRouter>
           </ChatProvider>
+          </SettingsProvider>
         </AuthProvider>
       </TooltipProvider>
     </QueryClientProvider>

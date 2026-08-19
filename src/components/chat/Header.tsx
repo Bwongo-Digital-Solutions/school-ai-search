@@ -389,12 +389,14 @@ const Header: React.FC = () => {
                           <Clock className="w-3.5 h-3.5" /> Audit Log
                         </button>
                       )}
-                      <button
-                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
-                        onClick={() => setShowUserMenu(false)}
-                      >
-                        <Settings className="w-3.5 h-3.5" /> Settings
-                      </button>
+                      {isAdmin && (
+                        <button
+                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                          onClick={() => { setActiveView('settings'); setShowUserMenu(false); }}
+                        >
+                          <Settings className="w-3.5 h-3.5" /> Settings
+                        </button>
+                      )}
                       <div className="border-t border-gray-100 dark:border-gray-700 mt-1 pt-1">
                         <button
                           onClick={handleSignOut}

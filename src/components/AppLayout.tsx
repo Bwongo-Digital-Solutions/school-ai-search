@@ -8,6 +8,8 @@ import StudentRecordsWorkspace from './chat/StudentRecordsWorkspace';
 import UserAccessPanel from './chat/UserAccessPanel';
 import FeeStatusPanel from './chat/FeeStatusPanel';
 import FeeManagementWorkspace from './chat/FeeManagementWorkspace';
+import SettingsPanel from './chat/SettingsPanel';
+import AppFooter from './common/AppFooter';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { Shield, Clock, Users as UsersIcon } from 'lucide-react';
@@ -79,6 +81,8 @@ const AppLayout: React.FC = () => {
         return <FeeStatusPanel />;
       case 'finance':
         return <FeeManagementWorkspace />;
+      case 'settings':
+        return <SettingsPanel />;
       default:
         return <ChatWindow />;
     }
@@ -99,6 +103,9 @@ const AppLayout: React.FC = () => {
           {renderMainContent()}
         </div>
       </div>
+
+      {/* System-wide product footer */}
+      <AppFooter />
     </div>
   );
 };

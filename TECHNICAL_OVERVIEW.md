@@ -54,12 +54,15 @@ The local backend lives in `server/local-backend.mjs`.
 | `/api/functions/voice-to-text` | `POST` | Placeholder voice transcription response. |
 | `/api/functions/payments` | `POST` | Initiates MTN MoMo, Airtel Money, or bank payment requests; checks status; records callbacks. |
 | `/api/functions/fees` | `POST` | Admin-only fee administration, dispatched by an `action` field: fee-structure CRUD, billing preview and run, payment capture, student ledger, arrears aging, bursary CRUD, and payment-standing overrides. Every action requires `requesterRole: "admin"`. |
+| `/api/functions/settings` | `POST` | Global school branding. `action:"get"` returns the settings row (any signed-in role); `action:"update"` is admin-only. Read by every document generator and the app header. |
+| `/api/meta` | `GET` | Product version, build number and developer contacts for the app footer. |
 | `/api/report-cards/:studentId.pdf` | `GET` | Generates a PDF report card for a student. |
 | `/api/id-cards/:studentId.pdf` | `GET` | Printable QR ID card for one student. `layout=a4` tiles ten per sheet instead of one CR80 card per page. |
 | `/api/id-cards.pdf` | `GET` | Batch ID cards, optionally filtered by `grade` and `section`. |
 | `/api/id-cards/:studentId.png` | `GET` | The bare QR image, for on-screen preview and scan testing. |
 | `/api/fees/receipts/:paymentId.pdf` | `GET` | Printable receipt for one payment. Requires `requesterRole=admin` in the query string. |
 | `/api/fees/statements/:studentId.pdf` | `GET` | Full fee statement with running balance, optionally bounded by `from` and `to`. Requires `requesterRole=admin`. |
+| `/api/fees/report.pdf` | `GET` | School-wide financial report (collections, payment-standing distribution, arrears ageing). Requires `requesterRole=admin`. |
 | Static files | `GET` | Serves the built frontend from `dist` in production mode. |
 
 ## Functional Coverage
@@ -108,6 +111,7 @@ Schema creation is handled by `server/db/schema.mjs`.
 | `payments` | Tuition, transport, lab, or other payment records. |
 | `invoices` | Student invoices with balances and line items. |
 | `receipts` | Issued receipts linked to payments, numbered `RCT-<year>-<sequence>`. |
+| `school_settings` | The school's global branding (name, tagline, address, logo, theme colour, contacts). One row per database, edited under Settings and read by every document and the app header. |
 | `fee_bursaries` | Scholarships, sponsorships, and discounts. A blank fee structure, academic year, or term is a wildcard that matches every invoice. |
 | `student_fee_standings` | Admin overrides of the computed payment rating, kept as an event log. A partial unique index allows only one `active` row per student; superseded rows remain as history. |
 | `payment_transactions` | Gateway transaction tracking for MTN MoMo, Airtel Money, and bank collections. |
@@ -230,6 +234,10 @@ Development defaults:
 | `SCHOOL_NAME` | Report-card and school branding name. |
 | `FEE_INVOICE_PREFIX` | Invoice number prefix. Defaults to `INV`, producing `INV-2026-000001`. |
 | `FEE_RECEIPT_PREFIX` | Receipt number prefix. Defaults to `RCT`, producing `RCT-2026-000001`. |
+| `SCHOOL_ADDRESS` | Seed value for the school address in `school_settings` on first boot. |
+| `BUILD_NUMBER` | Build number stamped on the app footer and PDF footers. Falls back to the git short hash. |
+| `DEVELOPER_CONTACTS` | Developer contact string shown in the app footer. |
+| `TENANTS` | Optional. JSON array `[{"id","url"}]` enabling multi-tenant routing: the request subdomain selects a school's isolated database. Unset = single tenant. |
 | `SCHOOL_TAGLINE` | Report-card and school branding tagline. |
 | `APP_PORT` | Host port for the production Docker app. |
 | `DEV_APP_PORT` | Host port for the development frontend. |

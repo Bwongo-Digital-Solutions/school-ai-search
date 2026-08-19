@@ -7,14 +7,18 @@ import { fileURLToPath } from 'node:url';
 
 import { createDatabaseConnection, waitForDatabase } from './db/connection.mjs';
 import { initializeDatabase } from './db/schema.mjs';
+import { createTenantRegistry } from './db/tenants.mjs';
 import { buildReportCardPdf } from './reports/report-card.mjs';
 import { buildIdCardPdf, buildQrPayload, buildQrPng } from './reports/id-card.mjs';
 import { buildFeeReceiptPdf, buildFeeStatementPdf } from './reports/fee-receipt.mjs';
+import { buildFinanceReportPdf } from './reports/finance-report.mjs';
+import { APP_VERSION, BUILD_NUMBER, DEVELOPER_CONTACTS } from './version.mjs';
 import { getPublicGradingOptions } from './reports/grading-config.mjs';
 import { generateLlmSearchReply, getPublicModelCatalog, resolveModelSelection } from './services/llm-models.mjs';
 import { getPaymentStatus, initiatePayment, recordPaymentCallback } from './services/payment-gateway.mjs';
 import { generateAssistantReply } from './services/student-chat.mjs';
 import { handleFeesFunction } from './services/fees.mjs';
+import { handleSettingsFunction, loadSchoolSettings } from './services/settings.mjs';
 import { toAmount, toIsoDate } from './services/fee-math.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -74,6 +78,7 @@ const TABLES = {
       'alumni_notes',
       'subjects',
       'notes',
+      'photo_url',
     ],
     jsonColumns: ['subjects', 'medical_record'],
   },
@@ -379,7 +384,7 @@ const TABLES = {
 const sendJson = (response, statusCode, payload) => {
   response.writeHead(statusCode, {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Content-Type, X-Tenant',
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
     'Content-Type': 'application/json; charset=utf-8',
   });
@@ -389,7 +394,7 @@ const sendJson = (response, statusCode, payload) => {
 const sendBinary = (response, statusCode, body, headers = {}) => {
   response.writeHead(statusCode, {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Content-Type, X-Tenant',
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
     ...headers,
   });
@@ -399,7 +404,7 @@ const sendBinary = (response, statusCode, body, headers = {}) => {
 const sendText = (response, statusCode, text) => {
   response.writeHead(statusCode, {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Content-Type, X-Tenant',
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
     'Content-Type': 'text/plain; charset=utf-8',
   });
@@ -687,18 +692,22 @@ const handleAuthFunction = async (database, body) => {
     }
 
     const userCount = await database.query('SELECT COUNT(*)::int AS count FROM users');
-    const role = userCount.rows[0]?.count === 0 ? 'admin' : 'teacher';
+    const isFirstUser = userCount.rows[0]?.count === 0;
+    const role = isFirstUser ? 'admin' : 'teacher';
+    // The founding account bootstraps the school and is approved on the spot; every later
+    // signup waits for an administrator to approve it before it can sign in.
+    const approvalStatus = isFirstUser ? 'approved' : 'pending';
 
     const inserted = await database.query(
       `
-        INSERT INTO users (id, auth_email, display_name, role, avatar_url, password_hash)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        RETURNING id, auth_email, display_name, role, avatar_url, created_at
+        INSERT INTO users (id, auth_email, display_name, role, avatar_url, password_hash, approval_status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id, auth_email, display_name, role, avatar_url, created_at, approval_status
       `,
-      [randomUUID(), email, displayName, role, '', hashPassword(password)],
+      [randomUUID(), email, displayName, role, '', hashPassword(password), approvalStatus],
     );
 
-    return { user: sanitizeUser(inserted.rows[0]) };
+    return { user: sanitizeUser(inserted.rows[0]), pending: approvalStatus !== 'approved' };
   }
 
   if (action === 'signin') {
@@ -709,6 +718,12 @@ const handleAuthFunction = async (database, body) => {
     const user = result.rows[0];
     if (!user || !verifyPassword(password, user.password_hash)) {
       return { error: 'Invalid email or password' };
+    }
+
+    // A pending account has valid credentials but no access until an administrator approves it.
+    // (A rejected account is deleted, so it falls through to the invalid-credentials path above.)
+    if (user.approval_status !== 'approved') {
+      return { error: 'Your account is awaiting administrator approval.' };
     }
 
     return { user: sanitizeUser(user) };
@@ -747,7 +762,7 @@ const handleAuthFunction = async (database, body) => {
 
   if (action === 'get_users') {
     const result = await database.query(
-      'SELECT id, auth_email, display_name, role, avatar_url, created_at FROM users ORDER BY created_at ASC',
+      'SELECT id, auth_email, display_name, role, avatar_url, created_at, approval_status FROM users ORDER BY created_at ASC',
     );
     return { users: result.rows.map(formatRow) };
   }
@@ -778,7 +793,81 @@ const handleAuthFunction = async (database, body) => {
     return { user: result.rows[0] };
   }
 
+  if (action === 'approve_account') {
+    if (body.requesterRole !== 'admin') {
+      return { error: 'Unauthorized' };
+    }
+
+    const result = await database.query(
+      `
+        UPDATE users
+        SET approval_status = 'approved'
+        WHERE id = $1
+        RETURNING id, auth_email, display_name, role, avatar_url, created_at, approval_status
+      `,
+      [body.userId],
+    );
+
+    if (!result.rows[0]) {
+      return { error: 'User not found' };
+    }
+
+    await recordAccountDecision(database, body, 'account_approved', result.rows[0]);
+    return { user: result.rows[0] };
+  }
+
+  if (action === 'reject_account') {
+    if (body.requesterRole !== 'admin') {
+      return { error: 'Unauthorized' };
+    }
+
+    // Rejection deletes the account outright. An administrator can never be rejected this way —
+    // that guards against locking every admin out of the school.
+    const result = await database.query(
+      `
+        DELETE FROM users
+        WHERE id = $1 AND role <> 'admin'
+        RETURNING id, auth_email, display_name, role
+      `,
+      [body.userId],
+    );
+
+    if (!result.rows[0]) {
+      const stillThere = await database.query('SELECT role FROM users WHERE id = $1 LIMIT 1', [body.userId]);
+      if (stillThere.rows[0]?.role === 'admin') {
+        return { error: 'Administrator accounts cannot be rejected' };
+      }
+      return { error: 'User not found' };
+    }
+
+    await recordAccountDecision(database, body, 'account_rejected', result.rows[0]);
+    return { deleted: true, user: result.rows[0] };
+  }
+
   return { error: `Unsupported auth action: ${action}` };
+};
+
+// Approvals and rejections are sensitive admin actions, so they are recorded server-side rather
+// than relying on the client to log them. The requester's identity rides in the request body,
+// consistent with the rest of the auth endpoint's trust-the-client model.
+const recordAccountDecision = async (database, body, auditAction, target) => {
+  await database.query(
+    `
+      INSERT INTO audit_logs (
+        id, user_email, user_name, user_role, action, entity_type, entity_id, entity_name, changes
+      ) VALUES ($1, $2, $3, $4, $5, 'user', $6, $7, $8)
+    `,
+    [
+      randomUUID(),
+      body.requesterEmail || '',
+      body.requesterName || '',
+      'admin',
+      auditAction,
+      target.id,
+      `${target.display_name} <${target.auth_email}>`,
+      JSON.stringify({ role: target.role, approval_status: target.approval_status ?? 'rejected' }),
+    ],
+  );
 };
 
 const resolveFeeStatus = ({ invoiceCount, totalPaid, balanceDue, earliestUnpaidDueDate }) => {
@@ -1024,7 +1113,7 @@ const handlePaymentFunction = async (database, body, httpClient) => {
   return { error: `Unsupported payment action: ${action}` };
 };
 
-const handleReportCardRequest = async (database, pathname, searchParams) => {
+const handleReportCardRequest = async (database, pathname, searchParams, { method = 'GET', body = {} } = {}) => {
   const match = pathname.match(/^\/api\/report-cards\/([^/]+)\.pdf$/);
   if (!match) {
     return null;
@@ -1039,30 +1128,36 @@ const handleReportCardRequest = async (database, pathname, searchParams) => {
     };
   }
 
-  const term = searchParams.get('term') || 'Term 1';
-  const academicYear = searchParams.get('academicYear') || undefined;
-  const gradingCountry = searchParams.get('gradingCountry') || undefined;
-  const academicLevel = searchParams.get('academicLevel') || undefined;
-  const reportTitle = searchParams.get('reportTitle') || undefined;
-  const schoolName = searchParams.get('schoolName') || undefined;
-  const schoolTagline = searchParams.get('schoolTagline') || undefined;
-  const teacherName = searchParams.get('teacherName') || undefined;
-  const headTeacherName = searchParams.get('headTeacherName') || undefined;
-  const teacherComment = searchParams.get('teacherComment') || undefined;
-  const reportNotes = searchParams.get('reportNotes') || undefined;
+  // Text fields arrive on the query string for a simple GET. Uploaded images (school logo,
+  // student photo) are far too large for a URL, so a POST carries the whole set as a JSON body
+  // instead; when present, the body is the source of truth.
+  const source = method === 'POST' ? (body || {}) : Object.fromEntries(searchParams.entries());
+  const pick = (key) => {
+    const value = source[key];
+    return value === undefined || value === null || value === '' ? undefined : value;
+  };
+
+  // The global branding is the default; a value supplied per-request overrides it. The student's
+  // stored photo is used unless the request uploads a one-off one.
+  const settings = await loadSchoolSettings(database);
+  const term = pick('term') || 'Term 1';
   const pdfBytes = await buildReportCardPdf({
     student,
     term,
-    academicYear,
-    gradingCountry,
-    academicLevel,
-    reportTitle,
-    schoolName,
-    schoolTagline,
-    teacherName,
-    headTeacherName,
-    teacherComment,
-    reportNotes,
+    academicYear: pick('academicYear'),
+    gradingCountry: pick('gradingCountry'),
+    academicLevel: pick('academicLevel'),
+    reportTitle: pick('reportTitle'),
+    schoolName: pick('schoolName') || settings.school_name,
+    schoolTagline: pick('schoolTagline') || settings.tagline,
+    schoolAddress: pick('schoolAddress') || settings.address,
+    themeColor: pick('themeColor') || settings.theme_color,
+    schoolLogo: pick('schoolLogo') || settings.logo,
+    studentPhoto: pick('studentPhoto') || student.photo_url,
+    teacherName: pick('teacherName'),
+    headTeacherName: pick('headTeacherName'),
+    teacherComment: pick('teacherComment'),
+    reportNotes: pick('reportNotes'),
   });
 
   return {
@@ -1105,8 +1200,11 @@ const handleIdCardRequest = async (database, pathname, searchParams) => {
   }
 
   const layout = searchParams.get('layout') === 'a4' ? 'a4' : 'card';
-  const schoolName = searchParams.get('schoolName') || undefined;
   const qrBaseUrl = searchParams.get('qrBaseUrl') || undefined;
+  // School name, logo and theme come from the global settings; a query param can still override
+  // the name for a one-off print.
+  const settings = await loadSchoolSettings(database);
+  const schoolName = searchParams.get('schoolName') || settings.school_name;
 
   let students;
   let filename;
@@ -1150,7 +1248,14 @@ const handleIdCardRequest = async (database, pathname, searchParams) => {
     filename = `student-id-cards${grade ? `-grade-${grade}` : ''}${section ? `-${section}` : ''}.pdf`;
   }
 
-  const pdfBytes = await buildIdCardPdf({ students, layout, schoolName, qrBaseUrl });
+  const pdfBytes = await buildIdCardPdf({
+    students,
+    layout,
+    schoolName,
+    qrBaseUrl,
+    themeColor: settings.theme_color,
+    logo: settings.logo,
+  });
 
   return {
     type: 'binary',
@@ -1181,7 +1286,8 @@ const pdfResponse = (bytes, filename) => ({
 const handleFeeDocumentRequest = async (database, pathname, searchParams) => {
   const receiptMatch = pathname.match(/^\/api\/fees\/receipts\/([^/]+)\.pdf$/);
   const statementMatch = pathname.match(/^\/api\/fees\/statements\/([^/]+)\.pdf$/);
-  if (!receiptMatch && !statementMatch) {
+  const reportMatch = pathname === '/api/fees/report.pdf';
+  if (!receiptMatch && !statementMatch && !reportMatch) {
     return null;
   }
 
@@ -1189,7 +1295,22 @@ const handleFeeDocumentRequest = async (database, pathname, searchParams) => {
     return { type: 'json', status: 403, body: { error: 'Unauthorized' } };
   }
 
-  const school = searchParams.get('schoolName') || undefined;
+  const settings = await loadSchoolSettings(database);
+  const school = searchParams.get('schoolName') || settings.school_name;
+  const branding = { tagline: settings.tagline, themeColor: settings.theme_color };
+
+  // School-wide financial report: headline totals, standing distribution, and arrears ageing.
+  // Sourced from the same fees actions the screens use, so the numbers always match.
+  if (reportMatch) {
+    const asOf = searchParams.get('asOf') || undefined;
+    const gradeLevel = searchParams.get('gradeLevel') || undefined;
+    const [summary, arrears] = await Promise.all([
+      handleFeesFunction(database, { action: 'summary', requesterRole: 'admin', asOf }),
+      handleFeesFunction(database, { action: 'arrears_report', requesterRole: 'admin', asOf, gradeLevel }),
+    ]);
+    const pdfBytes = await buildFinanceReportPdf({ school, ...branding, summary, arrears, asOf: arrears.asOf });
+    return pdfResponse(pdfBytes, `financial-report-${arrears.asOf}.pdf`);
+  }
 
   if (receiptMatch) {
     const paymentId = decodeURIComponent(receiptMatch[1]);
@@ -1225,6 +1346,7 @@ const handleFeeDocumentRequest = async (database, pathname, searchParams) => {
 
     const pdfBytes = await buildFeeReceiptPdf({
       school,
+      ...branding,
       student: {
         full_name: `${row.first_name} ${row.last_name}`,
         student_number: row.student_number,
@@ -1260,6 +1382,7 @@ const handleFeeDocumentRequest = async (database, pathname, searchParams) => {
 
   const pdfBytes = await buildFeeStatementPdf({
     school,
+    ...branding,
     student: ledger.student,
     entries,
     summary: ledger.summary,
@@ -1274,21 +1397,29 @@ export const createAppRuntime = async ({
   useInMemoryDatabase = false,
   httpClient = fetch,
 } = {}) => {
-  const database = createDatabaseConnection({
+  const defaultDatabase = createDatabaseConnection({
     connectionString,
     useInMemoryDatabase,
   });
 
-  await waitForDatabase(database, useInMemoryDatabase ? { attempts: 1, delayMs: 0 } : undefined);
-  await initializeDatabase(database);
+  await waitForDatabase(defaultDatabase, useInMemoryDatabase ? { attempts: 1, delayMs: 0 } : undefined);
+  await initializeDatabase(defaultDatabase);
+
+  // Empty unless TENANTS is configured, in which case requests route to a per-subdomain database.
+  const tenants = createTenantRegistry();
 
   return {
-    database,
+    database: defaultDatabase,
+    tenantsEnabled: tenants.enabled,
+    // Used by the HTTP layer to pick the tenant database for a request; single-tenant callers and
+    // tests omit host and get the default database.
+    resolveDatabase: (host, headerTenant) => tenants.resolve(host, headerTenant, defaultDatabase),
     async close() {
-      await database.close();
+      await defaultDatabase.close();
+      await tenants.close();
     },
-    async dispatch({ method = 'GET', pathname = '/', searchParams = new URLSearchParams(), body = {} }) {
-      const reportCardResponse = await handleReportCardRequest(database, pathname, searchParams);
+    async dispatch({ method = 'GET', pathname = '/', searchParams = new URLSearchParams(), body = {}, database = defaultDatabase }) {
+      const reportCardResponse = await handleReportCardRequest(database, pathname, searchParams, { method, body });
       if (reportCardResponse) {
         return reportCardResponse;
       }
@@ -1318,6 +1449,14 @@ export const createAppRuntime = async ({
         };
       }
 
+      if (method === 'GET' && pathname === '/api/meta') {
+        return {
+          type: 'json',
+          status: 200,
+          body: { data: { version: APP_VERSION, build: BUILD_NUMBER, developer: DEVELOPER_CONTACTS } },
+        };
+      }
+
       if (method === 'POST' && pathname === '/api/db') {
         const data = await handleDbQuery(database, body);
         return { type: 'json', status: 200, body: { data } };
@@ -1333,6 +1472,13 @@ export const createAppRuntime = async ({
       if (method === 'POST' && pathname === '/api/functions/fee-status') {
         const data = await handleFeeStatusFunction(database, body);
         return { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/settings') {
+        const data = await handleSettingsFunction(database, body);
+        return data?.error
+          ? { type: 'json', status: 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/fees') {
@@ -1392,7 +1538,7 @@ export const createAppServer = async ({
     if (request.method === 'OPTIONS') {
       response.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Headers': 'Content-Type, X-Tenant',
         'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
       });
       response.end();
@@ -1404,11 +1550,21 @@ export const createAppServer = async ({
     try {
       if (url.pathname.startsWith('/api/')) {
         const body = request.method === 'POST' ? await readRequestBody(request) : {};
+
+        // Route to the tenant's database by subdomain (or X-Tenant). In single-tenant mode this is
+        // always the default database. An unknown subdomain has no database, so it is rejected.
+        const { database, tenantId } = await runtime.resolveDatabase(request.headers.host, request.headers['x-tenant']);
+        if (!database) {
+          sendJson(response, 404, { error: `Unknown school: ${tenantId}` });
+          return;
+        }
+
         const result = await runtime.dispatch({
           method: request.method || 'GET',
           pathname: url.pathname,
           searchParams: url.searchParams,
           body,
+          database,
         });
 
         if (result.type === 'binary') {
