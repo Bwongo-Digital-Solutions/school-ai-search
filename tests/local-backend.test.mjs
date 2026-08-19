@@ -2660,3 +2660,92 @@ test('a "your school is ready" email is sent when a school is activated', async 
     process.env.TENANT_DB_URL_TEMPLATE = saved.template;
   }
 });
+
+test('a student can be billed tuition on admission from the matching fee structure', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const feesCall = (action, body = {}) =>
+    dispatch(runtime, 'POST', '/api/functions/fees', { action, requesterRole: 'admin', actorName: 'Admin', ...body });
+
+  try {
+    const grade10 = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students', operation: 'select', columns: '*',
+      filters: [{ field: 'grade_level', operator: 'eq', value: 10 }],
+    });
+    const student = grade10.body.data[0];
+
+    // No structure yet → a clear, actionable error (not a silent no-op).
+    const noStructure = await feesCall('bill_student', { studentId: student.id });
+    assert.equal(noStructure.status, 400);
+    assert.match(noStructure.body.error, /No active fee structure/);
+
+    await feesCall('save_fee_structure', {
+      name: 'Grade 10 Day Tuition', gradeLevel: 10, academicYear: '2026/2027', term: 'Term 1', amount: 1500000, dueDate: '2026-09-01',
+    });
+
+    // Preview computes the amount without writing an invoice.
+    const preview = await feesCall('bill_student', { studentId: student.id, preview: true });
+    assert.equal(preview.status, 200);
+    assert.equal(preview.body.data.preview, true);
+    assert.equal(preview.body.data.amount, 1500000);
+    assert.equal(await countRows(runtime, 'invoices'), 0);
+
+    // Committing bills the student once.
+    const billed = await feesCall('bill_student', { studentId: student.id, onAdmission: true });
+    assert.equal(billed.status, 200);
+    assert.equal(billed.body.data.amount, 1500000);
+    assert.equal(billed.body.data.invoice.status, 'issued');
+    assert.equal(await countRows(runtime, 'invoices'), 1);
+
+    // Billing again is idempotent — the same billing_key is not billed twice.
+    const again = await feesCall('bill_student', { studentId: student.id });
+    assert.equal(again.body.data.alreadyBilled, true);
+    assert.equal(await countRows(runtime, 'invoices'), 1);
+
+    // A bursary reduces the auto-billed amount for a different student.
+    const other = grade10.body.data[1];
+    await feesCall('save_bursary', { studentId: other.id, name: 'Scholarship', discountType: 'percentage', discountValue: 40 });
+    const discounted = await feesCall('bill_student', { studentId: other.id, preview: true });
+    assert.equal(discounted.body.data.amount, 900000);
+
+    // It is billed and audited as an admission charge.
+    await feesCall('bill_student', { studentId: other.id, onAdmission: true });
+    const audit = await dispatch(runtime, 'POST', '/api/functions/auth', { action: 'get_audit_log', limit: 20 });
+    assert.ok(audit.body.data.logs.some((l) => l.action === 'billed_on_admission'));
+
+    // Admin-only.
+    const denied = await feesCall('bill_student', { studentId: student.id, requesterRole: 'teacher' });
+    assert.equal(denied.body.error, 'Unauthorized');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('attendance is unique per student per day', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const mark = (payload) => dispatch(runtime, 'POST', '/api/db', {
+    table: 'attendance_records', operation: 'insert', columns: '*', single: true, payload,
+  });
+
+  try {
+    const first = await mark({ student_id: 'student-001', attendance_date: '2026-05-01', status: 'present', marked_by: 'T' });
+    assert.equal(first.status, 200);
+
+    // A second record for the same student and date is rejected by the unique index (the write
+    // path in the UI upserts instead; this constraint is the safety net that stops duplicates).
+    await assert.rejects(
+      () => mark({ student_id: 'student-001', attendance_date: '2026-05-01', status: 'late', marked_by: 'T' }),
+      /duplicate key|unique/i,
+    );
+
+    // A different date is fine, and only one record exists for the first date.
+    const nextDay = await mark({ student_id: 'student-001', attendance_date: '2026-05-02', status: 'present', marked_by: 'T' });
+    assert.equal(nextDay.status, 200);
+    const rows = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'attendance_records', operation: 'select', columns: '*',
+      filters: [{ field: 'student_id', operator: 'eq', value: 'student-001' }],
+    });
+    assert.equal(rows.body.data.length, 2);
+  } finally {
+    await cleanup();
+  }
+});

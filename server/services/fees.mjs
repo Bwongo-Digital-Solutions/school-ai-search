@@ -406,6 +406,129 @@ const runBilling = async ({ database, body, actor }) => {
   return { created: invoices.length, skipped: skippedRows.length, invoices, skippedRows };
 };
 
+// Finds the fee structure to bill one student with: an explicit one, or the best active match for
+// the student's grade (a grade-specific tier beats an all-grades one), filtered by term/year when given.
+const resolveStudentFeeStructure = async (database, student, { feeStructureId, term, academicYear }) => {
+  if (feeStructureId) {
+    const { rows } = await database.query('SELECT * FROM fee_structures WHERE id = $1 LIMIT 1', [feeStructureId]);
+    const structure = rows[0];
+    if (!structure) return { error: 'Fee structure not found' };
+    if (structure.status !== 'active') return { error: 'This fee structure is archived and cannot be billed' };
+    return { structure };
+  }
+
+  const { rows } = await database.query(
+    `
+      SELECT * FROM fee_structures
+      WHERE status = 'active'
+        AND (grade_level = $1 OR grade_level IS NULL)
+        AND ($2 = '' OR term = $2)
+        AND ($3 = '' OR academic_year = $3)
+      ORDER BY (CASE WHEN grade_level IS NULL THEN 1 ELSE 0 END), academic_year DESC, term ASC
+      LIMIT 1
+    `,
+    [student.grade_level, term, academicYear],
+  );
+  const structure = rows[0];
+  if (!structure) {
+    return {
+      error: `No active fee structure matches Grade ${student.grade_level}${term ? ` · ${term}` : ''}. Create one under Fee Structures first.`,
+    };
+  }
+  return { structure };
+};
+
+/**
+ * Bills one student for tuition from a fee structure — used when a student is admitted, so the
+ * charge is raised at admission rather than left for a bulk run. Bursary-aware, and idempotent via
+ * the same billing_key as bulk billing, so a student is never billed twice for the same structure.
+ * With `preview: true` it computes the amount without writing, so the UI can confirm before billing.
+ */
+const billStudent = async ({ database, body, actor }) => {
+  const student = await loadStudent(database, body.studentId);
+  if (!student) return { error: 'Student not found' };
+
+  const resolved = await resolveStudentFeeStructure(database, student, {
+    feeStructureId: trimmed(body.feeStructureId),
+    term: trimmed(body.term),
+    academicYear: trimmed(body.academicYear),
+  });
+  if (resolved.error) return { error: resolved.error };
+  const structure = resolved.structure;
+
+  const billingKey = billingKeyFor(structure.id, student.id);
+  const existing = await database.query(
+    'SELECT id, invoice_number, total_amount FROM invoices WHERE billing_key = $1 LIMIT 1',
+    [billingKey],
+  );
+  if (existing.rows[0]) {
+    return {
+      alreadyBilled: true,
+      invoice_number: existing.rows[0].invoice_number,
+      amount: toAmount(existing.rows[0].total_amount),
+      feeStructure: structure,
+    };
+  }
+
+  const bursaries = (
+    await database.query("SELECT * FROM fee_bursaries WHERE status = 'active' AND student_id = $1", [student.id])
+  ).rows;
+  const issueDate = toIsoDate(body.issueDate) || toIsoDate(new Date());
+  const dueDate = toIsoDate(body.dueDate) || toIsoDate(structure.due_date);
+  const applied = applyBursariesToAmount({ gross: toAmount(structure.amount), bursaries, structure, issueDate });
+  const lineItems = buildInvoiceLineItems({ structure, gross: applied.gross, discounts: applied.discounts });
+
+  if (body.preview === true) {
+    return {
+      preview: true,
+      feeStructure: structure,
+      gross: applied.gross,
+      discount_total: applied.discountTotal,
+      amount: applied.net,
+      currency: structure.currency,
+    };
+  }
+
+  const invoice = await withTransaction(database, async (executor) => {
+    const [number] = await nextInvoiceNumbers(executor, issueDate, 1);
+    const { rows } = await executor.query(
+      `
+        INSERT INTO invoices (
+          id, student_id, invoice_number, status, total_amount, balance_due, currency, due_date,
+          issued_at, line_items, fee_structure_id, academic_year, term, gross_amount, discount_total, billing_key
+        ) VALUES ($1, $2, $3, 'issued', $4, $4, $5, $6, COALESCE($7, NOW()), $8, $9, $10, $11, $12, $13, $14)
+        RETURNING *
+      `,
+      [
+        randomUUID(),
+        student.id,
+        number,
+        applied.net,
+        structure.currency,
+        dueDate,
+        issueDate,
+        JSON.stringify(lineItems),
+        structure.id,
+        structure.academic_year,
+        structure.term,
+        applied.gross,
+        applied.discountTotal,
+        billingKey,
+      ],
+    );
+    await writeAudit(executor, actor, {
+      action: body.onAdmission ? 'billed_on_admission' : 'student_billed',
+      entityType: 'invoice',
+      entityId: rows[0].id,
+      entityName: `${student.first_name} ${student.last_name}`,
+      changes: { invoice_number: number, amount: applied.net, fee_structure: structure.name },
+    });
+    return rows[0];
+  });
+
+  return { invoice, feeStructure: structure, amount: applied.net, currency: structure.currency, alreadyBilled: false };
+};
+
 /* -------------------------------------------------------------------------- */
 /* Payments                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -1012,6 +1135,7 @@ const ACTIONS = {
   delete_fee_structure: deleteFeeStructure,
   preview_billing_run: previewBillingRun,
   run_billing: runBilling,
+  bill_student: billStudent,
   record_payment: recordPayment,
   student_ledger: studentLedger,
   arrears_report: arrearsReport,

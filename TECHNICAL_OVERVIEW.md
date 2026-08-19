@@ -19,6 +19,11 @@ School AI Search is a school administration and student-search application. It c
 - Provides a chat interface for student search and analysis questions.
 - Persists conversations and chat messages.
 - Records audit log entries for administrative actions.
+- Generates formal PDF report cards (with student photo and school branding), QR ID cards, fee receipts, fee statements, and a school-wide financial report.
+- Full admin fee management: fee structures, bulk and per-student invoicing, payment capture with numbered receipts, ledgers, arrears ageing, bursaries, and a computed payment rating with admin overrides.
+- Global, admin-set school branding (name, tagline, address, logo, theme colour) applied across every document and the app header, configured under Settings.
+- Account approval: non-admin sign-ups wait for an administrator to approve them before they can sign in.
+- Multi-tenant capable: serves many schools from one deployment, each with an isolated database selected by subdomain, with self-service pay-to-provision onboarding and subscription lifecycle.
 - Generates formal PDF report cards for individual students.
 - Runs locally with npm or inside Docker for development and production-style deployments.
 

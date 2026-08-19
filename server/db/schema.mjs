@@ -596,6 +596,23 @@ export const initializeDatabase = async (database) => {
   await database.query(SCHEMA_SQL);
   await ensureStudentsSeeded(database);
   await ensureSchoolSettingsSeeded(database);
+  await ensureAttendanceUniqueness(database);
+};
+
+// One attendance record per student per day. Created here (not in SCHEMA_SQL) and guarded, so a
+// database that already holds duplicate rows logs a warning and keeps booting instead of failing;
+// the write path also upserts, so new duplicates cannot be created.
+const ensureAttendanceUniqueness = async (database) => {
+  try {
+    await database.query(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_unique ON attendance_records(student_id, attendance_date)',
+    );
+  } catch (error) {
+    console.warn(
+      'Skipped the unique attendance index — duplicate (student, date) rows exist. Clean them up to enforce it:',
+      error instanceof Error ? error.message : error,
+    );
+  }
 };
 
 // Guarantee the single settings row exists, seeded from the school's env branding so an existing

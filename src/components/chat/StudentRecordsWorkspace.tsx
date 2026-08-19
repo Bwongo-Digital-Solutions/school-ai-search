@@ -17,6 +17,7 @@ import {
   UserCheck,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
+import { callFees } from '@/lib/fees';
 import { useAuth } from '@/contexts/AuthContext';
 import { useChatContext } from '@/contexts/ChatContext';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -301,7 +302,18 @@ const StudentRecordsWorkspace: React.FC = () => {
     }
   };
 
+  const resetAdmissionForm = () =>
+    setAdmission({ ...emptyAdmission, applicant_first_name: selectedStudent.first_name, applicant_last_name: selectedStudent.last_name, grade_level: selectedStudent.grade_level });
+
+  // A student should not be admitted twice — warn if a live (non-rejected) admission already exists.
+  const existingLiveAdmission = () =>
+    (selectedStudentRecords.admissions || []).find(row => !['rejected', 'withdrawn'].includes(String(row.status)));
+
   const createAdmission = () => saveRecord('Admission registration', async () => {
+    const dup = existingLiveAdmission();
+    if (dup && !window.confirm(`${studentName(selectedStudent)} already has an admission (${dup.application_number}, ${dup.status}). Add another anyway?`)) {
+      return;
+    }
     const applicationNumber = admission.application_number.trim() || `APP-${Date.now()}`;
     const { error } = await supabase.from('admissions').insert({
       ...admission,
@@ -311,20 +323,80 @@ const StudentRecordsWorkspace: React.FC = () => {
     });
     if (error) throw error;
     await logAudit('admission', selectedStudent.id, studentName(selectedStudent), { application_number: applicationNumber, status: admission.status });
-    setAdmission({ ...emptyAdmission, applicant_first_name: selectedStudent.first_name, applicant_last_name: selectedStudent.last_name, grade_level: selectedStudent.grade_level });
+    resetAdmissionForm();
+  });
+
+  // Admit a student and immediately bill tuition from the matching fee structure. The admin
+  // confirms the amount (computed by a preview) before the invoice is raised.
+  const admitAndBill = () => saveRecord('Admitting student', async () => {
+    if (existingLiveAdmission() && !window.confirm(`${studentName(selectedStudent)} already has an admission. Admit and bill again?`)) {
+      return;
+    }
+    const preview = await callFees<{ amount: number; currency: string; feeStructure: { name: string } }>(
+      'bill_student',
+      { studentId: selectedStudent.id, preview: true },
+      user,
+    );
+    const ok = window.confirm(
+      `Admit ${studentName(selectedStudent)} and bill ${preview.currency} ${Math.round(preview.amount).toLocaleString()} tuition (${preview.feeStructure.name})?`,
+    );
+    if (!ok) return;
+
+    const applicationNumber = admission.application_number.trim() || `APP-${Date.now()}`;
+    const { error } = await supabase.from('admissions').insert({
+      ...admission,
+      application_number: applicationNumber,
+      status: 'admitted',
+      student_id: selectedStudent.id,
+      documents: parseDocuments(admission.documents),
+    });
+    if (error) throw error;
+
+    const result = await callFees<{ amount: number; currency: string; alreadyBilled?: boolean; invoice?: { invoice_number: string } }>(
+      'bill_student',
+      { studentId: selectedStudent.id, onAdmission: true },
+      user,
+    );
+    await logAudit('admission', selectedStudent.id, studentName(selectedStudent), { application_number: applicationNumber, status: 'admitted', billed: result.amount }, 'invoice');
+    resetAdmissionForm();
+    window.alert(
+      result.alreadyBilled
+        ? `${studentName(selectedStudent)} admitted. Tuition was already billed (${result.invoice?.invoice_number ?? ''}).`
+        : `${studentName(selectedStudent)} admitted and billed ${result.currency} ${Math.round(result.amount).toLocaleString()}.`,
+    );
   });
 
   const markAttendance = () => saveRecord('Attendance marking', async () => {
-    const { data, error } = await supabase.from<SchoolRecord>('attendance_records').insert({
-      ...attendance,
-      student_id: selectedStudent.id,
-      marked_by: attendance.marked_by || user?.display_name || '',
-    }).select('*').single();
-    if (error) throw error;
+    // One record per student per day: update the existing record for this date instead of adding
+    // a duplicate (the database also enforces this with a unique index).
+    const existing = (selectedStudentRecords.attendance || []).find(
+      row => String(row.attendance_date).slice(0, 10) === attendance.attendance_date,
+    );
+    const markedBy = attendance.marked_by || user?.display_name || '';
+    let recordId = existing?.id as string | undefined;
+
+    if (existing) {
+      const { error } = await supabase.from('attendance_records').update({
+        status: attendance.status,
+        reason: attendance.reason,
+        marked_by: markedBy,
+        notified_parent: attendance.notified_parent,
+      }).eq('id', existing.id as string);
+      if (error) throw error;
+    } else {
+      const { data, error } = await supabase.from<SchoolRecord>('attendance_records').insert({
+        ...attendance,
+        student_id: selectedStudent.id,
+        marked_by: markedBy,
+      }).select('*').single();
+      if (error) throw error;
+      recordId = data?.id;
+    }
+
     if (attendance.notified_parent && selectedStudent.parent_phone) {
       const alert = await supabase.from('attendance_alerts').insert({
         student_id: selectedStudent.id,
-        attendance_record_id: data?.id,
+        attendance_record_id: recordId,
         channel: 'sms',
         recipient: selectedStudent.parent_phone,
         status: 'pending',
@@ -548,7 +620,7 @@ const StudentRecordsWorkspace: React.FC = () => {
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                           <Field label="Application Number" value={admission.application_number} onChange={value => setAdmission(prev => ({ ...prev, application_number: value }))} />
                           <Field label="Status" value={admission.status} onChange={value => setAdmission(prev => ({ ...prev, status: value }))} options={[
-                            { value: 'submitted', label: 'Submitted' }, { value: 'reviewing', label: 'Reviewing' }, { value: 'accepted', label: 'Accepted' }, { value: 'rejected', label: 'Rejected' }, { value: 'registered', label: 'Registered' },
+                            { value: 'submitted', label: 'Submitted' }, { value: 'reviewing', label: 'Reviewing' }, { value: 'accepted', label: 'Accepted' }, { value: 'admitted', label: 'Admitted' }, { value: 'rejected', label: 'Rejected' }, { value: 'registered', label: 'Registered' },
                           ]} />
                           <Field label="Applicant First Name" value={admission.applicant_first_name} onChange={value => setAdmission(prev => ({ ...prev, applicant_first_name: value }))} />
                           <Field label="Applicant Last Name" value={admission.applicant_last_name} onChange={value => setAdmission(prev => ({ ...prev, applicant_last_name: value }))} />
@@ -556,7 +628,23 @@ const StudentRecordsWorkspace: React.FC = () => {
                           <Field label="Documents" value={admission.documents} onChange={value => setAdmission(prev => ({ ...prev, documents: value }))} />
                           <div className="md:col-span-2"><Field label="Notes" value={admission.notes} type="textarea" onChange={value => setAdmission(prev => ({ ...prev, notes: value }))} /></div>
                         </div>
-                        <SaveButton disabled={!canEdit || saving} onClick={createAdmission} label="Save Admission" />
+                        <div className="flex flex-wrap items-center gap-2">
+                          <SaveButton disabled={!canEdit || saving} onClick={createAdmission} label="Save Admission" />
+                          {isAdmin && (
+                            <button
+                              onClick={admitAndBill}
+                              disabled={saving}
+                              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 text-white text-sm font-medium hover:shadow-lg transition-all disabled:opacity-50"
+                            >
+                              <GraduationCap className="w-4 h-4" /> Admit &amp; Bill Tuition
+                            </button>
+                          )}
+                        </div>
+                        {isAdmin && (
+                          <p className="text-[11px] text-gray-400">
+                            &ldquo;Admit &amp; Bill&rdquo; records the admission and raises a tuition invoice from the matching fee structure for this student&apos;s grade.
+                          </p>
+                        )}
                         <RecordList rows={selectedStudentRecords.admissions} empty="No admission records for this student." fields={['application_number', 'status', 'grade_level', 'submitted_at', 'notes']} />
                       </TabsContent>
                       <TabsContent value="list">
