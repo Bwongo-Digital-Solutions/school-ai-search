@@ -1,0 +1,29 @@
+# Fly.io config — runs the existing Dockerfile as a persistent app.
+# Deploy:
+#   fly launch --no-deploy            # creates the app (edit the name below first if taken)
+#   fly postgres create               # a managed Postgres cluster
+#   fly postgres attach <cluster>     # sets the DATABASE_URL secret automatically
+#   fly deploy
+app = "eschool"                        # must be globally unique — change it
+primary_region = "jnb"                 # Johannesburg (near Uganda); pick your own
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  LOCAL_BACKEND_HOST = "0.0.0.0"
+  LOCAL_STATIC_ROOT = "/app/dist"
+  SCHOOL_NAME = "eSchool"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    path = "/api/health"
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "10s"
