@@ -13,6 +13,12 @@ import { createSubscriptionCharge } from './services/payment-gateway.mjs';
 import { isPaymentWebhook, isWebhookSignatureValid } from './security/webhooks.mjs';
 import { renderActivationEmail, sendEmail } from './services/email.mjs';
 import {
+  designationsForRole,
+  normaliseProfile,
+  profileLabel,
+  sectionsFor,
+} from './services/scan-profiles.mjs';
+import {
   checkAvailability,
   confirmSubscriptionPayment,
   normalizeSubdomain,
@@ -376,6 +382,12 @@ const TABLES = {
   hostel_assignments: {
     columns: ['id', 'student_id', 'room_id', 'bed_number', 'start_date', 'end_date', 'status'],
   },
+  gate_passes: {
+    columns: ['id', 'student_id', 'direction', 'authorised_by', 'reason', 'recorded_by', 'recorded_at'],
+  },
+  meal_records: {
+    columns: ['id', 'student_id', 'meal_date', 'meal', 'served_by', 'served_at'],
+  },
   inventory_items: {
     columns: ['id', 'item_name', 'category', 'sku', 'quantity', 'unit_cost', 'location', 'reorder_level'],
   },
@@ -714,16 +726,46 @@ const handleAuthFunction = async (database, body) => {
     // signup waits for an administrator to approve it before it can sign in.
     const approvalStatus = isFirstUser ? 'approved' : 'pending';
 
+    // A requested designation is only honoured if it belongs to the role being created;
+    // anything else is dropped rather than rejected, leaving the account unspecialised.
+    const requested = String(body.designation || '').trim();
+    const designation = designationsForRole(role).includes(requested) ? requested : null;
+
     const inserted = await database.query(
       `
-        INSERT INTO users (id, auth_email, display_name, role, avatar_url, password_hash, approval_status)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING id, auth_email, display_name, role, avatar_url, created_at, approval_status
+        INSERT INTO users (id, auth_email, display_name, role, avatar_url, password_hash, approval_status, designation)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING id, auth_email, display_name, role, avatar_url, created_at, approval_status, designation
       `,
-      [randomUUID(), email, displayName, role, '', hashPassword(password), approvalStatus],
+      [randomUUID(), email, displayName, role, '', hashPassword(password), approvalStatus, designation],
     );
 
     return { user: sanitizeUser(inserted.rows[0]), pending: approvalStatus !== 'approved' };
+  }
+
+  if (action === 'set_designation') {
+    const email = String(body.email || '').trim().toLowerCase();
+    const result = await database.query('SELECT * FROM users WHERE auth_email = $1 LIMIT 1', [email]);
+    const target = result.rows[0];
+    if (!target) return { error: 'No account with that email' };
+
+    const requested = String(body.designation || '').trim();
+    const allowed = designationsForRole(target.role);
+    if (requested && !allowed.includes(requested)) {
+      return {
+        error: `A ${target.role} account cannot be a ${requested}. Allowed: ${allowed.join(', ') || 'none'}`,
+      };
+    }
+
+    const updated = await database.query(
+      `
+        UPDATE users SET designation = $1 WHERE auth_email = $2
+        RETURNING id, auth_email, display_name, role, avatar_url, created_at, approval_status, designation
+      `,
+      [requested || null, email],
+    );
+
+    return { user: sanitizeUser(updated.rows[0]) };
   }
 
   if (action === 'signin') {
@@ -927,6 +969,286 @@ export const parseStudentCode = (raw) => {
 
 // Returns fee payment status only — no contact, academic, medical or behavioural data.
 // This is the single student-facing endpoint the support_staff role is allowed to read.
+const todayIso = () => new Date().toISOString().slice(0, 10);
+
+const MEALS = ['breakfast', 'lunch', 'supper'];
+
+const findStudentByCode = async (database, rawCode) => {
+  const code = parseStudentCode(rawCode);
+  if (!code) return null;
+  const result = await database.query(
+    'SELECT * FROM students WHERE UPPER(student_id) = UPPER($1) OR id = $1 LIMIT 1',
+    [code],
+  );
+  return result.rows[0] || null;
+};
+
+/**
+ * Assembles the card a scanning staff member sees, carrying only the sections their profile
+ * grants. Every section is fetched independently so an empty table (no invoices yet, no
+ * dormitory assignment) reads as "nothing recorded" rather than failing the whole scan.
+ */
+const handleStudentCardFunction = async (database, body = {}) => {
+  const student = await findStudentByCode(database, body.code);
+  if (!student) {
+    return { error: 'No student matches that ID' };
+  }
+
+  const profile = normaliseProfile(body.role, body.designation);
+  const sections = sectionsFor(profile.role, profile.designation);
+  const wants = (section) => sections.includes(section);
+
+  const card = {
+    profile: { ...profile, label: profileLabel(profile.role, profile.designation) },
+    sections,
+    student: {
+      id: student.id,
+      student_id: student.student_id,
+      full_name: `${student.first_name} ${student.last_name}`,
+      grade_level: student.grade_level,
+      class_section: student.class_section,
+      status: student.status,
+      lifecycle_status: student.lifecycle_status,
+    },
+  };
+
+  // Fees back the exam-clearance rule, so they are fetched for either section.
+  const needsInvoices = wants('fees') || wants('exam_clearance');
+
+  const [invoices, dormitory, grades, attendance, passes, meals] = await Promise.all([
+    needsInvoices
+      ? database.query(
+          'SELECT id, invoice_number, status, total_amount, balance_due, currency, due_date FROM invoices WHERE student_id = $1',
+          [student.id],
+        )
+      : null,
+    wants('dormitory')
+      ? database.query(
+          `
+            SELECT a.bed_number, a.status, a.start_date, r.hostel_name, r.room_number
+            FROM hostel_assignments a
+            JOIN hostel_rooms r ON r.id = a.room_id
+            WHERE a.student_id = $1 AND a.status = 'active'
+            LIMIT 1
+          `,
+          [student.id],
+        )
+      : null,
+    wants('academics')
+      ? database.query(
+          'SELECT id, subject_id, score, max_score, grade, remarks, rank FROM gradebook_entries WHERE student_id = $1',
+          [student.id],
+        )
+      : null,
+    wants('attendance')
+      ? database.query(
+          'SELECT attendance_date, status, reason FROM attendance_records WHERE student_id = $1 ORDER BY attendance_date DESC LIMIT 30',
+          [student.id],
+        )
+      : null,
+    wants('gate_pass')
+      ? database.query(
+          'SELECT id, direction, authorised_by, reason, recorded_by, recorded_at FROM gate_passes WHERE student_id = $1 ORDER BY recorded_at DESC LIMIT 5',
+          [student.id],
+        )
+      : null,
+    wants('meal_card')
+      ? database.query(
+          'SELECT meal, served_by, served_at FROM meal_records WHERE student_id = $1 AND meal_date = $2',
+          [student.id, todayIso()],
+        )
+      : null,
+  ]);
+
+  if (wants('bio')) {
+    card.bio = {
+      date_of_birth: student.date_of_birth,
+      gender: student.gender,
+      blood_group: student.blood_group,
+      address: student.address,
+      enrollment_date: student.enrollment_date,
+      medical_record: student.medical_record,
+    };
+  }
+
+  if (wants('class')) {
+    card.class_allocation = {
+      grade_level: student.grade_level,
+      class_section: student.class_section,
+      subjects: student.subjects,
+    };
+  }
+
+  if (wants('parents')) {
+    card.parents = {
+      parent_name: student.parent_name,
+      parent_phone: student.parent_phone,
+      parent_email: student.parent_email,
+      emergency_contact_name: student.emergency_contact_name,
+      emergency_contact_phone: student.emergency_contact_phone,
+      emergency_contact_relation: student.emergency_contact_relation,
+    };
+  }
+
+  const invoiceRows = invoices ? invoices.rows : [];
+  const balance = invoiceRows.reduce((total, row) => total + Number(row.balance_due || 0), 0);
+  const invoiced = invoiceRows.reduce((total, row) => total + Number(row.total_amount || 0), 0);
+
+  if (wants('fees')) {
+    card.fees = {
+      currency: invoiceRows[0]?.currency || 'UGX',
+      invoice_count: invoiceRows.length,
+      total_invoiced: invoiced,
+      balance_due: balance,
+      status: invoiceRows.length === 0 ? 'no_invoices' : balance > 0 ? 'outstanding' : 'cleared',
+    };
+  }
+
+  if (wants('exam_clearance')) {
+    // A student sits their exams once the fees are settled; with nothing invoiced there is
+    // nothing to clear, so an unbilled student is not held back at the exam room door.
+    const cleared = balance <= 0;
+    card.exam_clearance = {
+      cleared,
+      balance_due: balance,
+      currency: invoiceRows[0]?.currency || 'UGX',
+      reason: cleared
+        ? invoiceRows.length === 0
+          ? 'No fees invoiced'
+          : 'Fees cleared'
+        : 'Outstanding fees balance',
+    };
+  }
+
+  if (wants('dormitory')) {
+    const room = dormitory.rows[0];
+    card.dormitory = room
+      ? {
+          hostel_name: room.hostel_name,
+          room_number: room.room_number,
+          bed_number: room.bed_number,
+          since: room.start_date,
+        }
+      : null;
+  }
+
+  if (wants('academics')) {
+    const rows = grades.rows;
+    const scored = rows.filter((row) => Number(row.max_score) > 0);
+    const average = scored.length
+      ? scored.reduce((total, row) => total + (Number(row.score) / Number(row.max_score)) * 100, 0) /
+        scored.length
+      : null;
+    card.academics = {
+      entry_count: rows.length,
+      average_percent: average === null ? null : Math.round(average * 10) / 10,
+      gpa: student.gpa,
+      entries: rows,
+    };
+  }
+
+  if (wants('attendance')) {
+    const rows = attendance.rows;
+    const present = rows.filter((row) => row.status === 'present').length;
+    card.attendance = {
+      rate: student.attendance_rate,
+      recorded: rows.length,
+      present,
+      absent: rows.length - present,
+      recent: rows.slice(0, 10),
+    };
+  }
+
+  if (wants('gate_pass')) {
+    const rows = passes.rows;
+    const last = rows[0] || null;
+    card.gate_pass = {
+      // Out on the last movement means the student is currently off the premises.
+      on_premises: !last || last.direction === 'in',
+      last_movement: last,
+      history: rows,
+    };
+  }
+
+  if (wants('meal_card')) {
+    const served = new Map(meals.rows.map((row) => [row.meal, row]));
+    card.meal_card = {
+      meal_date: todayIso(),
+      meals: MEALS.map((meal) => ({
+        meal,
+        eaten: served.has(meal),
+        served_at: served.get(meal)?.served_at || null,
+        served_by: served.get(meal)?.served_by || '',
+      })),
+    };
+  }
+
+  return card;
+};
+
+/** Records a movement through the gate. Only the askari's profile grants this. */
+const handleGatePassFunction = async (database, body = {}) => {
+  const student = await findStudentByCode(database, body.code);
+  if (!student) return { error: 'No student matches that ID' };
+
+  const direction = body.direction === 'out' ? 'out' : body.direction === 'in' ? 'in' : null;
+  if (!direction) return { error: 'Direction must be "out" or "in"' };
+
+  const authorisedBy = String(body.authorisedBy || '').trim();
+  if (!authorisedBy) return { error: 'An authorising person is required' };
+
+  const inserted = await database.query(
+    `
+      INSERT INTO gate_passes (id, student_id, direction, authorised_by, reason, recorded_by)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id, direction, authorised_by, reason, recorded_by, recorded_at
+    `,
+    [
+      randomUUID(),
+      student.id,
+      direction,
+      authorisedBy,
+      String(body.reason || '').trim(),
+      String(body.recordedBy || '').trim(),
+    ],
+  );
+
+  return { pass: inserted.rows[0], on_premises: direction === 'in' };
+};
+
+/**
+ * Marks a meal as served. Serving the same meal twice in a day is a re-scan of a student who
+ * already ate, not a second helping, so the existing row is returned instead of a new one.
+ */
+const handleMealRecordFunction = async (database, body = {}) => {
+  const student = await findStudentByCode(database, body.code);
+  if (!student) return { error: 'No student matches that ID' };
+
+  const meal = MEALS.includes(body.meal) ? body.meal : null;
+  if (!meal) return { error: `Meal must be one of ${MEALS.join(', ')}` };
+
+  const mealDate = body.mealDate || todayIso();
+  const existing = await database.query(
+    'SELECT meal, served_by, served_at FROM meal_records WHERE student_id = $1 AND meal_date = $2 AND meal = $3 LIMIT 1',
+    [student.id, mealDate, meal],
+  );
+
+  if (existing.rows[0]) {
+    return { meal: existing.rows[0], already_served: true };
+  }
+
+  const inserted = await database.query(
+    `
+      INSERT INTO meal_records (id, student_id, meal_date, meal, served_by)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING meal, served_by, served_at
+    `,
+    [randomUUID(), student.id, mealDate, meal, String(body.servedBy || '').trim()],
+  );
+
+  return { meal: inserted.rows[0], already_served: false };
+};
+
 const handleFeeStatusFunction = async (database, body = {}) => {
   const code = parseStudentCode(body.code);
 
@@ -1595,6 +1917,27 @@ export const createAppRuntime = async ({
       if (method === 'POST' && pathname === '/api/functions/fee-status') {
         const data = await handleFeeStatusFunction(database, body);
         return { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/student-card') {
+        const data = await handleStudentCardFunction(database, body);
+        return data?.error
+          ? { type: 'json', status: 404, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/gate-pass') {
+        const data = await handleGatePassFunction(database, body);
+        return data?.error
+          ? { type: 'json', status: 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/meal-record') {
+        const data = await handleMealRecordFunction(database, body);
+        return data?.error
+          ? { type: 'json', status: 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/settings') {
