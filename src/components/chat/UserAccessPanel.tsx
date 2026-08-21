@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, Clock, HardHat, Loader2, RefreshCw, Shield, User, UserCheck, UserCog, Users, X } from 'lucide-react';
+import { CheckCircle2, Clock, HardHat, Loader2, Pencil, RefreshCw, Shield, Trash2, User, UserCheck, UserCog, Users, X } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { ROLE_DESCRIPTIONS, ROLE_LABELS, USER_ROLES } from '@/lib/roles';
 import type { UserProfile, UserRole } from '@/types/auth';
@@ -11,11 +11,14 @@ const ROLE_AVATARS: Record<UserRole, { icon: React.ElementType; wrapper: string;
 };
 
 const UserAccessPanel: React.FC = () => {
-  const { isAdmin, fetchUsers, updateUserRole, approveAccount, rejectAccount } = useAuth();
+  const { user: currentUser, isAdmin, fetchUsers, updateUserRole, approveAccount, rejectAccount, deleteAccount, updateAccount } = useAuth();
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [savingUserId, setSavingUserId] = useState<string | null>(null);
   const [rejecting, setRejecting] = useState<UserProfile | null>(null);
+  const [deleting, setDeleting] = useState<UserProfile | null>(null);
+  const [editing, setEditing] = useState<UserProfile | null>(null);
+  const [editForm, setEditForm] = useState({ displayName: '', email: '' });
 
   const loadUsers = useCallback(async () => {
     setLoading(true);
@@ -59,6 +62,40 @@ const UserAccessPanel: React.FC = () => {
       alert(result.error || 'Failed to reject account');
     }
     setRejecting(null);
+    await loadUsers();
+    setSavingUserId(null);
+  };
+
+  const openEditor = (target: UserProfile) => {
+    setEditForm({ displayName: target.display_name, email: target.auth_email });
+    setEditing(target);
+  };
+
+  const handleUpdate = async () => {
+    if (!editing) return;
+    setSavingUserId(editing.id);
+    const result = await updateAccount(editing.id, {
+      displayName: editForm.displayName.trim(),
+      email: editForm.email.trim(),
+    });
+    if (!result.success) {
+      // Kept open on failure so the admin can correct the value rather than retype it.
+      alert(result.error || 'Failed to update account');
+    } else {
+      setEditing(null);
+    }
+    await loadUsers();
+    setSavingUserId(null);
+  };
+
+  const handleDelete = async () => {
+    if (!deleting) return;
+    setSavingUserId(deleting.id);
+    const result = await deleteAccount(deleting.id);
+    if (!result.success) {
+      alert(result.error || 'Failed to delete account');
+    }
+    setDeleting(null);
     await loadUsers();
     setSavingUserId(null);
   };
@@ -191,8 +228,11 @@ const UserAccessPanel: React.FC = () => {
                 {active.map(user => {
                   const avatar = ROLE_AVATARS[user.role] ?? ROLE_AVATARS.teacher;
                   const AvatarIcon = avatar.icon;
+                  // You cannot delete the account you are signed in with — the server refuses it,
+                  // and hiding the button avoids offering an action that can only fail.
+                  const isSelf = currentUser?.id === user.id;
                   return (
-                    <div key={user.id} className="px-4 py-3 grid grid-cols-1 md:grid-cols-[1fr_220px] gap-3 items-center odd:bg-white even:bg-gray-50/70 dark:odd:bg-gray-800 dark:even:bg-gray-900/30">
+                    <div key={user.id} className="px-4 py-3 grid grid-cols-1 md:grid-cols-[1fr_200px_auto] gap-3 items-center odd:bg-white even:bg-gray-50/70 dark:odd:bg-gray-800 dark:even:bg-gray-900/30">
                       <div className="flex items-center gap-3 min-w-0">
                         <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${avatar.wrapper}`}>
                           <AvatarIcon className={`w-4 h-4 ${avatar.iconColor}`} />
@@ -203,6 +243,7 @@ const UserAccessPanel: React.FC = () => {
                             <span className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
                               <CheckCircle2 className="w-3 h-3" /> Approved
                             </span>
+                            {isSelf && <span className="text-[10px] text-gray-400">(you)</span>}
                           </p>
                           <p className="text-xs text-gray-400 truncate">{user.auth_email}</p>
                         </div>
@@ -217,6 +258,26 @@ const UserAccessPanel: React.FC = () => {
                           <option key={role} value={role}>{ROLE_LABELS[role]}</option>
                         ))}
                       </select>
+                      <div className="flex items-center gap-1 justify-end">
+                        <button
+                          onClick={() => openEditor(user)}
+                          disabled={savingUserId === user.id}
+                          title="Edit name and email"
+                          className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50"
+                        >
+                          <Pencil className="w-4 h-4" />
+                        </button>
+                        {!isSelf && (
+                          <button
+                            onClick={() => setDeleting(user)}
+                            disabled={savingUserId === user.id}
+                            title="Delete this account"
+                            className="p-2 rounded-lg text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-50"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
                     </div>
                   );
                 })}
@@ -225,6 +286,84 @@ const UserAccessPanel: React.FC = () => {
           </main>
         </div>
       </div>
+
+      {editing && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setEditing(null)}>
+          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="px-5 py-4 border-b border-gray-100 dark:border-gray-700">
+              <h3 className="text-base font-bold text-gray-800 dark:text-white">Edit account</h3>
+            </div>
+            <div className="px-5 py-4 space-y-3">
+              <label className="block">
+                <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Display name</span>
+                <input
+                  type="text"
+                  value={editForm.displayName}
+                  onChange={e => setEditForm({ ...editForm, displayName: e.target.value })}
+                  className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                />
+              </label>
+              <label className="block">
+                <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Sign-in email</span>
+                <input
+                  type="email"
+                  value={editForm.email}
+                  onChange={e => setEditForm({ ...editForm, email: e.target.value })}
+                  className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                />
+              </label>
+              <p className="text-[11px] text-gray-400">
+                The email is what this person signs in with. Changing it means they must use the new address
+                next time. Use the role dropdown to change permissions.
+              </p>
+            </div>
+            <div className="px-5 py-3 border-t border-gray-100 dark:border-gray-700 flex justify-end gap-2">
+              <button onClick={() => setEditing(null)} className="px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800">
+                Cancel
+              </button>
+              <button
+                onClick={handleUpdate}
+                disabled={!editForm.displayName.trim() || !editForm.email.trim() || savingUserId === editing.id}
+                className="px-4 py-2 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 text-white text-sm font-medium hover:shadow-lg disabled:opacity-50"
+              >
+                Save changes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleting && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setDeleting(null)}>
+          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="px-5 py-4 border-b border-gray-100 dark:border-gray-700">
+              <h3 className="text-base font-bold text-gray-800 dark:text-white">Delete account</h3>
+            </div>
+            <div className="px-5 py-4">
+              <p className="text-sm text-gray-600 dark:text-gray-300">
+                Permanently delete <span className="font-medium">{deleting.display_name}</span> ({deleting.auth_email})?
+              </p>
+              <p className="text-xs text-gray-400 mt-2">
+                They lose access immediately and would have to sign up again. Records they created — audit
+                entries, attendance, lesson plans — are kept.
+              </p>
+              {deleting.role === 'admin' && (
+                <p className="text-xs text-amber-600 dark:text-amber-400 mt-2">
+                  This is an administrator account. The last remaining administrator cannot be deleted.
+                </p>
+              )}
+            </div>
+            <div className="px-5 py-3 border-t border-gray-100 dark:border-gray-700 flex justify-end gap-2">
+              <button onClick={() => setDeleting(null)} className="px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800">
+                Cancel
+              </button>
+              <button onClick={handleDelete} className="px-4 py-2 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700">
+                Delete account
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {rejecting && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setRejecting(null)}>

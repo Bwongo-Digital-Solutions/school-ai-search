@@ -42,6 +42,7 @@ import { handleDigitalExaminerFunction, loadPaper } from './services/digital-exa
 import { handleLessonPlannerFunction } from './services/lesson-planner.mjs';
 import { buildExamPaperPdf } from './reports/exam-paper.mjs';
 import { buildLessonPlanPdf } from './reports/lesson-plan.mjs';
+import { buildChatReportPdf } from './reports/chat-report.mjs';
 import { handleMcpFunction } from './services/mcp-servers.mjs';
 import { getPublicCurriculumFrameworks } from './services/curriculum-frameworks.mjs';
 import { handleSettingsFunction, loadSchoolSettings } from './services/settings.mjs';
@@ -203,6 +204,11 @@ const TABLES = {
       'notified_parent',
       'created_at',
     ],
+    // One record per student per day, enforced here rather than left to the caller. The records
+    // workspace does check its loaded list before inserting, but that is a check-then-act race
+    // against a possibly stale copy — which is exactly how a day's attendance accumulated eleven
+    // identical rows and blocked idx_attendance_unique from ever being created.
+    conflictTarget: ['student_id', 'attendance_date'],
   },
   attendance_alerts: {
     columns: ['id', 'student_id', 'attendance_record_id', 'channel', 'recipient', 'status', 'message', 'sent_at'],
@@ -733,6 +739,32 @@ const serializeValue = (config, column, value) => {
   return value;
 };
 
+/**
+ * Builds the ON CONFLICT clause for a table that declares a natural key via `conflictTarget`.
+ *
+ * Makes the insert idempotent on that key: a repeat updates the existing row instead of adding a
+ * second one. `id` and the key columns themselves are excluded from the update — rewriting the
+ * primary key on conflict would change a row's identity, and rewriting the key columns is a no-op.
+ *
+ * Returns an empty string for the tables that declare no key, so their inserts are untouched.
+ */
+const buildConflictClause = (config, insertColumns) => {
+  const target = config.conflictTarget;
+  if (!target || target.length === 0) return '';
+
+  const updatable = insertColumns.filter((column) => column !== 'id' && !target.includes(column));
+
+  // When the caller sent nothing but the key, there is nothing to change — but DO NOTHING returns
+  // no rows, which would leave RETURNING empty and hand the caller a null where it expects the
+  // record. Self-assigning a key column keeps it a DO UPDATE, so the existing row always comes back.
+  const assignments = updatable.length > 0 ? updatable : [target[0]];
+
+  return [
+    `ON CONFLICT (${target.map((column) => `"${column}"`).join(', ')}) DO UPDATE SET`,
+    assignments.map((column) => `"${column}" = EXCLUDED."${column}"`).join(', '),
+  ].join(' ');
+};
+
 const handleDbQuery = async (database, body) => {
   const { table, operation, columns, filters = [], orderBy, limit, payload, single } = body || {};
   const config = requireTable(table);
@@ -772,6 +804,7 @@ const handleDbQuery = async (database, body) => {
         `
           INSERT INTO "${table}" (${insertColumns.map((column) => `"${column}"`).join(', ')})
           VALUES (${placeholders.join(', ')})
+          ${buildConflictClause(config, insertColumns)}
           RETURNING ${selectedColumns.map((column) => `"${column}"`).join(', ')}
         `,
         values,
@@ -1024,6 +1057,88 @@ const handleAuthFunction = async (database, body) => {
     }
 
     return { user: result.rows[0] };
+  }
+
+  // Edit an existing account's name, sign-in email and designation. Separate from update_role so a
+  // rename cannot silently change someone's permissions, and vice versa.
+  if (action === 'update_account') {
+    if (body.requesterRole !== 'admin') {
+      return { error: 'Unauthorized' };
+    }
+
+    const existing = await database.query('SELECT * FROM users WHERE id = $1 LIMIT 1', [body.userId]);
+    const target = existing.rows[0];
+    if (!target) return { error: 'User not found' };
+
+    const displayName = String(body.displayName ?? target.display_name).trim();
+    if (!displayName) return { error: 'A display name is required' };
+
+    const email = String(body.email ?? target.auth_email).trim().toLowerCase();
+    if (!email.includes('@')) return { error: 'A valid email address is required' };
+
+    // The email is the sign-in identity, so a clash would lock one of the two accounts out.
+    if (email !== target.auth_email) {
+      const clash = await database.query('SELECT id FROM users WHERE auth_email = $1 AND id <> $2 LIMIT 1', [
+        email,
+        body.userId,
+      ]);
+      if (clash.rows[0]) return { error: 'Another account already uses that email' };
+    }
+
+    // A designation only means something for the roles that have one, so a role change elsewhere
+    // must not leave a stale one behind.
+    const requested = body.designation === undefined ? target.designation : String(body.designation || '').trim();
+    const allowed = designationsForRole(target.role);
+    if (requested && !allowed.includes(requested)) {
+      return {
+        error: `A ${target.role} account cannot be a ${requested}. Allowed: ${allowed.join(', ') || 'none'}`,
+      };
+    }
+
+    const updated = await database.query(
+      `
+        UPDATE users SET display_name = $1, auth_email = $2, designation = $3
+        WHERE id = $4
+        RETURNING id, auth_email, display_name, role, avatar_url, created_at, approval_status, designation
+      `,
+      [displayName, email, requested || null, body.userId],
+    );
+
+    await recordAccountDecision(database, body, 'account_updated', updated.rows[0]);
+    return { user: sanitizeUser(updated.rows[0]) };
+  }
+
+  // Permanently remove an account. Distinct from reject_account, which is the pending-signup path:
+  // this deletes staff who have already been approved and are leaving the school.
+  if (action === 'delete_account') {
+    if (body.requesterRole !== 'admin') {
+      return { error: 'Unauthorized' };
+    }
+
+    const existing = await database.query('SELECT * FROM users WHERE id = $1 LIMIT 1', [body.userId]);
+    const target = existing.rows[0];
+    if (!target) return { error: 'User not found' };
+
+    // Deleting the account you are signed in as would strand you mid-session, and it is almost
+    // always a misclick rather than an intention.
+    if (String(body.requesterEmail || '').trim().toLowerCase() === target.auth_email) {
+      return { error: 'You cannot delete the account you are signed in with' };
+    }
+
+    // Removing the last administrator would leave nobody able to manage staff, settings or fees,
+    // and there is no way back in from that state.
+    if (target.role === 'admin') {
+      const { rows } = await database.query(
+        "SELECT COUNT(*)::int AS count FROM users WHERE role = 'admin' AND approval_status = 'approved'",
+      );
+      if ((rows[0]?.count ?? 0) <= 1) {
+        return { error: 'This is the only administrator account — promote another admin before deleting it' };
+      }
+    }
+
+    await database.query('DELETE FROM users WHERE id = $1', [body.userId]);
+    await recordAccountDecision(database, body, 'account_deleted', target);
+    return { deleted: true, user: sanitizeUser(target) };
   }
 
   if (action === 'approve_account') {
@@ -1693,8 +1808,10 @@ const handleReportCardRequest = async (database, pathname, searchParams, { metho
     student,
     term,
     academicYear: pick('academicYear'),
-    gradingCountry: pick('gradingCountry'),
+    // The school's own settings decide the grading system; a request may still override either.
+    gradingCountry: pick('gradingCountry') || settings.grading_country,
     academicLevel: pick('academicLevel'),
+    schoolLevel: pick('schoolLevel') || settings.school_level,
     reportTitle: pick('reportTitle'),
     schoolName: pick('schoolName') || settings.school_name,
     schoolTagline: pick('schoolTagline') || settings.tagline,
@@ -1825,6 +1942,56 @@ const pdfResponse = (bytes, filename) => ({
   },
   body: Buffer.from(bytes),
 });
+
+/**
+ * A saved AI conversation as a printable PDF report.
+ *
+ * Teaching staff only — the same gate as the chat itself, since the transcript contains whatever
+ * student data was discussed.
+ */
+const handleChatReportRequest = async (database, pathname, searchParams) => {
+  const match = pathname.match(/^\/api\/chat-reports\/([^/]+)\.pdf$/);
+  if (!match) {
+    return null;
+  }
+
+  if (!['admin', 'teacher'].includes(searchParams.get('requesterRole'))) {
+    return { type: 'json', status: 403, body: { error: 'Unauthorized' } };
+  }
+
+  const conversationId = decodeURIComponent(match[1]);
+  const { rows: conversations } = await database.query(
+    'SELECT id, title, created_at, updated_at FROM conversations WHERE id = $1',
+    [conversationId],
+  );
+  const conversation = conversations[0];
+  if (!conversation) {
+    return { type: 'json', status: 404, body: { error: 'Conversation not found' } };
+  }
+
+  const { rows: messages } = await database.query(
+    'SELECT role, content, metadata, created_at FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC',
+    [conversationId],
+  );
+
+  if (messages.length === 0) {
+    return { type: 'json', status: 404, body: { error: 'This conversation has no messages to report on' } };
+  }
+
+  const settings = await loadSchoolSettings(database);
+  const pdfBytes = await buildChatReportPdf({
+    school: settings,
+    themeColor: settings.theme_color,
+    conversation: formatRow(conversation),
+    messages: messages.map(formatRow),
+  });
+
+  const slug = String(conversation.title || 'ai-chat-report')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+  return pdfResponse(pdfBytes, `${slug || 'ai-chat-report'}.pdf`);
+};
 
 /**
  * A lesson plan as a printable PDF. Teaching staff only, checked from the query string as the other
@@ -2171,6 +2338,11 @@ export const createAppRuntime = async ({
       const lessonPlanResponse = await handleLessonPlanRequest(database, pathname, searchParams);
       if (lessonPlanResponse) {
         return lessonPlanResponse;
+      }
+
+      const chatReportResponse = await handleChatReportRequest(database, pathname, searchParams);
+      if (chatReportResponse) {
+        return chatReportResponse;
       }
 
       if (method === 'GET' && pathname === '/api/health') {

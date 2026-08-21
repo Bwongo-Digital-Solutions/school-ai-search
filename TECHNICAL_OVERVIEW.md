@@ -60,7 +60,7 @@ The local backend lives in `server/local-backend.mjs`.
 | --- | --- | --- |
 | `/api/health` | `GET` | Health check with student count. |
 | `/api/db` | `POST` | Generic database operations for allowed tables. |
-| `/api/functions/auth` | `POST` | Sign up, sign in, audit-log read/write, user listing, role change, and account approve/reject. The first account becomes an approved admin; later sign-ups are `pending` and cannot sign in until an admin approves them (rejection deletes the account). |
+| `/api/functions/auth` | `POST` | Sign up, sign in, audit-log read/write, user listing, role change, account approve/reject, and account edit/delete (`update_account`, `delete_account` — admin-only and audited; the last approved administrator and the account you are signed in as cannot be deleted). The first account becomes an approved admin; later sign-ups are `pending` and cannot sign in until an admin approves them (rejection deletes the account). |
 | `/api/functions/fee-status` | `POST` | Per-student school fees payment status only; the sole student-facing endpoint the `support_staff` role reads. An optional `code` (scanned ID card payload) narrows the response to one student. |
 | `/api/functions/ai-chat` | `POST` | Creates chat messages and returns a student-search response. Requires `requesterRole` of `admin` or `teacher`. Accepts `mode` (`direct` or `agent`), `useRag`, and `mcpServerIds`; returns the tool trace and citations alongside the answer. |
 | `/api/functions/ai-models` | `POST` | Lists selectable AI search models and provider configuration state. |
@@ -86,6 +86,7 @@ The local backend lives in `server/local-backend.mjs`.
 | `/api/papers/:paperId.pdf` | `GET` | The question paper a learner sits. Requires `requesterRole` of `admin` or `teacher`. |
 | `/api/papers/:paperId/marking-scheme.pdf` | `GET` | The marking scheme, with the expected answer, mark-by-mark award points, and the syllabus passages each question was generated from. Same role gate. |
 | `/api/lesson-plans/:planId.pdf` | `GET` | A printable lesson plan. Requires `requesterRole` of `admin` or `teacher`. |
+| `/api/chat-reports/:conversationId.pdf` | `GET` | A saved AI conversation as a branded, printable report, including the sources and tools behind each answer. Requires `requesterRole` of `admin` or `teacher` — the same gate as the chat, since the transcript holds whatever student data was discussed. |
 | Static files | `GET` | Serves the built frontend from `dist` in production mode. |
 
 ## Functional Coverage
@@ -138,7 +139,7 @@ Schema creation is handled by `server/db/schema.mjs`.
 | `payments` | Tuition, transport, lab, or other payment records. |
 | `invoices` | Student invoices with balances and line items. |
 | `receipts` | Issued receipts linked to payments, numbered `RCT-<year>-<sequence>`. |
-| `school_settings` | The school's global branding (name, tagline, address, logo, theme colour, contacts). One row per database, edited under Settings and read by every document and the app header. |
+| `school_settings` | The school's global branding (name, tagline, address, logo, theme colour, contacts), plus `school_level` and `grading_country` — the two fields that decide the grading system. One row per database, edited under Settings and read by every document and the app header. |
 | `fee_bursaries` | Scholarships, sponsorships, and discounts. A blank fee structure, academic year, or term is a wildcard that matches every invoice. |
 | `student_fee_standings` | Admin overrides of the computed payment rating, kept as an event log. A partial unique index allows only one `active` row per student; superseded rows remain as history. |
 | `payment_transactions` | Gateway transaction tracking for MTN MoMo, Airtel Money, and bank collections. |
@@ -287,11 +288,75 @@ Shipped frameworks: `uganda-cbc-lower-secondary` (S1–S4, UCE), `uganda-uace` (
 
 `startGrade` is declared per framework rather than inferred: a UK "Year 10" *is* grade 10, while Uganda's S1 begins at grade 8, so the same stored `grade_level` reads differently under each. `SCHOOL_CURRICULUM_FRAMEWORKS` adds or overrides frameworks as JSON, matching the pattern `SCHOOL_GRADING_SCHEMES` already uses.
 
+## School Level and Grading
+
+An administrator sets the school's level once under Settings, and the grading system follows from
+it — nobody picks a scale per report card. `school_settings.school_level` stores the choice and
+`school_settings.grading_country` stores which national examination system it maps onto.
+
+| School level | Uganda (UNEB) | International |
+| --- | --- | --- |
+| Pre-school | Development descriptors, no marks | Development descriptors |
+| Kindergarten / Nursery | Development descriptors | Development descriptors |
+| Primary | PLE: subject points 1–9, aggregate over 4 subjects, Divisions 1–4 / U | Letter grades |
+| Secondary, S1–S4 | **UCE aggregate points**: D1–F9 worth 1–9, aggregate over the best 8 subjects, Divisions 1–4 / 9 | Letter grades |
+| Secondary, S5–S6 | **UACE principal grades**: letters A–F worth 6–0, principal points over 3 subjects (max 18) | Letter grades |
+| Technical / Vocational | Distinction / Credit / Pass (UBTEB) | Distinction / Merit / Pass |
+| Tertiary / University | **GPA** on the 5.0 scale, with degree classification | **GPA** on the 4.0 scale |
+
+**One school level can resolve to two scales.** A secondary school runs both O-Level and A-Level, so
+`academicLevelFor(schoolLevel, gradeLevel)` uses the student's own grade to choose: S1–S4 sit at
+grade levels 8–11 and S5–S6 at 12–13, matching the P1–P7 = grades 1–7 convention the rest of the app
+assumes. Everything else maps on the level alone.
+
+Bands follow UNEB practice as documented at
+<https://www.scholaro.com/db/countries/Uganda/Grading-System>. UNEB awards on subject points and
+division bands rather than flat percentage cut-offs, so the percentage thresholds in
+`server/reports/grading-config.mjs` are indicative — the points, divisions and letters are the parts
+that matter, and `SCHOOL_GRADING_SCHEMES` overrides the whole table.
+
+### Aggregates
+
+`gradeScore(score, scheme)` returns `{grade, remark}`, plus `points` on scales that award them.
+`summariseResults(results, scheme)` rolls the subject results into the one headline figure the
+system calls for, and returns `null` where there is no such concept (the early years), so the report
+card omits the row rather than printing a meaningless zero.
+
+Three aggregate kinds are supported:
+
+- `points-total` / `lower-better` — PLE and UCE. Sums the best N subjects and maps the total onto a
+  division band.
+- `points-total` / `higher-better` — UACE. Sums principal points and reports them out of the maximum.
+- `gpa` — mean of the per-subject grade points, with an optional classification band.
+
+**A partial aggregate is never given a division.** An aggregate of 8 across five subjects is not a
+Division 1, so when fewer than the required subjects are recorded the summary reports
+`complete: false`, the band is withheld, and the report card prints "Provisional — N subject(s)
+recorded" instead.
+
+Resolution never returns null: `resolveGradingScheme` falls back through related levels
+(`secondary-o` → `secondary`, `tertiary` → `university`, and so on), then the default country, so a
+misconfigured school still produces a report card. An explicit `academicLevel` on a request still
+overrides the school setting, which is what lets a one-off report card be graded on something else.
+
+## AI Chat Reports
+
+`server/reports/chat-report.mjs`, exposed at `GET /api/chat-reports/:conversationId.pdf`.
+
+Built server-side from the persisted messages rather than from what the browser has on screen, so
+the report carries `metadata.citations` and `metadata.steps` — the sources and tools behind each
+answer — which is what makes a printed answer checkable rather than something to take on trust.
+
+The assistant replies in Markdown, so the builder renders headings, bullet lists and pipe tables
+properly instead of printing the raw syntax; a table of student GPAs as pipes and dashes would
+defeat the purpose. Table columns are sized to their widest cell and truncated rather than wrapped,
+because these are scan-and-compare tables and ragged row heights read worse.
+
 ## Report Cards
 
 Report cards are generated by `server/reports/report-card.mjs` and exposed through `GET /api/report-cards/:studentId.pdf`.
 
-Each PDF includes the school identity (name, tagline, address, logo and theme colour from the global settings), term information, student details, GPA, attendance, subject rows, teacher comments, and notes. The student's stored photo is shown in the header. Grades come from the selected grading scheme, including Uganda's competency-based `uganda-cbc` scale. The generator accepts a `POST` body (so uploaded images and a per-card theme override can be sent); values not supplied fall back to the global settings and the student's record.
+Each PDF includes the school identity (name, tagline, address, logo and theme colour from the global settings), term information, student details, GPA, attendance, subject rows, teacher comments, and notes. The student's stored photo is shown in the header. Grades come from the scheme the school's level resolves to (see School Level and Grading above), including Uganda's competency-based `uganda-cbc` scale. Where the scheme awards points, a `Pts` column appears beside each subject and the aggregate, principal points or GPA is printed under the table with its division or classification; on scales without points the layout is unchanged. The generator accepts a `POST` body (so uploaded images and a per-card theme override can be sent); values not supplied fall back to the global settings and the student's record.
 
 ## Student ID Cards
 
@@ -381,7 +446,8 @@ Development defaults:
 | `EMAIL_API_URL` | Email provider endpoint (Resend-compatible JSON API). Default `https://api.resend.com/emails`. |
 | `EMAIL_API_KEY` | Bearer key for the email provider. |
 | `EMAIL_FROM` | From address for the activation email. |
-| `SCHOOL_GRADING_COUNTRY` / `SCHOOL_ACADEMIC_LEVEL` / `SCHOOL_GRADING_SCHEMES` | Default grading scheme, and optional JSON to add/override grading schemes (e.g. Uganda competency-based `uganda-cbc`). |
+| `SCHOOL_GRADING_COUNTRY` / `SCHOOL_ACADEMIC_LEVEL` / `SCHOOL_GRADING_SCHEMES` | Fallback grading scheme, and optional JSON to add/override grading schemes (e.g. Uganda competency-based `uganda-cbc`). The stored `school_settings.school_level` and `grading_country` take precedence over these. |
+| `SCHOOL_LEVEL` | Fallback school level for a database whose settings row predates the column. |
 | `ID_CARD_QR_BASE_URL` | If set, ID-card QR encodes `<base>/<student number>` (a scannable URL) instead of the bare number. |
 | `SCHOOL_TAGLINE` | Report-card and school branding tagline. |
 | `APP_PORT` | Host port for the production Docker app. |

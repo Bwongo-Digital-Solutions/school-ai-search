@@ -36,6 +36,11 @@ interface AuthContextType {
   updateUserRole: (userId: string, newRole: UserRole) => Promise<{ success: boolean; error?: string }>;
   approveAccount: (userId: string) => Promise<{ success: boolean; error?: string }>;
   rejectAccount: (userId: string) => Promise<{ success: boolean; error?: string }>;
+  deleteAccount: (userId: string) => Promise<{ success: boolean; error?: string }>;
+  updateAccount: (
+    userId: string,
+    changes: { displayName?: string; email?: string; designation?: string | null },
+  ) => Promise<{ success: boolean; error?: string }>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -194,13 +199,28 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [user]);
 
-  const decideAccount = useCallback(async (action: 'approve_account' | 'reject_account', userId: string) => {
+  /**
+   * Shared caller for the admin account actions. They all take a userId and the acting admin's
+   * identity (which the server records in the audit trail), so extra fields ride along in `extra`.
+   */
+  const decideAccount = useCallback(async (
+    action: 'approve_account' | 'reject_account' | 'delete_account' | 'update_account',
+    userId: string,
+    extra: Record<string, unknown> = {},
+  ) => {
     if (!user || user.role !== 'admin') {
       return { success: false, error: 'Unauthorized' };
     }
     try {
       const { data, error } = await supabase.functions.invoke<AuthFunctionResponse>('auth', {
-        body: { action, userId, requesterRole: user.role, requesterEmail: user.auth_email, requesterName: user.display_name },
+        body: {
+          action,
+          userId,
+          ...extra,
+          requesterRole: user.role,
+          requesterEmail: user.auth_email,
+          requesterName: user.display_name,
+        },
       });
       if (error || data?.error) {
         return { success: false, error: data?.error || 'Failed to update account' };
@@ -213,6 +233,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const approveAccount = useCallback((userId: string) => decideAccount('approve_account', userId), [decideAccount]);
   const rejectAccount = useCallback((userId: string) => decideAccount('reject_account', userId), [decideAccount]);
+  const deleteAccount = useCallback((userId: string) => decideAccount('delete_account', userId), [decideAccount]);
+  const updateAccount = useCallback(
+    (userId: string, changes: { displayName?: string; email?: string; designation?: string | null }) =>
+      decideAccount('update_account', userId, changes),
+    [decideAccount],
+  );
 
   const isAuthenticated = !!user;
   const isAdmin = user?.role === 'admin';
@@ -237,6 +263,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         updateUserRole,
         approveAccount,
         rejectAccount,
+        deleteAccount,
+        updateAccount,
       }}
     >
       {children}

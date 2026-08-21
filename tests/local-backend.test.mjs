@@ -619,6 +619,8 @@ test('grading schemes resolve by country and academic level', () => {
   assert.deepEqual(gradeScore(88, ugandaSecondary), {
     grade: 'D2',
     remark: 'Very Good',
+    // UNEB grades carry an aggregate point value; scales without points omit the field entirely.
+    points: 2,
   });
 
   const nursery = resolveGradingScheme({
@@ -631,6 +633,7 @@ test('grading schemes resolve by country and academic level', () => {
   // and is a distinct system from the classic UNEB D1-F9 scale.
   const cbc = resolveGradingScheme({ country: 'uganda-cbc', academicLevel: 'secondary' });
   assert.equal(cbc.label, 'Uganda Competency-Based (Lower Secondary, UCE)');
+  // The competency-based scale awards no points, so gradeScore returns just the two fields.
   assert.deepEqual(gradeScore(84, cbc), { grade: 'A', remark: 'Outstanding' });
   assert.deepEqual(gradeScore(55, cbc), { grade: 'D', remark: 'Basic' });
   assert.equal(gradeScore(20, cbc).grade, 'E');
@@ -2742,12 +2745,16 @@ test('attendance is unique per student per day', async () => {
     const first = await mark({ student_id: 'student-001', attendance_date: '2026-05-01', status: 'present', marked_by: 'T' });
     assert.equal(first.status, 200);
 
-    // A second record for the same student and date is rejected by the unique index (the write
-    // path in the UI upserts instead; this constraint is the safety net that stops duplicates).
-    await assert.rejects(
-      () => mark({ student_id: 'student-001', attendance_date: '2026-05-01', status: 'late', marked_by: 'T' }),
-      /duplicate key|unique/i,
-    );
+    // A second record for the same student and date updates the first rather than being rejected:
+    // attendance_records declares a natural key, so the insert upserts on it. Marking a student
+    // again is an ordinary correction, so making the caller handle an error for it was the wrong
+    // contract — what matters is that a second row never appears.
+    const corrected = await mark({
+      student_id: 'student-001', attendance_date: '2026-05-01', status: 'late', marked_by: 'T',
+    });
+    assert.equal(corrected.status, 200);
+    assert.equal(corrected.body.data.id, first.body.data.id);
+    assert.equal(corrected.body.data.status, 'late');
 
     // A different date is fine, and only one record exists for the first date.
     const nextDay = await mark({ student_id: 'student-001', attendance_date: '2026-05-02', status: 'present', marked_by: 'T' });
@@ -4388,6 +4395,487 @@ test('a failed MCP connection test is reported as a result, not swallowed as a b
     const missing = await mcpCall('test', { id: 'no-such-server' });
     assert.equal(missing.status, 400);
     assert.equal(missing.body.error, 'MCP server not found');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the school level chooses the grading system, and secondary splits O-Level from A-Level', async () => {
+  const { resolveGradingScheme, academicLevelFor, SCHOOL_LEVEL_VALUES } = await import(
+    '../server/reports/grading-config.mjs'
+  );
+
+  assert.deepEqual(SCHOOL_LEVEL_VALUES, [
+    'pre_school',
+    'kindergarten',
+    'primary',
+    'secondary',
+    'technical',
+    'tertiary',
+  ]);
+
+  const ugandan = (schoolLevel, gradeLevel) =>
+    resolveGradingScheme({ country: 'uganda', schoolLevel, gradeLevel });
+
+  assert.match(ugandan('pre_school', 1).label, /Pre-school/);
+  assert.match(ugandan('kindergarten', 0).label, /Kindergarten/);
+  assert.match(ugandan('primary', 6).label, /Primary Leaving Examination/);
+  assert.match(ugandan('technical', 12).label, /Technical/);
+  assert.match(ugandan('tertiary', 14).label, /GPA/);
+
+  // One secondary school runs both O-Level and A-Level, so the student's own class decides which
+  // scale applies. S1-S4 sit at grades 8-11 and S5-S6 at 12-13.
+  for (const grade of [8, 9, 10, 11]) {
+    assert.equal(academicLevelFor('secondary', grade), 'secondary-o', `grade ${grade} is O-Level`);
+    assert.match(ugandan('secondary', grade).label, /O-Level \(UCE\)/);
+  }
+  for (const grade of [12, 13]) {
+    assert.equal(academicLevelFor('secondary', grade), 'secondary-a', `grade ${grade} is A-Level`);
+    assert.match(ugandan('secondary', grade).label, /A-Level \(UACE\)/);
+  }
+
+  // International schools and institutions report a GPA rather than UNEB grades.
+  assert.match(resolveGradingScheme({ country: 'international', schoolLevel: 'tertiary' }).label, /GPA/);
+
+  // An explicit academicLevel still wins, so a one-off report card can override the school setting.
+  assert.equal(
+    resolveGradingScheme({ country: 'uganda', schoolLevel: 'tertiary', academicLevel: 'secondary-o' }).label,
+    'Uganda O-Level (UCE) Aggregate Points',
+  );
+
+  // A level a build does not know must still yield a usable scheme rather than throwing.
+  assert.ok(resolveGradingScheme({ country: 'uganda', schoolLevel: 'polytechnic', gradeLevel: 10 }));
+});
+
+test('UNEB aggregates, divisions, principal points and GPAs are computed correctly', async () => {
+  const { resolveGradingScheme, gradeScore, summariseResults } = await import(
+    '../server/reports/grading-config.mjs'
+  );
+
+  const grade = (scheme, scores) => scores.map((score) => ({ score, ...gradeScore(score, scheme) }));
+
+  const oLevel = resolveGradingScheme({ country: 'uganda', schoolLevel: 'secondary', gradeLevel: 10 });
+  assert.deepEqual(gradeScore(95, oLevel), { grade: 'D1', remark: 'Distinction', points: 1 });
+  assert.deepEqual(gradeScore(20, oLevel), { grade: 'F9', remark: 'Fail', points: 9 });
+
+  // Eight subjects at D1/D2/C3 -> aggregate 16, which is Division 1 (8-32).
+  const strong = summariseResults(grade(oLevel, [95, 92, 88, 85, 82, 80, 78, 75]), oLevel);
+  assert.equal(strong.label, 'Aggregate');
+  assert.equal(strong.value, 16);
+  assert.equal(strong.band, 'Division 1');
+  assert.equal(strong.complete, true);
+
+  const weak = summariseResults(grade(oLevel, [42, 40, 38, 36, 35, 34, 30, 28]), oLevel);
+  assert.equal(weak.value, 65);
+  assert.equal(weak.band, 'Division 4');
+
+  // A partial aggregate must NOT be given a division: an aggregate of 8 across five subjects is not
+  // a Division 1, and printing one would be wrong on a real report card.
+  const partial = summariseResults(grade(oLevel, [95, 92, 88, 85, 82]), oLevel);
+  assert.equal(partial.value, 8);
+  assert.equal(partial.complete, false);
+  assert.equal(partial.band, null);
+
+  // A-Level: principal letters A-F worth 6 down to 0, summed across three principals.
+  const aLevel = resolveGradingScheme({ country: 'uganda', schoolLevel: 'secondary', gradeLevel: 13 });
+  assert.deepEqual(gradeScore(88, aLevel), { grade: 'A', remark: 'Excellent', points: 6 });
+  assert.deepEqual(gradeScore(36, aLevel), { grade: 'O', remark: 'Subsidiary Pass', points: 1 });
+  assert.deepEqual(gradeScore(10, aLevel), { grade: 'F', remark: 'Fail', points: 0 });
+
+  const principals = summariseResults(grade(aLevel, [88, 85, 72]), aLevel);
+  assert.equal(principals.label, 'Principal points');
+  assert.equal(principals.value, 17);
+  assert.equal(principals.display, '17 / 18');
+
+  // Tertiary: a GPA on Uganda's five-point scale, with a degree classification.
+  const university = resolveGradingScheme({ country: 'uganda', schoolLevel: 'tertiary', gradeLevel: 14 });
+  const gpa = summariseResults(grade(university, [85, 82, 78, 74]), university);
+  assert.equal(gpa.kind, 'gpa');
+  assert.equal(gpa.value, 4.63);
+  assert.equal(gpa.display, '4.63 / 5');
+  assert.equal(gpa.band, 'First Class');
+
+  // International institutions report the familiar four-point GPA instead.
+  const international = resolveGradingScheme({ country: 'international', schoolLevel: 'tertiary' });
+  const intlGpa = summariseResults(grade(international, [95, 91, 88, 84]), international);
+  assert.equal(intlGpa.value, 3.5);
+  assert.equal(intlGpa.display, '3.50 / 4');
+
+  // PLE: four subjects, aggregate 4-36.
+  const ple = resolveGradingScheme({ country: 'uganda', schoolLevel: 'primary', gradeLevel: 7 });
+  const pleSummary = summariseResults(grade(ple, [95, 91, 88, 84]), ple);
+  assert.equal(pleSummary.value, 6);
+  assert.equal(pleSummary.band, 'Division 1');
+
+  // Early years carry no points, so no aggregate is produced and the report simply omits the row.
+  const preSchool = resolveGradingScheme({ country: 'uganda', schoolLevel: 'pre_school' });
+  assert.equal(gradeScore(88, preSchool).points, undefined);
+  assert.equal(summariseResults(grade(preSchool, [88, 72, 60]), preSchool), null);
+});
+
+test('an admin sets the school level once and report cards follow it', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const settingsCall = (body) => dispatch(runtime, 'POST', '/api/functions/settings', body);
+
+    // A fresh database defaults to a Ugandan secondary school, which is how it graded before this
+    // setting existed.
+    const initial = await settingsCall({ action: 'get' });
+    assert.equal(initial.body.data.settings.school_level, 'secondary');
+    assert.equal(initial.body.data.settings.grading_country, 'uganda');
+
+    const saved = await settingsCall({
+      action: 'update',
+      requesterRole: 'admin',
+      actorEmail: 'admin@school.ug',
+      actorName: 'Admin',
+      schoolName: 'Kampala Technical Institute',
+      schoolLevel: 'tertiary',
+      gradingCountry: 'uganda',
+    });
+    assert.equal(saved.body.data.settings.school_level, 'tertiary');
+
+    // Non-admins cannot change it.
+    const refused = await settingsCall({ action: 'update', requesterRole: 'teacher', schoolLevel: 'primary' });
+    assert.equal(refused.status, 400);
+    assert.equal(refused.body.error, 'Unauthorized');
+    assert.equal((await settingsCall({ action: 'get' })).body.data.settings.school_level, 'tertiary');
+
+    // An unrecognised level falls back rather than being stored, so a bad value cannot break grading.
+    await settingsCall({
+      action: 'update',
+      requesterRole: 'admin',
+      schoolName: 'Kampala Technical Institute',
+      schoolLevel: 'hogwarts',
+    });
+    assert.equal((await settingsCall({ action: 'get' })).body.data.settings.school_level, 'secondary');
+
+    // The report card route reads the level from settings without being told it per request.
+    await settingsCall({
+      action: 'update',
+      requesterRole: 'admin',
+      schoolName: 'Kampala Technical Institute',
+      schoolLevel: 'tertiary',
+      gradingCountry: 'uganda',
+    });
+    const pdf = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/report-cards/student-001.pdf',
+      searchParams: new URLSearchParams({ term: 'Term 1' }),
+    });
+    assert.equal(pdf.status, 200);
+    assert.equal(pdf.body.subarray(0, 5).toString(), '%PDF-');
+    assert.ok(pdf.body.length > 1500);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('attendance saves upsert, so a repeated save cannot create a duplicate row', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const save = (payload) =>
+      dispatch(runtime, 'POST', '/api/db', {
+        table: 'attendance_records',
+        operation: 'insert',
+        columns: '*',
+        single: true,
+        payload,
+      });
+
+    const first = await save({
+      student_id: 'student-001',
+      attendance_date: '2026-08-19',
+      status: 'present',
+      marked_by: 'Grace Teacher',
+      notified_parent: false,
+    });
+    assert.equal(first.status, 200);
+    assert.equal(first.body.data.status, 'present');
+
+    // The records workspace checks its own loaded list before inserting, but that list can be stale
+    // and two saves can race. The database has to be what actually enforces one row per day.
+    const second = await save({
+      student_id: 'student-001',
+      attendance_date: '2026-08-19',
+      status: 'late',
+      reason: 'Heavy traffic',
+      marked_by: 'Grace Teacher',
+      notified_parent: true,
+    });
+    assert.equal(second.status, 200);
+    assert.equal(await countRows(runtime, 'attendance_records'), 1, 'a repeat save must not add a row');
+
+    // The repeat updates in place, and the caller still gets the record back (a DO NOTHING would
+    // have returned nothing and handed the UI a null where it expects an id).
+    assert.equal(second.body.data.id, first.body.data.id, 'the same row is reused');
+    assert.equal(second.body.data.status, 'late');
+    assert.equal(second.body.data.reason, 'Heavy traffic');
+    assert.equal(second.body.data.notified_parent, true);
+
+    // A different day, or a different student, is a different record.
+    await save({ student_id: 'student-001', attendance_date: '2026-08-20', status: 'present' });
+    await save({ student_id: 'student-002', attendance_date: '2026-08-19', status: 'absent' });
+    assert.equal(await countRows(runtime, 'attendance_records'), 3);
+
+    // The upsert only works because the unique index exists and is the one ON CONFLICT matched, so
+    // the three assertions above already prove it. (pg-mem has no pg_indexes view to query, which
+    // is why this is asserted through behaviour rather than by inspecting the catalogue.)
+  } finally {
+    await cleanup();
+  }
+});
+
+test('only tables that declare a natural key upsert; the rest still insert normally', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    // notices declares no conflictTarget, so two identical inserts remain two rows. This is what
+    // keeps the change scoped to attendance rather than silently altering every table.
+    for (let index = 0; index < 2; index += 1) {
+      const response = await dispatch(runtime, 'POST', '/api/db', {
+        table: 'notices',
+        operation: 'insert',
+        columns: '*',
+        single: true,
+        payload: { title: 'Sports day', body: 'Saturday at 9am', audience: 'all' },
+      });
+      assert.equal(response.status, 200);
+    }
+
+    assert.equal(await countRows(runtime, 'notices'), 2, 'a table without a natural key still inserts twice');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the attendance dedup keeps the row that records a parent was notified', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    // Recreate the real-world mess: duplicates can only be written with the unique index absent,
+    // which is exactly the state a database gets stuck in.
+    await runtime.database.query('DROP INDEX IF EXISTS idx_attendance_unique');
+
+    const insert = (id, notified, createdAt) =>
+      runtime.database.query(
+        `INSERT INTO attendance_records (id, student_id, attendance_date, status, marked_by, notified_parent, created_at)
+         VALUES ($1, 'student-015', '2026-08-19', 'present', 'Tendo Martin', $2, $3)`,
+        [id, notified, createdAt],
+      );
+
+    // The notified copy is written last and is not the earliest, so "keep the oldest" would drop it.
+    await insert('att-1', false, '2026-08-19T09:00:00Z');
+    await insert('att-2', false, '2026-08-19T10:00:00Z');
+    await insert('att-3', true, '2026-08-19T11:00:00Z');
+    await insert('att-4', false, '2026-08-19T12:00:00Z');
+    // A different day must survive untouched.
+    await runtime.database.query(
+      `INSERT INTO attendance_records (id, student_id, attendance_date, status, notified_parent)
+       VALUES ('att-other', 'student-015', '2026-08-20', 'absent', false)`,
+    );
+
+    assert.equal(await countRows(runtime, 'attendance_records'), 5);
+
+    // The very same ranking scripts/dedupe-attendance.mjs applies, imported rather than restated.
+    const { chooseSurvivors } = await import('../scripts/dedupe-attendance.mjs');
+    const { rows: all } = await runtime.database.query(
+      'SELECT id, student_id, attendance_date, notified_parent, created_at FROM attendance_records',
+    );
+    const { keep, remove } = chooseSurvivors(all);
+    assert.equal(keep.length, 2, 'one survivor per (student, date)');
+    assert.equal(remove.length, 3);
+
+    await runtime.database.query(
+      `DELETE FROM attendance_records WHERE id IN (${remove.map((_, index) => `$${index + 1}`).join(', ')})`,
+      remove,
+    );
+
+    const { rows } = await runtime.database.query(
+      'SELECT id, attendance_date, notified_parent FROM attendance_records ORDER BY attendance_date',
+    );
+    assert.equal(rows.length, 2, 'one row per (student, date) survives');
+    assert.equal(rows[0].id, 'att-3', 'the notified-parent row is the one kept');
+    assert.equal(rows[0].notified_parent, true);
+    assert.equal(rows[1].id, 'att-other', 'a different day is untouched');
+
+    // With the duplicates gone the index can finally be created — which is the whole point.
+    await runtime.database.query(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_unique ON attendance_records(student_id, attendance_date)',
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('admins can edit and delete staff accounts, with the guards that stop a lock-out', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const auth = (body) => dispatch(runtime, 'POST', '/api/functions/auth', body);
+    const signUp = (email, displayName) =>
+      auth({ action: 'signup', email, password: 'password123', displayName });
+
+    await signUp('admin@school.ug', 'First Admin');
+    await signUp('teacher@school.ug', 'Grace Teacher');
+    await signUp('second@school.ug', 'Second Admin');
+
+    const listUsers = async () => (await auth({ action: 'get_users' })).body.data.users;
+    let users = await listUsers();
+    const admin = users.find((user) => user.auth_email === 'admin@school.ug');
+    const teacher = users.find((user) => user.auth_email === 'teacher@school.ug');
+    const second = users.find((user) => user.auth_email === 'second@school.ug');
+
+    const asAdmin = { requesterRole: 'admin', requesterEmail: 'admin@school.ug', requesterName: 'First Admin' };
+
+    // Rename and re-address an account.
+    const renamed = await auth({
+      ...asAdmin,
+      action: 'update_account',
+      userId: teacher.id,
+      displayName: 'Grace Nakato',
+      email: 'g.nakato@school.ug',
+    });
+    assert.equal(renamed.status, 200);
+    assert.equal(renamed.body.data.user.display_name, 'Grace Nakato');
+    assert.equal(renamed.body.data.user.auth_email, 'g.nakato@school.ug');
+    // The role is untouched: editing details must not quietly change permissions.
+    assert.equal(renamed.body.data.user.role, 'teacher');
+
+    // The email is the sign-in identity, so a clash would lock one of the two accounts out.
+    const clash = await auth({ ...asAdmin, action: 'update_account', userId: teacher.id, email: 'admin@school.ug' });
+    assert.equal(clash.body.error, 'Another account already uses that email');
+
+    const blank = await auth({ ...asAdmin, action: 'update_account', userId: teacher.id, displayName: '   ' });
+    assert.equal(blank.body.error, 'A display name is required');
+
+    const badEmail = await auth({ ...asAdmin, action: 'update_account', userId: teacher.id, email: 'not-an-email' });
+    assert.equal(badEmail.body.error, 'A valid email address is required');
+
+    for (const role of ['teacher', 'support_staff', undefined]) {
+      const refused = await auth({ action: 'update_account', requesterRole: role, userId: teacher.id, displayName: 'X' });
+      assert.equal(refused.body.error, 'Unauthorized', `update_account as ${role} must be refused`);
+      const refusedDelete = await auth({ action: 'delete_account', requesterRole: role, userId: teacher.id });
+      assert.equal(refusedDelete.body.error, 'Unauthorized', `delete_account as ${role} must be refused`);
+    }
+
+    // Deleting the account you are signed in as would strand you mid-session.
+    const self = await auth({ ...asAdmin, action: 'delete_account', userId: admin.id });
+    assert.equal(self.body.error, 'You cannot delete the account you are signed in with');
+
+    // Only one approved admin exists so far (the rest are pending), so it cannot be removed —
+    // there would be nobody left able to approve anyone or reach Settings.
+    const lastAdmin = await auth({
+      action: 'delete_account',
+      requesterRole: 'admin',
+      requesterEmail: 'someone.else@school.ug',
+      userId: admin.id,
+    });
+    assert.match(lastAdmin.body.error, /only administrator/);
+
+    // Promote and approve a second admin, and the first becomes removable.
+    await auth({ ...asAdmin, action: 'update_role', userId: second.id, newRole: 'admin' });
+    await auth({ ...asAdmin, action: 'approve_account', userId: second.id });
+    const removed = await auth({
+      action: 'delete_account',
+      requesterRole: 'admin',
+      requesterEmail: 'second@school.ug',
+      requesterName: 'Second Admin',
+      userId: admin.id,
+    });
+    assert.equal(removed.status, 200);
+    assert.equal(removed.body.data.deleted, true);
+
+    users = await listUsers();
+    assert.ok(!users.some((user) => user.auth_email === 'admin@school.ug'), 'the account is gone');
+
+    // Both actions are audited, so staff changes are traceable.
+    const audit = await auth({ action: 'get_audit_log' });
+    const actions = audit.body.data.logs.map((entry) => entry.action);
+    assert.ok(actions.includes('account_updated'));
+    assert.ok(actions.includes('account_deleted'));
+
+    const missing = await auth({ ...asAdmin, action: 'delete_account', userId: 'no-such-user' });
+    assert.equal(missing.body.error, 'User not found');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a conversation downloads as a printable PDF report carrying its sources', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    await runtime.database.query("INSERT INTO conversations (id, title) VALUES ('conv-1', 'Grade 10 review')");
+
+    const addMessage = (id, role, content, metadata = {}) =>
+      runtime.database.query(
+        'INSERT INTO messages (id, conversation_id, role, content, metadata) VALUES ($1, $2, $3, $4, $5)',
+        [id, 'conv-1', role, content, JSON.stringify(metadata)],
+      );
+
+    await addMessage('m1', 'user', 'Who are the top students by GPA?');
+    // A Markdown table is what the assistant actually returns for this question, and printing it as
+    // raw pipes would defeat the purpose of a report.
+    await addMessage(
+      'm2',
+      'assistant',
+      [
+        '## Top Students by GPA',
+        '',
+        '| Student | Grade | GPA |',
+        '| --- | --- | --- |',
+        '| Emma Johnson | 10 | 3.92 |',
+        '| Ethan Brown | 10 | 3.81 |',
+        '',
+        '- **Attendance** tracks GPA closely.',
+      ].join('\n'),
+      {
+        modelName: 'claude-opus-5',
+        steps: [{ tool: 'search_students', ms: 4, isError: false }],
+        citations: [
+          { citationIndex: 1, title: 'Cambridge IGCSE Biology — Topic Outline', heading: 'Movement Into and Out of Cells' },
+        ],
+      },
+    );
+
+    const pdf = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/chat-reports/conv-1.pdf',
+      searchParams: new URLSearchParams({ requesterRole: 'teacher' }),
+    });
+    assert.equal(pdf.status, 200);
+    assert.equal(pdf.headers['Content-Type'], 'application/pdf');
+    assert.equal(pdf.body.subarray(0, 5).toString(), '%PDF-');
+    assert.ok(pdf.body.length > 2000);
+    assert.match(pdf.headers['Content-Disposition'], /grade-10-review\.pdf/);
+
+    // Same gate as the chat itself — the transcript holds whatever student data was discussed.
+    const refused = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/chat-reports/conv-1.pdf',
+      searchParams: new URLSearchParams({ requesterRole: 'support_staff' }),
+    });
+    assert.equal(refused.status, 403);
+
+    const missing = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/chat-reports/no-such-conversation.pdf',
+      searchParams: new URLSearchParams({ requesterRole: 'teacher' }),
+    });
+    assert.equal(missing.status, 404);
+
+    // An empty conversation has nothing to report on, and should say so rather than emit a blank PDF.
+    await runtime.database.query("INSERT INTO conversations (id, title) VALUES ('conv-empty', 'Nothing yet')");
+    const empty = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/chat-reports/conv-empty.pdf',
+      searchParams: new URLSearchParams({ requesterRole: 'teacher' }),
+    });
+    assert.equal(empty.status, 404);
+    assert.match(empty.body.error, /no messages/);
   } finally {
     await cleanup();
   }

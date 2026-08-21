@@ -95,6 +95,22 @@ CREATE TABLE IF NOT EXISTS school_settings (
   updated_by TEXT NOT NULL DEFAULT ''
 );
 
+-- The school's academic level, set once by an administrator, which decides the grading system every
+-- report card uses: development descriptors for the early years, PLE/UCE aggregate points and
+-- divisions for primary and O-Level, principal letter grades for A-Level, and a GPA for tertiary.
+-- 'secondary' resolves to two different scales depending on the student's own grade, because one
+-- secondary school runs both O-Level and A-Level. Defaults to 'secondary' so an existing database
+-- keeps grading exactly as it did before this column existed.
+ALTER TABLE school_settings ADD COLUMN IF NOT EXISTS school_level TEXT NOT NULL DEFAULT 'secondary';
+ALTER TABLE school_settings DROP CONSTRAINT IF EXISTS school_settings_level_check;
+ALTER TABLE school_settings ADD CONSTRAINT school_settings_level_check
+  CHECK (school_level IN ('pre_school', 'kindergarten', 'primary', 'secondary', 'technical', 'tertiary'));
+
+-- Which national examination system the level maps onto. Uganda schools grade on UNEB scales;
+-- international schools and institutions report a GPA. Kept separate from school_level because the
+-- two are independent: an international primary school and a Ugandan one are both 'primary'.
+ALTER TABLE school_settings ADD COLUMN IF NOT EXISTS grading_country TEXT NOT NULL DEFAULT 'uganda';
+
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
@@ -850,18 +866,51 @@ const seedCurriculumCorpus = async (database, httpClient) => {
   }
 };
 
-// One attendance record per student per day. Created here (not in SCHEMA_SQL) and guarded, so a
-// database that already holds duplicate rows logs a warning and keeps booting instead of failing;
-// the write path also upserts, so new duplicates cannot be created.
+/**
+ * One attendance record per student per day.
+ *
+ * Created here rather than in SCHEMA_SQL and guarded, so a database that already holds duplicate
+ * rows logs a warning and keeps booting instead of failing outright. The write path upserts on the
+ * same key (see `conflictTarget` on attendance_records in local-backend.mjs), which is what stops
+ * new duplicates — but that upsert needs this index to exist, so a database with duplicates cannot
+ * record attendance until they are cleaned up. The warning says so.
+ */
 const ensureAttendanceUniqueness = async (database) => {
   try {
     await database.query(
       'CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_unique ON attendance_records(student_id, attendance_date)',
     );
+
+    // idx_attendance_student_date covers the same two columns, so the unique index above fully
+    // subsumes it — keeping both would cost an extra write on every attendance record for nothing.
+    // It is dropped only once the unique index exists, so a database still carrying duplicates
+    // keeps its index and its query performance until it is cleaned up.
+    //
+    // This also works around a pg-mem limitation that would otherwise break the upsert on the test
+    // and demo databases: with a non-unique index present on the same columns, pg-mem matches that
+    // one for ON CONFLICT and rejects the statement, never finding the unique index beside it.
+    await database.query('DROP INDEX IF EXISTS idx_attendance_student_date');
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const isDuplicateData = error?.code === '23505' || /could not create unique index|duplicate key/i.test(message);
+
+    if (!isDuplicateData) {
+      // Not a uniqueness problem — say what it actually was rather than misdiagnosing it.
+      console.warn('Could not create the unique attendance index:', message);
+      return;
+    }
+
     console.warn(
-      'Skipped the unique attendance index — duplicate (student, date) rows exist. Clean them up to enforce it:',
-      error instanceof Error ? error.message : error,
+      [
+        'Skipped the unique attendance index — duplicate (student, date) rows exist.',
+        // Postgres names the offending key in DETAIL; without it this message is a dead end.
+        error?.detail ? `  ${error.detail}` : null,
+        '  Attendance saves will fail until these are cleaned up. To inspect and fix:',
+        '    node scripts/dedupe-attendance.mjs           # dry run, shows what it would remove',
+        '    node scripts/dedupe-attendance.mjs --apply   # collapse duplicates and add the index',
+      ]
+        .filter(Boolean)
+        .join('\n'),
     );
   }
 };

@@ -1,6 +1,14 @@
 import { supabase } from './supabase';
 import type { UserProfile } from '@/types/auth';
 
+export type SchoolLevel =
+  | 'pre_school'
+  | 'kindergarten'
+  | 'primary'
+  | 'secondary'
+  | 'technical'
+  | 'tertiary';
+
 export interface SchoolSettings {
   school_name: string;
   tagline: string;
@@ -9,7 +17,37 @@ export interface SchoolSettings {
   theme_color: string;
   contact_phone: string;
   contact_email: string;
+  /** Decides the grading system every report card uses. */
+  school_level: SchoolLevel;
+  /** Which national examination system that level maps onto. */
+  grading_country: string;
 }
+
+/**
+ * The levels an administrator can pick, with what each one grades on. `grades` is shown under the
+ * picker so the consequence of the choice is visible before it is saved.
+ */
+export const SCHOOL_LEVEL_OPTIONS: { value: SchoolLevel; label: string; grades: string }[] = [
+  { value: 'pre_school', label: 'Pre-school', grades: 'Development descriptors — no marks or aggregate' },
+  { value: 'kindergarten', label: 'Kindergarten / Nursery', grades: 'Development descriptors — no marks or aggregate' },
+  { value: 'primary', label: 'Primary', grades: 'PLE aggregate points (best 4 subjects) and divisions' },
+  {
+    value: 'secondary',
+    label: 'Secondary',
+    grades: 'S1–S4: UCE aggregate points and divisions · S5–S6: UACE principal grades A–F',
+  },
+  { value: 'technical', label: 'Technical / Vocational', grades: 'Distinction / Credit / Pass' },
+  { value: 'tertiary', label: 'Tertiary / University', grades: 'Grade Point Average (GPA)' },
+];
+
+export const GRADING_COUNTRY_OPTIONS: { value: string; label: string }[] = [
+  { value: 'uganda', label: 'Uganda — UNEB (PLE, UCE, UACE)' },
+  { value: 'uganda-cbc', label: 'Uganda — Competency-Based Curriculum (NCDC)' },
+  { value: 'international', label: 'International — letter grades and GPA' },
+  { value: 'kenya', label: 'Kenya' },
+  { value: 'united-states', label: 'United States' },
+  { value: 'united-kingdom', label: 'United Kingdom' },
+];
 
 export const EMPTY_SETTINGS: SchoolSettings = {
   school_name: '',
@@ -19,6 +57,8 @@ export const EMPTY_SETTINGS: SchoolSettings = {
   theme_color: '#2952a3',
   contact_phone: '',
   contact_email: '',
+  school_level: 'secondary',
+  grading_country: 'uganda',
 };
 
 export const fetchSchoolSettings = async (): Promise<SchoolSettings> => {
@@ -47,6 +87,8 @@ export const saveSchoolSettings = async (
       themeColor: settings.theme_color,
       contactPhone: settings.contact_phone,
       contactEmail: settings.contact_email,
+      schoolLevel: settings.school_level,
+      gradingCountry: settings.grading_country,
     },
   });
   if (error) throw error;

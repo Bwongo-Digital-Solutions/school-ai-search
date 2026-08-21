@@ -3,16 +3,19 @@ import {
   Menu, Download, Settings, HelpCircle,
   Moon, Sun, X, ChevronDown, LogOut, User, Shield, HardHat,
   MessageSquare, Users, Clock, ClipboardList, UserCog, Wallet, Landmark,
-  ClipboardCheck, GraduationCap, NotebookPen
+  ClipboardCheck, GraduationCap, NotebookPen, FileText, Loader2
 } from 'lucide-react';
+import { downloadFromUrl } from '@/lib/download';
+import { teachingDocumentUrl } from '@/lib/teaching';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { getRoleLabel, getRoleShortLabel } from '@/lib/roles';
 import AuthModal from './AuthModal';
 
 const Header: React.FC = () => {
-  const { toggleSidebar, messages, activeView, setActiveView } = useChatContext();
+  const { toggleSidebar, messages, activeView, setActiveView, currentConversationId } = useChatContext();
   const { user, isAuthenticated, isAdmin, isSupportStaff, signOut } = useAuth();
+  const [buildingReport, setBuildingReport] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
@@ -57,6 +60,33 @@ const Header: React.FC = () => {
     a.click();
     URL.revokeObjectURL(url);
     setShowExportMenu(false);
+  };
+
+  /**
+   * Downloads the conversation as a branded PDF the school can file or hand over.
+   *
+   * Built server-side from the saved messages rather than from what is on screen, so it carries the
+   * sources and tools behind each answer — the things that make a printed answer checkable.
+   */
+  const handleReportDownload = async () => {
+    if (!currentConversationId) {
+      alert('Send a message first — there is no saved conversation to report on yet.');
+      setShowExportMenu(false);
+      return;
+    }
+
+    setBuildingReport(true);
+    try {
+      await downloadFromUrl(
+        teachingDocumentUrl(`/api/chat-reports/${currentConversationId}.pdf`, user),
+        `schoolbot-report-${new Date().toISOString().split('T')[0]}.pdf`,
+      );
+      setShowExportMenu(false);
+    } catch (err) {
+      alert(`Could not build the report: ${err instanceof Error ? err.message : 'Unexpected error'}`);
+    } finally {
+      setBuildingReport(false);
+    }
   };
 
   const toggleTheme = () => {
@@ -250,6 +280,15 @@ const Header: React.FC = () => {
                 <div className="fixed inset-0 z-40" onClick={() => setShowExportMenu(false)} />
                 <div className="absolute right-0 top-full mt-1 w-48 bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-100 dark:border-gray-700 py-1 z-50">
                   <p className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Export As</p>
+                  <button
+                    onClick={handleReportDownload}
+                    disabled={buildingReport}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
+                  >
+                    {buildingReport ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileText className="w-3.5 h-3.5 text-indigo-500" />}
+                    {buildingReport ? 'Building report…' : 'Printable Report (.pdf)'}
+                  </button>
+                  <div className="my-1 border-t border-gray-100 dark:border-gray-700" />
                   <button onClick={() => handleExport('txt')} className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">
                     <Download className="w-3.5 h-3.5" /> Text File (.txt)
                   </button>

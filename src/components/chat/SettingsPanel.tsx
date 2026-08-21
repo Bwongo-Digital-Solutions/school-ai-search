@@ -1,10 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import { Plug } from 'lucide-react';
 import McpServersPanel from './McpServersPanel';
-import { ImagePlus, Loader2, Palette, Save, Settings as SettingsIcon, Shield } from 'lucide-react';
+import { GraduationCap, ImagePlus, Loader2, Palette, Save, Settings as SettingsIcon, Shield } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
-import { saveSchoolSettings, type SchoolSettings } from '@/lib/settings';
+import {
+  GRADING_COUNTRY_OPTIONS,
+  SCHOOL_LEVEL_OPTIONS,
+  saveSchoolSettings,
+  type SchoolSettings,
+} from '@/lib/settings';
 
 const MAX_LOGO_BYTES = 2 * 1024 * 1024;
 
@@ -50,6 +55,8 @@ const SettingsPanel: React.FC = () => {
     setForm(current => ({ ...current, [key]: value }));
     setSaved(false);
   };
+
+  const selectedLevel = SCHOOL_LEVEL_OPTIONS.find(option => option.value === form.school_level);
 
   const onLogo = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -141,6 +148,49 @@ const SettingsPanel: React.FC = () => {
               <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Contact Email</span>
               <input type="email" value={form.contact_email} onChange={e => set('contact_email')(e.target.value)} placeholder="info@school.ac.ug" className={inputClass} />
             </label>
+          </div>
+
+          <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-3">
+            <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5 flex items-center gap-1.5">
+              <GraduationCap className="w-3.5 h-3.5 text-indigo-500" /> Academic Level &amp; Grading
+            </span>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="block">
+                <span className="block text-[11px] text-gray-500 dark:text-gray-400 mb-1">School level</span>
+                <select
+                  value={form.school_level}
+                  onChange={e => set('school_level')(e.target.value)}
+                  className={inputClass}
+                >
+                  {SCHOOL_LEVEL_OPTIONS.map(option => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="block">
+                <span className="block text-[11px] text-gray-500 dark:text-gray-400 mb-1">Examination system</span>
+                <select
+                  value={form.grading_country}
+                  onChange={e => set('grading_country')(e.target.value)}
+                  className={inputClass}
+                >
+                  {GRADING_COUNTRY_OPTIONS.map(option => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            {/* The consequence of the choice, shown before it is saved. */}
+            <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-2">
+              <span className="font-medium text-gray-600 dark:text-gray-300">Report cards will grade on: </span>
+              {selectedLevel?.grades}
+            </p>
+            <p className="text-[11px] text-gray-400 mt-1">
+              Set this once — every report card follows it, so nobody has to choose a scale per student. A
+              secondary school gets both O-Level and A-Level scales automatically; each student's own class
+              decides which applies.
+            </p>
           </div>
 
           <div>

@@ -43,6 +43,26 @@ sign in** until an administrator approves them. As an admin:
 If someone tries to sign in before approval, they see *"Your account is awaiting administrator
 approval."*
 
+### Editing and removing accounts
+
+Under **Staff → Active Users**, each person has two buttons beside their role:
+
+- **Edit** (pencil) — change their **display name** and **sign-in email**. Changing the email means
+  they must use the new address next time they sign in. Permissions are *not* touched here; use the
+  role dropdown for that.
+- **Delete** (bin) — remove the account permanently. They lose access immediately and would have to
+  sign up again. Work they recorded — attendance, lesson plans, audit entries — is kept.
+
+Two deletions are refused, both to stop you locking the school out:
+
+- **your own account**, so you cannot sign yourself out mid-session (the button is hidden on your row);
+- **the last remaining administrator** — promote someone else to Administrator first, then delete.
+
+Both editing and deleting are written to the **Audit** log with who did it and when.
+
+> Use **Delete** for staff who have left. **Reject**, on a pending sign-up, is the same removal for
+> someone who never should have had an account.
+
 ---
 
 ## 3. Students
@@ -149,6 +169,37 @@ phone/email.
 These are applied everywhere: report cards, ID cards, fee receipts, statements, the financial
 report, exam papers, lesson plans, and the app header. Changing them here updates every document
 going forward.
+
+### Academic level & grading
+
+Also on the Branding tab, set your **school level** and **examination system**. This is the single
+setting that decides how every report card is graded — teachers never pick a scale per student.
+
+| School level | What report cards show (Uganda / UNEB) |
+| --- | --- |
+| Pre-school | Development descriptors — Exceeding, Meeting, Approaching, Emerging. No marks or aggregate. |
+| Kindergarten / Nursery | Development descriptors, as above. |
+| Primary | PLE grades **D1–F9**, each worth 1–9 points, with an **aggregate** over the four subjects and a **Division**. |
+| Secondary | **S1–S4 (O-Level):** UCE grades D1–F9 with an **aggregate** over the best eight subjects and a **Division**. **S5–S6 (A-Level):** principal letter grades **A–F** with **principal points** out of 18. |
+| Technical / Vocational | Distinction / Credit / Pass. |
+| Tertiary / University | **GPA** on the 5.0 scale, with the degree classification (First Class, Second Upper, and so on). |
+
+Set the examination system to **International** instead and the same levels report letter grades,
+with a **GPA** on the 4.0 scale at tertiary — which is what an international school or institution
+expects.
+
+> **A secondary school gets both scales automatically.** You do not choose between O-Level and
+> A-Level: each student's own class decides. A Senior 2 is graded on the UCE aggregate and a Senior 6
+> on UACE principal points, from the one setting.
+
+Two things worth knowing:
+
+- **Divisions need a full set of subjects.** A Division is only printed once the required subjects
+  are recorded — eight for UCE, four for PLE. Below that the report card shows the aggregate so far
+  and marks it *Provisional*, because an aggregate of 8 across five subjects is not a Division 1.
+- **Percentage cut-offs are a guide.** UNEB awards on points and divisions rather than fixed
+  percentage boundaries, so the mark ranges behind each grade are indicative. A deployment can
+  replace the whole table — ask whoever runs your installation about `SCHOOL_GRADING_SCHEMES`.
 
 ### MCP servers
 
@@ -259,6 +310,16 @@ out of steps, it says so rather than quietly returning less.
 Agent and MCP need a model that supports tools — pick one from the model menu; the built-in
 **Local Rules** engine searches student records only, without any network or API key.
 
+### Saving a conversation
+
+**Export → Printable Report (.pdf)** turns the current conversation into a branded PDF you can file
+or hand over. It includes each question and answer, any tables the assistant produced, and — under
+each answer — the **sources** it used and which tools it ran, so a printed answer can be checked
+rather than taken on trust.
+
+Send at least one message first; there is nothing to report on before that. The plain text, JSON and
+CSV exports are still there for when you want the raw transcript.
+
 **Audit** (admin) shows a history of sensitive actions — billing runs, payments, bursaries, standing
 overrides, account approvals, exam publishing, settings changes — each with who did it and when.
 
@@ -297,10 +358,17 @@ keys, and (optionally) an email provider for the activation email. See
 | Symptom | Likely cause / fix |
 | --- | --- |
 | *"Your account is awaiting administrator approval."* | Ask an admin to approve you under **Staff → Pending Approval**. |
+| No Delete button on a staff row | That is your own account — you cannot delete the account you are signed in with. Ask another administrator. |
+| *"This is the only administrator account…"* | Promote a second person to Administrator under **Staff**, then delete the first. |
+| A staff member cannot sign in after you edited them | Their sign-in email changed. Check it under **Staff → Edit**; that address is what they must use. |
+| **Printable Report (.pdf)** says there is nothing to report | Send at least one chat message first — the report is built from the saved conversation. |
 | **Admit & Bill** says no fee structure matches | Create an active fee structure for that grade/term under **Finance → Fee Structures** first. |
 | A student can't be marked twice for the same day | Expected — attendance keeps one record per day; marking again updates that day. |
 | A school's page shows *"subscription has lapsed"* | The subscription is unpaid/suspended — renew from `/signup`. |
 | Report card / ID card shows the wrong school name or colours | Update **Settings**; documents read the global branding. |
+| Report cards grade on the wrong scale | Set the **school level** and **examination system** under **Settings → Branding**. Secondary schools get O-Level and A-Level automatically from each student's class. |
+| A report card shows an aggregate but no Division | Not enough subjects are recorded yet — a Division needs eight subjects at UCE, four at PLE. The card says *Provisional* until then. |
+| An A-Level student is graded D1–F9 instead of A–F | Their class must be Senior 5 or 6 (grade level 12 or 13). Check the student's grade on their record. |
 | Support staff sees only the fees screen | Expected — that role is limited to fee status by design. |
 | **Draft this lesson** / **Write questions** is greyed out | Pick a configured AI model in the chat composer first. The **Local Rules** engine searches student records only and cannot write. |
 | The **Agent** or **MCP** switch is greyed out | The selected model cannot call tools. Choose one that can, or check that a model with an API key is selected. |
