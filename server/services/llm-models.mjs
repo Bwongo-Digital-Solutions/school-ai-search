@@ -19,7 +19,7 @@ const createDefaultModelCatalog = () => [
     id: 'anthropic-default',
     label: 'Anthropic Claude',
     provider: 'anthropic',
-    model: process.env.ANTHROPIC_MODEL || 'claude-3-5-haiku-latest',
+    model: process.env.ANTHROPIC_MODEL || 'claude-opus-5',
     type: 'commercial',
     description: 'Anthropic Messages API model.',
   },
@@ -65,7 +65,10 @@ const createDefaultModelCatalog = () => [
   },
 ];
 
-const PROVIDER_ENV = {
+// Exported so the embeddings layer (server/rag/embeddings.mjs) and the agent's tool-calling
+// adapters (server/agent/providers.mjs) resolve credentials and base URLs from this one table
+// rather than each keeping their own copy.
+export const PROVIDER_ENV = {
   openai: {
     apiKey: 'OPENAI_API_KEY',
     baseUrl: 'OPENAI_BASE_URL',
@@ -121,7 +124,7 @@ const providerHasCredentials = (provider) => {
   return Boolean(env?.apiKey && process.env[env.apiKey]);
 };
 
-const publicModel = (model) => ({
+export const publicModel = (model) => ({
   id: model.id,
   label: model.label,
   provider: model.provider,
@@ -169,27 +172,53 @@ const createStudentContext = (students) =>
     )
     .join('\n');
 
-const createMessages = ({ message, students, hasImage }) => [
-  {
-    role: 'system',
-    content: [
-      'You are SchoolBot AI, a school information assistant.',
-      'Answer only from the provided student records.',
-      'Use concise Markdown. If the answer is not in the records, say so.',
-      'Never invent student records, grades, payments, health details, or attendance.',
-      hasImage ? 'The user attached an image, but local OCR is not available unless the selected model can interpret it.' : '',
-      '',
-      'Student records:',
-      createStudentContext(students),
-    ].join('\n'),
-  },
-  {
-    role: 'user',
-    content: message || 'Please analyze this request.',
-  },
-];
+// Inlining the whole roster stops scaling somewhere around a few hundred students. Past this many,
+// the caller is expected to have narrowed the set by retrieval first; the prompt then says so
+// explicitly, so the model reports "not in the records I can see" rather than "no such student".
+// Read per call, like every other tunable in this file, so it stays reconfigurable at runtime.
+const rosterInlineLimit = () => Number(process.env.AI_ROSTER_INLINE_LIMIT || 50);
 
-const readJson = async (response) => {
+export const createMessages = ({ message, students, hasImage, contextBlocks = '', history = [] }) => {
+  const roster = students.slice(0, rosterInlineLimit());
+  const truncated = students.length > roster.length;
+
+  return [
+    {
+      role: 'system',
+      content: [
+        'You are SchoolBot AI, a school information assistant.',
+        'Answer only from the provided records and reference material.',
+        'Use concise Markdown. If the answer is not in the records, say so.',
+        'Never invent student records, grades, payments, health details, or attendance.',
+        hasImage
+          ? 'The user attached an image, but local OCR is not available unless the selected model can interpret it.'
+          : '',
+        contextBlocks
+          ? [
+              '',
+              'Reference material. Cite it as [1], [2] and so on when you use it:',
+              contextBlocks,
+            ].join('\n')
+          : '',
+        '',
+        truncated
+          ? `Student records (showing ${roster.length} of ${students.length}; ask the user to narrow ` +
+            'the query if the student they mean is not listed):'
+          : 'Student records:',
+        createStudentContext(roster),
+      ]
+        .filter((line) => line !== '')
+        .join('\n'),
+    },
+    ...history,
+    {
+      role: 'user',
+      content: message || 'Please analyze this request.',
+    },
+  ];
+};
+
+export const readJson = async (response) => {
   const text = await response.text();
   if (!text) return {};
 
@@ -200,7 +229,7 @@ const readJson = async (response) => {
   }
 };
 
-const postJson = async (httpClient, url, { headers = {}, body }) => {
+export const postJson = async (httpClient, url, { headers = {}, body }) => {
   const response = await httpClient(url, {
     method: 'POST',
     headers: {
@@ -267,6 +296,18 @@ const callOpenAiCompatible = async ({ model, messages, httpClient }) => {
   };
 };
 
+// Claude 4.6 and later (the Opus 4.6/4.7/4.8 and 5 family, Sonnet 4.6/5, Fable and Mythos) removed
+// the sampling parameters: sending `temperature` to one of them is a 400, not a silent ignore.
+// Older Claude models still honour it, and a school may well have pinned one through
+// ANTHROPIC_MODEL, so this is a targeted deny-list rather than dropping temperature outright.
+const ANTHROPIC_NO_SAMPLING =
+  /^claude-(?:fable|mythos)-|^claude-opus-(?:5|4-6|4-7|4-8)|^claude-sonnet-(?:5|4-6)/;
+
+export const anthropicSamplingParams = (modelName) =>
+  ANTHROPIC_NO_SAMPLING.test(String(modelName || ''))
+    ? {}
+    : { temperature: Number(process.env.AI_TEMPERATURE || 0.2) };
+
 const callAnthropic = async ({ model, messages, httpClient }) => {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY is required for Anthropic Claude');
@@ -285,7 +326,7 @@ const callAnthropic = async ({ model, messages, httpClient }) => {
     body: {
       model: model.model,
       max_tokens: Number(process.env.AI_MAX_TOKENS || 900),
-      temperature: Number(process.env.AI_TEMPERATURE || 0.2),
+      ...anthropicSamplingParams(model.model),
       system,
       messages: chatMessages,
     },
@@ -363,13 +404,21 @@ const callOllama = async ({ model, messages, httpClient }) => {
   };
 };
 
-export const generateLlmSearchReply = async ({ modelId, message, students, hasImage, httpClient = fetch }) => {
+export const generateLlmSearchReply = async ({
+  modelId,
+  message,
+  students,
+  hasImage,
+  contextBlocks = '',
+  history = [],
+  httpClient = fetch,
+}) => {
   const model = resolveModelSelection(modelId);
   if (!model || model.provider === 'local_rules') {
     return null;
   }
 
-  const messages = createMessages({ message, students, hasImage });
+  const messages = createMessages({ message, students, hasImage, contextBlocks, history });
   const params = { model, messages, httpClient };
 
   let result;

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { createSeedStudents } from './seed-data.mjs';
+import { ensureCurriculumSeeded } from '../rag/seed-corpus.mjs';
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS students (
@@ -109,6 +110,66 @@ CREATE TABLE IF NOT EXISTS messages (
   attachments JSONB NOT NULL DEFAULT '[]'::jsonb,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- The curriculum corpus that grounds the Lesson Planner and the Digital Examiner. A document is
+-- either one of the bundled topic outlines (source_type 'seed'), a file a teacher uploaded, or
+-- something pulled in over MCP. content_hash makes re-ingesting idempotent: an unchanged upload is
+-- recognised and skipped rather than duplicating every chunk.
+CREATE TABLE IF NOT EXISTS curriculum_documents (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  curriculum TEXT NOT NULL DEFAULT '',
+  subject TEXT NOT NULL DEFAULT '',
+  grade_level INTEGER,
+  academic_year TEXT NOT NULL DEFAULT '',
+  term TEXT NOT NULL DEFAULT '',
+  source_type TEXT NOT NULL DEFAULT 'upload' CHECK (source_type IN ('seed', 'upload', 'mcp')),
+  source_uri TEXT NOT NULL DEFAULT '',
+  mime_type TEXT NOT NULL DEFAULT 'text/markdown',
+  content_hash TEXT NOT NULL DEFAULT '',
+  uploaded_by TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- One retrievable passage. curriculum/subject/grade_level are denormalised from the parent so the
+-- metadata filter runs without a join, and embedding holds a plain JSONB float array rather than a
+-- pgvector column: pg-mem backs both the test suite and the Vercel demo and supports no extensions,
+-- and a single school's corpus is small enough to rank in Node. embedding is NULL when no embedding
+-- provider is configured, which is the normal case — retrieval then falls back to BM25.
+CREATE TABLE IF NOT EXISTS curriculum_chunks (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL REFERENCES curriculum_documents(id) ON DELETE CASCADE,
+  chunk_index INTEGER NOT NULL DEFAULT 0,
+  heading TEXT NOT NULL DEFAULT '',
+  content TEXT NOT NULL,
+  token_count INTEGER NOT NULL DEFAULT 0,
+  embedding JSONB,
+  embedding_model TEXT,
+  curriculum TEXT NOT NULL DEFAULT '',
+  subject TEXT NOT NULL DEFAULT '',
+  grade_level INTEGER,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- External MCP servers an admin has registered. auth_token is stored plaintext, the same posture as
+-- the provider API keys that already live in the environment, but it is never returned to the
+-- browser: the settings handler masks it on every read and only overwrites it when a new value is
+-- supplied. discovered_tools caches the last successful tools/list so the chat can render the tool
+-- menu without a round trip to the server on every page load.
+CREATE TABLE IF NOT EXISTS mcp_servers (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  url TEXT NOT NULL,
+  auth_token TEXT NOT NULL DEFAULT '',
+  transport TEXT NOT NULL DEFAULT 'http' CHECK (transport IN ('http')),
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  last_connected_at TIMESTAMPTZ,
+  last_error TEXT NOT NULL DEFAULT '',
+  discovered_tools JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -229,6 +290,131 @@ CREATE TABLE IF NOT EXISTS exam_schedules (
   start_time TEXT NOT NULL,
   end_time TEXT NOT NULL,
   room TEXT
+);
+
+-- Lesson Planner. One row per lesson a teacher plans, generated against the curriculum corpus and
+-- then edited freely — the generated version is a first draft, not a finished artefact, so every
+-- field stays editable, and refs records which syllabus passages the draft came from.
+-- activities holds the lesson's shape: [{stage, minutes, teacher_activity, learner_activity}].
+CREATE TABLE IF NOT EXISTS lesson_plans (
+  id TEXT PRIMARY KEY,
+  teacher_id TEXT REFERENCES teachers(id) ON DELETE SET NULL,
+  subject_id TEXT REFERENCES subjects_catalog(id) ON DELETE SET NULL,
+  subject_name TEXT NOT NULL DEFAULT '',
+  class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
+  curriculum TEXT NOT NULL DEFAULT '',
+  academic_year TEXT NOT NULL DEFAULT '',
+  term TEXT NOT NULL DEFAULT '',
+  grade_level INTEGER,
+  topic TEXT NOT NULL DEFAULT '',
+  subtopic TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL,
+  duration_minutes INTEGER NOT NULL DEFAULT 40,
+  lesson_date DATE,
+  period TEXT NOT NULL DEFAULT '',
+  competencies JSONB NOT NULL DEFAULT '[]'::jsonb,
+  learning_outcomes JSONB NOT NULL DEFAULT '[]'::jsonb,
+  materials JSONB NOT NULL DEFAULT '[]'::jsonb,
+  activities JSONB NOT NULL DEFAULT '[]'::jsonb,
+  assessment JSONB NOT NULL DEFAULT '[]'::jsonb,
+  differentiation TEXT NOT NULL DEFAULT '',
+  homework TEXT NOT NULL DEFAULT '',
+  -- The retrieval citations this plan was grounded in. Named refs, not references, because
+  -- REFERENCES is a SQL reserved word and would need quoting at every single use site.
+  refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved', 'delivered')),
+  generated_by JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Digital Examiner. A blueprint is the teacher's fine-tuning object: it fixes the curriculum, the
+-- year, subject and grade, and the shape of the paper (how marks split across topics, difficulty,
+-- Bloom levels and question types). Generation reads it; nothing else does.
+CREATE TABLE IF NOT EXISTS exam_blueprints (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  curriculum TEXT NOT NULL DEFAULT '',
+  subject_id TEXT REFERENCES subjects_catalog(id) ON DELETE SET NULL,
+  subject_name TEXT NOT NULL DEFAULT '',
+  grade_level INTEGER,
+  academic_year TEXT NOT NULL DEFAULT '',
+  term TEXT NOT NULL DEFAULT '',
+  paper_label TEXT NOT NULL DEFAULT '',
+  assessment_type TEXT NOT NULL DEFAULT 'exam'
+    CHECK (assessment_type IN ('quiz', 'assignment', 'test', 'exam', 'mock')),
+  duration_minutes INTEGER NOT NULL DEFAULT 90,
+  total_marks INTEGER NOT NULL DEFAULT 100,
+  topic_weights JSONB NOT NULL DEFAULT '[]'::jsonb,
+  difficulty_mix JSONB NOT NULL DEFAULT '{}'::jsonb,
+  bloom_mix JSONB NOT NULL DEFAULT '{}'::jsonb,
+  question_type_mix JSONB NOT NULL DEFAULT '{}'::jsonb,
+  sections JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- The reusable question bank. Questions outlive the paper they were generated for, so a blueprint
+-- can be deleted without losing them, and a teacher can approve once and reuse for years.
+-- source_references holds the retrieval citations the question was grounded in, which is what makes
+-- a generated question auditable against the syllabus rather than taken on trust.
+CREATE TABLE IF NOT EXISTS exam_questions (
+  id TEXT PRIMARY KEY,
+  blueprint_id TEXT REFERENCES exam_blueprints(id) ON DELETE SET NULL,
+  curriculum TEXT NOT NULL DEFAULT '',
+  subject_id TEXT REFERENCES subjects_catalog(id) ON DELETE SET NULL,
+  subject_name TEXT NOT NULL DEFAULT '',
+  grade_level INTEGER,
+  topic TEXT NOT NULL DEFAULT '',
+  subtopic TEXT NOT NULL DEFAULT '',
+  question_type TEXT NOT NULL DEFAULT 'short_answer',
+  difficulty TEXT NOT NULL DEFAULT 'moderate' CHECK (difficulty IN ('easy', 'moderate', 'challenging')),
+  bloom_level TEXT NOT NULL DEFAULT 'understand',
+  command_word TEXT NOT NULL DEFAULT '',
+  stem TEXT NOT NULL,
+  options JSONB NOT NULL DEFAULT '[]'::jsonb,
+  correct_answer TEXT NOT NULL DEFAULT '',
+  marking_scheme JSONB NOT NULL DEFAULT '[]'::jsonb,
+  marks INTEGER NOT NULL DEFAULT 1,
+  expected_time_minutes INTEGER NOT NULL DEFAULT 2,
+  assessment_objective TEXT NOT NULL DEFAULT '',
+  source_references JSONB NOT NULL DEFAULT '[]'::jsonb,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved', 'retired')),
+  review_notes TEXT NOT NULL DEFAULT '',
+  generated_by JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- An assembled paper. exam_id is NULL until it is published, at which point a real row is written
+-- into exams (and exam_schedules) so the rest of the school system — timetabling, the gradebook,
+-- report cards — sees it as any other exam. ON DELETE SET NULL so removing the exam leaves the
+-- paper itself intact as a draft.
+CREATE TABLE IF NOT EXISTS generated_papers (
+  id TEXT PRIMARY KEY,
+  blueprint_id TEXT REFERENCES exam_blueprints(id) ON DELETE SET NULL,
+  exam_id TEXT REFERENCES exams(id) ON DELETE SET NULL,
+  title TEXT NOT NULL,
+  curriculum TEXT NOT NULL DEFAULT '',
+  subject_id TEXT REFERENCES subjects_catalog(id) ON DELETE SET NULL,
+  subject_name TEXT NOT NULL DEFAULT '',
+  grade_level INTEGER,
+  academic_year TEXT NOT NULL DEFAULT '',
+  term TEXT NOT NULL DEFAULT '',
+  assessment_type TEXT NOT NULL DEFAULT 'exam',
+  duration_minutes INTEGER NOT NULL DEFAULT 90,
+  total_marks INTEGER NOT NULL DEFAULT 100,
+  instructions TEXT NOT NULL DEFAULT '',
+  question_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+  sections JSONB NOT NULL DEFAULT '[]'::jsonb,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'published')),
+  published_at TIMESTAMPTZ,
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS gradebook_entries (
@@ -604,6 +790,19 @@ CREATE INDEX IF NOT EXISTS idx_payments_invoice ON payments(invoice_id);
 CREATE INDEX IF NOT EXISTS idx_receipts_payment ON receipts(payment_id);
 CREATE INDEX IF NOT EXISTS idx_fee_bursaries_student_status ON fee_bursaries(student_id, status);
 CREATE INDEX IF NOT EXISTS idx_student_fee_standings_student ON student_fee_standings(student_id, status);
+-- Backs the metadata narrowing that retrieval does before it ranks anything in Node.
+CREATE INDEX IF NOT EXISTS idx_curriculum_chunks_filter ON curriculum_chunks(curriculum, subject, grade_level);
+CREATE INDEX IF NOT EXISTS idx_curriculum_chunks_document ON curriculum_chunks(document_id, chunk_index);
+CREATE INDEX IF NOT EXISTS idx_curriculum_documents_lookup ON curriculum_documents(curriculum, subject);
+-- Backs the question bank's default listing: "approved questions for this subject and grade".
+CREATE INDEX IF NOT EXISTS idx_exam_questions_bank ON exam_questions(subject_id, grade_level, status);
+CREATE INDEX IF NOT EXISTS idx_exam_questions_topic ON exam_questions(curriculum, topic);
+CREATE INDEX IF NOT EXISTS idx_exam_questions_blueprint ON exam_questions(blueprint_id);
+CREATE INDEX IF NOT EXISTS idx_generated_papers_status ON generated_papers(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_exam_blueprints_subject ON exam_blueprints(subject_id, grade_level);
+-- Backs a teacher's "my plans" listing and the scheme-of-work sequence for a term.
+CREATE INDEX IF NOT EXISTS idx_lesson_plans_owner ON lesson_plans(created_by, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_lesson_plans_scope ON lesson_plans(subject_id, grade_level, academic_year, term);
 `;
 
 const STUDENT_COLUMNS = [
@@ -629,11 +828,26 @@ const STUDENT_COLUMNS = [
   'notes',
 ];
 
-export const initializeDatabase = async (database) => {
+export const initializeDatabase = async (database, { httpClient = fetch } = {}) => {
   await database.query(SCHEMA_SQL);
   await ensureStudentsSeeded(database);
   await ensureSchoolSettingsSeeded(database);
   await ensureAttendanceUniqueness(database);
+  await seedCurriculumCorpus(database, httpClient);
+};
+
+// The bundled curriculum outlines. Guarded rather than awaited bare, because seeding may reach an
+// embedding provider: a network failure there must not stop the server from booting, and the
+// corpus still works lexically with no embeddings at all.
+const seedCurriculumCorpus = async (database, httpClient) => {
+  try {
+    await ensureCurriculumSeeded(database, { httpClient });
+  } catch (error) {
+    console.warn(
+      'Skipped seeding the curriculum corpus; the Lesson Planner and Digital Examiner will start empty:',
+      error instanceof Error ? error.message : error,
+    );
+  }
 };
 
 // One attendance record per student per day. Created here (not in SCHEMA_SQL) and guarded, so a

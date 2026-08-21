@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from 'react';
+import { Plug } from 'lucide-react';
+import McpServersPanel from './McpServersPanel';
 import { ImagePlus, Loader2, Palette, Save, Settings as SettingsIcon, Shield } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
@@ -27,6 +29,7 @@ const SettingsPanel: React.FC = () => {
   const [form, setForm] = useState<SchoolSettings>(settings);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [tab, setTab] = useState<'branding' | 'mcp'>('branding');
 
   // Keep the form in sync when the global settings load/refresh.
   useEffect(() => {
@@ -80,11 +83,38 @@ const SettingsPanel: React.FC = () => {
           School Settings
         </h2>
         <p className="text-xs text-gray-400 mt-0.5">
-          Set the school identity used across report cards, receipts, statements, ID cards and the app header.
+          {tab === 'branding'
+            ? 'Set the school identity used across report cards, receipts, statements, ID cards and the app header.'
+            : 'Connect external MCP servers so the assistant can use their tools.'}
         </p>
+
+        <div className="flex flex-wrap gap-1.5 mt-4">
+          {([
+            { key: 'branding', label: 'Branding', icon: SettingsIcon },
+            { key: 'mcp', label: 'MCP Servers', icon: Plug },
+          ] as const).map(({ key, label, icon: Icon }) => (
+            <button
+              key={key}
+              onClick={() => setTab(key)}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                tab === key
+                  ? 'bg-indigo-600 text-white'
+                  : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'
+              }`}
+            >
+              <Icon className="w-3.5 h-3.5" />
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="flex-1 overflow-auto px-6 py-5">
+        {tab === 'mcp' ? (
+          <div className="max-w-3xl">
+            <McpServersPanel />
+          </div>
+        ) : (
         <div className="max-w-2xl space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <label className="block">
@@ -158,6 +188,7 @@ const SettingsPanel: React.FC = () => {
             {saved && <span className="text-sm text-emerald-600 dark:text-emerald-400">Saved. Documents now use this branding.</span>}
           </div>
         </div>
+        )}
       </div>
     </div>
   );

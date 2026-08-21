@@ -1,12 +1,25 @@
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
-import type { Message, Conversation, Attachment, Student, AiModelOption } from '@/types/chat';
+import type { Message, MessageMetadata, Conversation, Attachment, Student, AiModelOption } from '@/types/chat';
+import type { AgentStep, ChatMode, ChatOptions, Citation, McpServer, McpServerError } from '@/types/agent';
+import { callMcp } from '@/lib/teaching';
 import type { JsonRecord } from '@/types/auth';
 
 // 'fees' is the read-only payment status view every signed-in role can reach.
 // 'finance' is the admin fee management workspace. 'settings' is the admin branding screen.
-type ActiveView = 'chat' | 'students' | 'records' | 'users' | 'audit' | 'fees' | 'finance' | 'settings';
+// 'lessons' and 'examiner' are the teacher-facing planning and assessment workspaces.
+type ActiveView =
+  | 'chat'
+  | 'students'
+  | 'records'
+  | 'users'
+  | 'audit'
+  | 'fees'
+  | 'finance'
+  | 'lessons'
+  | 'examiner'
+  | 'settings';
 
 
 interface ChatContextType {
@@ -20,6 +33,9 @@ interface ChatContextType {
   selectedModelId: string;
   activeView: ActiveView;
   setActiveView: (view: ActiveView) => void;
+  chatOptions: ChatOptions;
+  setChatOptions: (options: ChatOptions) => void;
+  mcpServers: McpServer[];
   setSelectedModelId: (modelId: string) => void;
   refreshStudents: () => Promise<void>;
   sendMessage: (content: string, attachments?: Attachment[]) => Promise<void>;
@@ -43,7 +59,7 @@ type MessageRow = {
   role: Message['role'];
   content: string;
   attachments?: Attachment[] | null;
-  metadata?: JsonRecord | null;
+  metadata?: MessageMetadata | null;
   created_at: string;
 };
 
@@ -53,6 +69,12 @@ type AiChatResponse = {
   model?: string;
   usage?: JsonRecord;
   conversationId?: string;
+  mode?: ChatMode;
+  steps?: AgentStep[];
+  citations?: Citation[];
+  notice?: string;
+  mcpErrors?: McpServerError[];
+  stoppedAtStepLimit?: boolean;
 };
 
 const ChatContext = createContext<ChatContextType | undefined>(undefined);
@@ -66,7 +88,7 @@ export const useChatContext = () => {
 export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   // Support staff (non-teaching) may only see school fees payment status, so the full
   // student dataset and the AI assistant are never loaded for them.
-  const { isSupportStaff } = useAuth();
+  const { isSupportStaff, user } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
@@ -76,6 +98,12 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [aiModels, setAiModels] = useState<AiModelOption[]>([]);
   const [selectedModelId, setSelectedModelId] = useState('local-rules');
   const [activeView, setActiveView] = useState<ActiveView>('chat');
+  const [chatOptions, setChatOptions] = useState<ChatOptions>({
+    agentMode: false,
+    useRag: false,
+    mcpServerIds: [],
+  });
+  const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
 
   const refreshStudents = useCallback(async () => {
     if (isSupportStaff) {
@@ -100,6 +128,19 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     refreshStudents();
   }, [refreshStudents]);
+
+  // The MCP registry is admin-only to edit, so a teacher's request is refused and simply yields no
+  // servers to pick from. That is why the failure is swallowed rather than surfaced.
+  useEffect(() => {
+    if (!user || isSupportStaff) {
+      setMcpServers([]);
+      return;
+    }
+
+    callMcp<{ servers: McpServer[] }>('list', {}, user)
+      .then(result => setMcpServers(result.servers || []))
+      .catch(() => setMcpServers([]));
+  }, [user, isSupportStaff]);
 
   // Support staff have exactly one view; keep them on it even if another view was left active.
   useEffect(() => {
@@ -222,6 +263,14 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
           imageData,
           studentData: students,
           modelId: selectedModelId,
+          // The assistant is closed to non-teaching staff server-side, so identity travels with
+          // every message rather than being assumed from the UI having rendered the composer.
+          requesterRole: user?.role,
+          actorEmail: user?.auth_email,
+          actorName: user?.display_name,
+          mode: chatOptions.agentMode ? 'agent' : 'direct',
+          useRag: chatOptions.useRag,
+          mcpServerIds: chatOptions.mcpServerIds,
         },
       });
       if (error) throw error;
@@ -233,6 +282,12 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
           studentsFound: data.studentsFound,
           model: data.model,
           usage: data.usage,
+          mode: data.mode,
+          steps: data.steps,
+          citations: data.citations,
+          notice: data.notice,
+          mcpErrors: data.mcpErrors,
+          stoppedAtStepLimit: data.stoppedAtStepLimit,
         },
         createdAt: new Date(),
       };
@@ -253,7 +308,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } finally {
       setIsLoading(false);
     }
-  }, [currentConversationId, loadConversations, students, selectedModelId, isSupportStaff]);
+  }, [currentConversationId, loadConversations, students, selectedModelId, isSupportStaff, user, chatOptions]);
 
   const toggleSidebar = useCallback(() => {
     setSidebarOpen(prev => !prev);
@@ -264,6 +319,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       value={{
         messages, conversations, currentConversationId, isLoading,
         isSidebarOpen, students, aiModels, selectedModelId, activeView, setActiveView,
+        chatOptions, setChatOptions, mcpServers,
         setSelectedModelId, refreshStudents,
         sendMessage, startNewConversation, loadConversation, loadConversations,
         deleteConversation, toggleSidebar, setSidebarOpen,

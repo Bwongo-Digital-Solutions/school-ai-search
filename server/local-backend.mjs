@@ -34,7 +34,16 @@ import { getPublicGradingOptions } from './reports/grading-config.mjs';
 import { generateLlmSearchReply, getPublicModelCatalog, resolveModelSelection } from './services/llm-models.mjs';
 import { getPaymentStatus, initiatePayment, recordPaymentCallback } from './services/payment-gateway.mjs';
 import { generateAssistantReply } from './services/student-chat.mjs';
+import { answerChatMessage } from './agent/chat.mjs';
+import { handleMcpServerRequest } from './mcp/server.mjs';
 import { handleFeesFunction } from './services/fees.mjs';
+import { handleCurriculumFunction } from './services/curriculum.mjs';
+import { handleDigitalExaminerFunction, loadPaper } from './services/digital-examiner.mjs';
+import { handleLessonPlannerFunction } from './services/lesson-planner.mjs';
+import { buildExamPaperPdf } from './reports/exam-paper.mjs';
+import { buildLessonPlanPdf } from './reports/lesson-plan.mjs';
+import { handleMcpFunction } from './services/mcp-servers.mjs';
+import { getPublicCurriculumFrameworks } from './services/curriculum-frameworks.mjs';
 import { handleSettingsFunction, loadSchoolSettings } from './services/settings.mjs';
 import { toAmount, toIsoDate } from './services/fee-math.mjs';
 
@@ -103,6 +112,41 @@ const TABLES = {
     columns: ['id', 'title', 'created_at', 'updated_at'],
     touchesUpdatedAt: true,
   },
+  curriculum_documents: {
+    columns: [
+      'id',
+      'title',
+      'curriculum',
+      'subject',
+      'grade_level',
+      'academic_year',
+      'term',
+      'source_type',
+      'source_uri',
+      'mime_type',
+      'content_hash',
+      'uploaded_by',
+      'created_at',
+    ],
+  },
+  // Chunk bodies are readable (a teacher checking what a citation points at), but `embedding` is
+  // deliberately absent from the allow-list: it is a large float array of no use to the browser,
+  // and shipping it would multiply the payload of any listing by an order of magnitude.
+  curriculum_chunks: {
+    columns: [
+      'id',
+      'document_id',
+      'chunk_index',
+      'heading',
+      'content',
+      'token_count',
+      'embedding_model',
+      'curriculum',
+      'subject',
+      'grade_level',
+      'created_at',
+    ],
+  },
   messages: {
     columns: ['id', 'conversation_id', 'role', 'content', 'attachments', 'metadata', 'created_at'],
     jsonColumns: ['attachments', 'metadata'],
@@ -165,6 +209,133 @@ const TABLES = {
   },
   exams: {
     columns: ['id', 'name', 'exam_type', 'academic_year', 'term', 'start_date', 'end_date', 'status'],
+  },
+  lesson_plans: {
+    columns: [
+      'id',
+      'teacher_id',
+      'subject_id',
+      'subject_name',
+      'class_id',
+      'curriculum',
+      'academic_year',
+      'term',
+      'grade_level',
+      'topic',
+      'subtopic',
+      'title',
+      'duration_minutes',
+      'lesson_date',
+      'period',
+      'competencies',
+      'learning_outcomes',
+      'materials',
+      'activities',
+      'assessment',
+      'differentiation',
+      'homework',
+      'refs',
+      'status',
+      'generated_by',
+      'created_by',
+      'created_at',
+      'updated_at',
+    ],
+    jsonColumns: [
+      'competencies',
+      'learning_outcomes',
+      'materials',
+      'activities',
+      'assessment',
+      'refs',
+      'generated_by',
+    ],
+    touchesUpdatedAt: true,
+  },
+  exam_blueprints: {
+    columns: [
+      'id',
+      'name',
+      'curriculum',
+      'subject_id',
+      'subject_name',
+      'grade_level',
+      'academic_year',
+      'term',
+      'paper_label',
+      'assessment_type',
+      'duration_minutes',
+      'total_marks',
+      'topic_weights',
+      'difficulty_mix',
+      'bloom_mix',
+      'question_type_mix',
+      'sections',
+      'created_by',
+      'created_at',
+      'updated_at',
+    ],
+    jsonColumns: ['topic_weights', 'difficulty_mix', 'bloom_mix', 'question_type_mix', 'sections'],
+    touchesUpdatedAt: true,
+  },
+  exam_questions: {
+    columns: [
+      'id',
+      'blueprint_id',
+      'curriculum',
+      'subject_id',
+      'subject_name',
+      'grade_level',
+      'topic',
+      'subtopic',
+      'question_type',
+      'difficulty',
+      'bloom_level',
+      'command_word',
+      'stem',
+      'options',
+      'correct_answer',
+      'marking_scheme',
+      'marks',
+      'expected_time_minutes',
+      'assessment_objective',
+      'source_references',
+      'status',
+      'review_notes',
+      'generated_by',
+      'created_by',
+      'created_at',
+      'updated_at',
+    ],
+    jsonColumns: ['options', 'marking_scheme', 'source_references', 'generated_by'],
+    touchesUpdatedAt: true,
+  },
+  generated_papers: {
+    columns: [
+      'id',
+      'blueprint_id',
+      'exam_id',
+      'title',
+      'curriculum',
+      'subject_id',
+      'subject_name',
+      'grade_level',
+      'academic_year',
+      'term',
+      'assessment_type',
+      'duration_minutes',
+      'total_marks',
+      'instructions',
+      'question_ids',
+      'sections',
+      'status',
+      'published_at',
+      'created_by',
+      'created_at',
+      'updated_at',
+    ],
+    jsonColumns: ['question_ids', 'sections'],
+    touchesUpdatedAt: true,
   },
   exam_schedules: {
     columns: ['id', 'exam_id', 'subject_id', 'class_id', 'exam_date', 'start_time', 'end_time', 'room'],
@@ -690,16 +861,20 @@ const ensureConversation = async (database, { conversationId, title }) => {
   return formatRow(created.rows[0]);
 };
 
+// Returns the new row's id so the chat can exclude the turn it just wrote when replaying history.
 const insertMessage = async (database, { conversationId, role, content, attachments = [], metadata = {} }) => {
+  const id = randomUUID();
+
   await database.query(
     `
       INSERT INTO messages (id, conversation_id, role, content, attachments, metadata)
       VALUES ($1, $2, $3, $4, $5, $6)
     `,
-    [randomUUID(), conversationId, role, content, JSON.stringify(attachments), JSON.stringify(metadata)],
+    [id, conversationId, role, content, JSON.stringify(attachments), JSON.stringify(metadata)],
   );
 
   await database.query('UPDATE conversations SET updated_at = NOW() WHERE id = $1', [conversationId]);
+  return { id };
 };
 
 const handleAuthFunction = async (database, body) => {
@@ -1340,7 +1515,16 @@ const handleFeeStatusFunction = async (database, body = {}) => {
   return code ? { students: rows, code, matched: rows.length > 0 } : { students: rows };
 };
 
+// Non-teaching support staff may only see fee payment status, so the assistant is closed to them.
+// The browser already hides it (ChatWindow, ChatContext), but that is a UI convenience: this is the
+// check that actually holds, matching the guard every other service here puts ahead of its actions.
+const CHAT_ROLES = ['admin', 'teacher'];
+
 const handleAiChatFunction = async (database, body, httpClient) => {
+  if (!CHAT_ROLES.includes(body?.requesterRole)) {
+    return { error: 'Unauthorized' };
+  }
+
   const message = String(body?.message || '').trim();
   const hasImage = Boolean(body?.imageData);
   const students = await fetchAllStudents(database);
@@ -1351,7 +1535,7 @@ const handleAiChatFunction = async (database, body, httpClient) => {
     title: (message || 'Image analysis request').slice(0, 60),
   });
 
-  await insertMessage(database, {
+  const userMessage = await insertMessage(database, {
     conversationId: conversation.id,
     role: 'user',
     content: message || 'Please analyze this image.',
@@ -1361,16 +1545,26 @@ const handleAiChatFunction = async (database, body, httpClient) => {
 
   let reply;
   try {
-    reply =
-      selectedModel.provider === 'local_rules'
-        ? generateAssistantReply({ message, students, hasImage })
-        : await generateLlmSearchReply({
-            modelId: selectedModel.id,
-            message,
-            students,
-            hasImage,
-            httpClient,
-          });
+    reply = await answerChatMessage({
+      database,
+      model: selectedModel,
+      message,
+      students,
+      hasImage,
+      conversationId: conversation.id,
+      // The turn just written is the prompt, not history.
+      excludeMessageId: userMessage?.id,
+      mode: body?.mode === 'agent' ? 'agent' : 'direct',
+      useRag: Boolean(body?.useRag),
+      mcpServerIds: Array.isArray(body?.mcpServerIds) ? body.mcpServerIds : null,
+      actor: {
+        email: String(body?.actorEmail || ''),
+        name: String(body?.actorName || ''),
+        role: body.requesterRole,
+      },
+      httpClient,
+      generateLocalReply: generateAssistantReply,
+    });
   } catch (error) {
     reply = {
       message: [
@@ -1395,20 +1589,30 @@ const handleAiChatFunction = async (database, body, httpClient) => {
     reply = generateAssistantReply({ message, students, hasImage });
   }
 
+  // Steps and citations are persisted, not just returned, so reopening a past conversation still
+  // shows what the assistant did and which sources it used.
+  const metadata = {
+    studentsFound: reply.studentsFound,
+    modelId: selectedModel.id,
+    modelProvider: selectedModel.provider,
+    modelName: selectedModel.model,
+    usage: reply.usage || null,
+    providerResponseId: reply.providerResponseId || null,
+    modelError: Boolean(reply.error),
+    mode: reply.mode || 'direct',
+    steps: reply.steps || [],
+    citations: reply.citations || [],
+    ...(reply.notice ? { notice: reply.notice } : {}),
+    ...(reply.mcpErrors?.length ? { mcpErrors: reply.mcpErrors } : {}),
+    ...(reply.stoppedAtStepLimit ? { stoppedAtStepLimit: true } : {}),
+  };
+
   await insertMessage(database, {
     conversationId: conversation.id,
     role: 'assistant',
     content: reply.message,
     attachments: [],
-    metadata: {
-      studentsFound: reply.studentsFound,
-      modelId: selectedModel.id,
-      modelProvider: selectedModel.provider,
-      modelName: selectedModel.model,
-      usage: reply.usage || null,
-      providerResponseId: reply.providerResponseId || null,
-      modelError: Boolean(reply.error),
-    },
+    metadata,
   });
 
   return {
@@ -1422,6 +1626,12 @@ const handleAiChatFunction = async (database, body, httpClient) => {
       model: selectedModel.model,
     },
     usage: reply.usage || null,
+    mode: metadata.mode,
+    steps: metadata.steps,
+    citations: metadata.citations,
+    ...(reply.notice ? { notice: reply.notice } : {}),
+    ...(reply.mcpErrors?.length ? { mcpErrors: reply.mcpErrors } : {}),
+    ...(reply.stoppedAtStepLimit ? { stoppedAtStepLimit: true } : {}),
   };
 };
 
@@ -1617,6 +1827,78 @@ const pdfResponse = (bytes, filename) => ({
 });
 
 /**
+ * A lesson plan as a printable PDF. Teaching staff only, checked from the query string as the other
+ * document routes do.
+ */
+const handleLessonPlanRequest = async (database, pathname, searchParams) => {
+  const match = pathname.match(/^\/api\/lesson-plans\/([^/]+)\.pdf$/);
+  if (!match) {
+    return null;
+  }
+
+  if (!['admin', 'teacher'].includes(searchParams.get('requesterRole'))) {
+    return { type: 'json', status: 403, body: { error: 'Unauthorized' } };
+  }
+
+  const { rows } = await database.query('SELECT * FROM lesson_plans WHERE id = $1', [
+    decodeURIComponent(match[1]),
+  ]);
+  const plan = rows[0];
+  if (!plan) {
+    return { type: 'json', status: 404, body: { error: 'Lesson plan not found' } };
+  }
+
+  const settings = await loadSchoolSettings(database);
+  const pdfBytes = await buildLessonPlanPdf({
+    school: settings,
+    themeColor: settings.theme_color,
+    plan: formatRow(plan),
+  });
+
+  const slug = String(plan.title || 'lesson-plan').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  return pdfResponse(pdfBytes, `${slug || 'lesson-plan'}.pdf`);
+};
+
+/**
+ * Exam papers and their marking schemes.
+ *
+ * Teaching staff only, checked from the query string because a GET carries no body — the same
+ * trust-the-client model as the fee documents below. The marking scheme is the more sensitive of
+ * the two, but both come off the same paper, so the gate is identical.
+ */
+const handleExamPaperRequest = async (database, pathname, searchParams) => {
+  const paperMatch = pathname.match(/^\/api\/papers\/([^/]+)\.pdf$/);
+  const schemeMatch = pathname.match(/^\/api\/papers\/([^/]+)\/marking-scheme\.pdf$/);
+  if (!paperMatch && !schemeMatch) {
+    return null;
+  }
+
+  if (!['admin', 'teacher'].includes(searchParams.get('requesterRole'))) {
+    return { type: 'json', status: 403, body: { error: 'Unauthorized' } };
+  }
+
+  const markingScheme = Boolean(schemeMatch);
+  const paperId = decodeURIComponent((schemeMatch || paperMatch)[1]);
+
+  const loaded = await loadPaper(database, paperId);
+  if (!loaded) {
+    return { type: 'json', status: 404, body: { error: 'Paper not found' } };
+  }
+
+  const settings = await loadSchoolSettings(database);
+  const pdfBytes = await buildExamPaperPdf({
+    school: settings,
+    themeColor: settings.theme_color,
+    paper: loaded.paper,
+    questions: loaded.questions,
+    markingScheme,
+  });
+
+  const slug = String(loaded.paper.title || 'paper').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  return pdfResponse(pdfBytes, `${slug || 'paper'}${markingScheme ? '-marking-scheme' : ''}.pdf`);
+};
+
+/**
  * Fee receipts and statements. Both are admin-only, checked from the query string because a GET
  * carries no body — the same trust-the-client model as every other role check here, but it does
  * stop a support-staff browser from pulling a student's full fee history.
@@ -1808,7 +2090,9 @@ export const createAppRuntime = async ({
   });
 
   await waitForDatabase(defaultDatabase, useInMemoryDatabase ? { attempts: 1, delayMs: 0 } : undefined);
-  await initializeDatabase(defaultDatabase);
+  // httpClient is threaded through so curriculum seeding embeds via the same (injectable) client
+  // every other outbound call uses, rather than reaching the network directly under test.
+  await initializeDatabase(defaultDatabase, { httpClient });
 
   // The control plane (tenant registry + subscriptions). Present only when a control database is
   // configured (CONTROL_DATABASE_URL, an injected handle, or the in-memory flag for tests). Without
@@ -1863,7 +2147,7 @@ export const createAppRuntime = async ({
       await tenants.close();
       if (control) await control.close();
     },
-    async dispatch({ method = 'GET', pathname = '/', searchParams = new URLSearchParams(), body = {}, database = defaultDatabase }) {
+    async dispatch({ method = 'GET', pathname = '/', searchParams = new URLSearchParams(), body = {}, headers = {}, database = defaultDatabase }) {
       const reportCardResponse = await handleReportCardRequest(database, pathname, searchParams, { method, body });
       if (reportCardResponse) {
         return reportCardResponse;
@@ -1877,6 +2161,16 @@ export const createAppRuntime = async ({
       const feeDocumentResponse = await handleFeeDocumentRequest(database, pathname, searchParams);
       if (feeDocumentResponse) {
         return feeDocumentResponse;
+      }
+
+      const examPaperResponse = await handleExamPaperRequest(database, pathname, searchParams);
+      if (examPaperResponse) {
+        return examPaperResponse;
+      }
+
+      const lessonPlanResponse = await handleLessonPlanRequest(database, pathname, searchParams);
+      if (lessonPlanResponse) {
+        return lessonPlanResponse;
       }
 
       if (method === 'GET' && pathname === '/api/health') {
@@ -1963,7 +2257,9 @@ export const createAppRuntime = async ({
 
       if (method === 'POST' && pathname === '/api/functions/ai-chat') {
         const data = await handleAiChatFunction(database, body, httpClient);
-        return { type: 'json', status: 200, body: { data } };
+        return data?.error === 'Unauthorized'
+          ? { type: 'json', status: 403, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/ai-models') {
@@ -1972,6 +2268,51 @@ export const createAppRuntime = async ({
 
       if (method === 'GET' && pathname === '/api/grading-schemes') {
         return { type: 'json', status: 200, body: { data: { schemes: getPublicGradingOptions() } } };
+      }
+
+      if (method === 'GET' && pathname === '/api/curriculum-frameworks') {
+        return { type: 'json', status: 200, body: { data: { frameworks: getPublicCurriculumFrameworks() } } };
+      }
+
+      // SchoolBot's own MCP server: the same tool registry, exposed to external MCP clients.
+      // Returns raw JSON-RPC envelopes rather than the { data } wrapper the browser endpoints use,
+      // because the caller is an MCP client and expects the protocol's own shape.
+      if (method === 'POST' && pathname === '/api/mcp') {
+        const result = await handleMcpServerRequest({ database, body, headers, httpClient });
+        return result.body === null
+          ? { type: 'json', status: result.status, body: {} }
+          : { type: 'json', status: result.status, body: result.body };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/lesson-planner') {
+        const data = await handleLessonPlannerFunction(database, body, httpClient);
+        return data?.error
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/digital-examiner') {
+        const data = await handleDigitalExaminerFunction(database, body, httpClient);
+        return data?.error
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/curriculum') {
+        const data = await handleCurriculumFunction(database, body, httpClient);
+        return data?.error
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      // Note: mcp_servers is deliberately absent from the TABLES allow-list above. It holds live
+      // credentials, and /api/db has no role check — this endpoint is the only way in, and it masks
+      // the token on every read.
+      if (method === 'POST' && pathname === '/api/functions/mcp') {
+        const data = await handleMcpFunction(database, body, httpClient);
+        return data?.error
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/voice-to-text') {
@@ -2053,6 +2394,7 @@ export const createAppServer = async ({
           pathname: url.pathname,
           searchParams: url.searchParams,
           body,
+          headers: request.headers,
           database,
         });
 

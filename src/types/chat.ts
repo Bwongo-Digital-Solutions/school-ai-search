@@ -1,11 +1,34 @@
 import type { JsonRecord } from './auth';
+import type { AgentStep, ChatMode, Citation, McpServerError } from './agent';
+
+/**
+ * What the backend records alongside an assistant reply.
+ *
+ * Declared rather than left as a bare JsonRecord because the chat now renders most of it — the tool
+ * trace, the syllabus citations and any MCP connection failures — and a generic bag would let those
+ * fields drift out of step with the server without the compiler noticing. The index signature keeps
+ * room for metadata a future feature adds without forcing a change here.
+ */
+export interface MessageMetadata {
+  studentsFound?: number;
+  model?: string | { id?: string; label?: string; provider?: string; model?: string };
+  usage?: JsonRecord | null;
+  mode?: ChatMode;
+  steps?: AgentStep[];
+  citations?: Citation[];
+  notice?: string;
+  mcpErrors?: McpServerError[];
+  stoppedAtStepLimit?: boolean;
+  modelError?: boolean;
+  [key: string]: unknown;
+}
 
 export interface Message {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   attachments?: Attachment[];
-  metadata?: JsonRecord;
+  metadata?: MessageMetadata;
   createdAt: Date;
   isStreaming?: boolean;
 }

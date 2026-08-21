@@ -96,7 +96,8 @@ For a non-Docker run:
 
 ```bash
 export OLLAMA_BASE_URL=http://127.0.0.1:11434
-export OLLAMA_MODEL=llama3.2:3b
+# export OLLAMA_MODEL=llama3.2:3b
+export OLLAMA_MODEL=kimi-k3:cloud
 export AI_DEFAULT_MODEL_ID=ollama-default
 npm run dev
 ```

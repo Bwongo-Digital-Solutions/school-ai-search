@@ -47,6 +47,7 @@ export default async function handler(req, res) {
       pathname: url.pathname,
       searchParams: url.searchParams,
       body,
+      headers: req.headers,
     });
 
     if (result.type === 'binary') {

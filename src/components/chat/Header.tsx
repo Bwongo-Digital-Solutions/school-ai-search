@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import {
   Menu, Download, Settings, HelpCircle,
   Moon, Sun, X, ChevronDown, LogOut, User, Shield, HardHat,
-  MessageSquare, Users, Clock, ClipboardList, UserCog, Wallet, Landmark
+  MessageSquare, Users, Clock, ClipboardList, UserCog, Wallet, Landmark,
+  ClipboardCheck, GraduationCap, NotebookPen
 } from 'lucide-react';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useAuth } from '@/contexts/AuthContext';
@@ -15,6 +16,9 @@ const Header: React.FC = () => {
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  // The two teaching tools share one nav entry: the bar already carries seven buttons, and adding
+  // them individually overflows on a laptop.
+  const [showTeachingMenu, setShowTeachingMenu] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [isDark, setIsDark] = useState(false);
 
@@ -136,6 +140,41 @@ const Header: React.FC = () => {
               >
                 <ClipboardList className="w-3.5 h-3.5" /> Records
               </button>
+            )}
+            {!isSupportStaff && (
+              <div className="relative">
+                <button
+                  onClick={() => setShowTeachingMenu(prev => !prev)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                    activeView === 'lessons' || activeView === 'examiner'
+                      ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
+                      : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  <GraduationCap className="w-3.5 h-3.5" /> Teaching
+                  <ChevronDown className="w-3 h-3" />
+                </button>
+
+                {showTeachingMenu && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setShowTeachingMenu(false)} />
+                    <div className="absolute left-0 top-full mt-1 w-56 bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-100 dark:border-gray-700 py-1 z-50">
+                      <button
+                        onClick={() => { setActiveView('lessons'); setShowTeachingMenu(false); }}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                      >
+                        <NotebookPen className="w-3.5 h-3.5" /> Lesson Planner
+                      </button>
+                      <button
+                        onClick={() => { setActiveView('examiner'); setShowTeachingMenu(false); }}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                      >
+                        <ClipboardCheck className="w-3.5 h-3.5" /> Digital Examiner
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
             )}
             <button
               onClick={() => setActiveView('fees')}
@@ -356,6 +395,22 @@ const Header: React.FC = () => {
                           className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
                         >
                           <ClipboardList className="w-3.5 h-3.5" /> Student Records
+                        </button>
+                      )}
+                      {!isSupportStaff && (
+                        <button
+                          onClick={() => { setActiveView('lessons'); setShowUserMenu(false); }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                        >
+                          <NotebookPen className="w-3.5 h-3.5" /> Lesson Planner
+                        </button>
+                      )}
+                      {!isSupportStaff && (
+                        <button
+                          onClick={() => { setActiveView('examiner'); setShowUserMenu(false); }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                        >
+                          <ClipboardCheck className="w-3.5 h-3.5" /> Digital Examiner
                         </button>
                       )}
                       <button
