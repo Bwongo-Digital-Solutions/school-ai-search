@@ -69,6 +69,10 @@ export const toWinAnsi = (text) =>
     .replace(/[–—−]/g, '-')
     .replace(/…/g, '...')
     .replace(/[→⇒]/g, '->')
+    // Bullets and middots would otherwise be stripped by the ASCII filter below, silently leaving
+    // list items with a hanging indent and no marker.
+    .replace(/[•▪◦]/g, '-')
+    .replace(/·/g, '-')
     .replace(/[   ]/g, ' ')
     .replace(/≤/g, '<=')
     .replace(/≥/g, '>=')

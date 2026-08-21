@@ -4354,3 +4354,41 @@ test('SchoolBot exposes its own tools over MCP, gated on a bearer token', async 
     await cleanup();
   }
 });
+
+test('a failed MCP connection test is reported as a result, not swallowed as a bad request', async () => {
+  const httpClient = async () => {
+    throw new Error('connect ECONNREFUSED 127.0.0.1:9');
+  };
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const mcpCall = (action, body = {}) =>
+      dispatch(runtime, 'POST', '/api/functions/mcp', { action, requesterRole: 'admin', ...body });
+
+    const created = await mcpCall('save', { name: 'offline', url: 'http://127.0.0.1:9/rpc' });
+    const serverId = created.body.data.server.id;
+
+    const tested = await mcpCall('test', { id: serverId });
+
+    // The request itself succeeded — only the remote server is unreachable. Reporting that under a
+    // top-level `error` would make the route return 400 with a null body, hiding the diagnosis the
+    // settings screen exists to show.
+    assert.equal(tested.status, 200);
+    assert.equal(tested.body.data.connected, false);
+    assert.match(tested.body.data.connectionError, /ECONNREFUSED/);
+    assert.equal(tested.body.error, undefined);
+
+    // The failure is also persisted, so the screen explains a silent server on next load.
+    const listed = await mcpCall('list');
+    assert.match(listed.body.data.servers[0].last_error, /ECONNREFUSED/);
+    assert.equal(listed.body.data.servers[0].last_connected_at, null);
+
+    // A genuinely bad request still is one.
+    const missing = await mcpCall('test', { id: 'no-such-server' });
+    assert.equal(missing.status, 400);
+    assert.equal(missing.body.error, 'MCP server not found');
+  } finally {
+    await cleanup();
+  }
+});

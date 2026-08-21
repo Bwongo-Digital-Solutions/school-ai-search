@@ -73,7 +73,7 @@ const McpServersPanel: React.FC = () => {
   const test = useCallback(
     (server: McpServer) =>
       runAction(`Connecting to ${server.name}`, async () => {
-        const result = await callMcp<{ connected: boolean; tools?: McpToolSummary[]; error?: string }>(
+        const result = await callMcp<{ connected: boolean; tools?: McpToolSummary[]; connectionError?: string }>(
           'test',
           { id: server.id },
           user,
@@ -81,7 +81,9 @@ const McpServersPanel: React.FC = () => {
         setTestResult({
           id: server.id,
           ok: result.connected,
-          message: result.connected ? `Connected · ${result.tools?.length ?? 0} tools` : result.error || 'Failed',
+          message: result.connected
+            ? `Connected · ${result.tools?.length ?? 0} tools`
+            : result.connectionError || 'Could not connect',
           tools: result.tools,
         });
         await load();

@@ -133,7 +133,11 @@ const testServer = async ({ database, body, httpClient }) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await database.query('UPDATE mcp_servers SET last_error = $1, updated_at = NOW() WHERE id = $2', [message, id]);
-    return { connected: false, error: message };
+    // Reported as connectionError, not error: the request itself succeeded, and the caller wants
+    // the diagnosis rendered beside the server. A top-level `error` is reserved for a bad request,
+    // and the route turns one into a 400 with a null body — which would hide exactly the detail an
+    // administrator opened this screen to see.
+    return { connected: false, connectionError: message };
   }
 };
 

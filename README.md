@@ -5,7 +5,9 @@ SchoolBot AI with:
 - a React + Vite frontend
 - a Node backend
 - PostgreSQL as the real database
-- PDF report card generation
+- an AI assistant that can run as a tool-calling agent, grounded in a curriculum library (RAG), with Model Context Protocol support in both directions
+- a **Lesson Planner** and a **Digital Examiner** for teachers, working to the Uganda syllabus and International GCSE standards
+- PDF generation for report cards, exam papers, marking schemes and lesson plans
 - Docker production and Docker live-reload development setups
 
 ## Database
@@ -33,7 +35,11 @@ By default:
 - student registration/admission, attendance, academic history, discipline, class allocation, promotion/graduation, transfer, and withdrawal records
 - audit logging
 - conversation and message persistence
-- local AI-style student search responses
+- AI student search across several providers, from a keyless local rules engine up to a bounded tool-calling agent that looks records up before answering and shows what it did
+- a curriculum library: bundled Uganda (NCDC/UNEB) and Cambridge IGCSE topic outlines plus syllabus documents teachers upload, searchable with no API key required
+- **Lesson Planner**: individual lesson plans and term-long schemes of work drafted from the curriculum library, editable, and exportable as branded PDFs
+- **Digital Examiner**: test questions, assignments and exams tuned by year, subject, topic and grade; every question cites the syllabus it came from, banks for reuse, and a published paper writes a real exam into the timetable and gradebook
+- Model Context Protocol: connect external MCP servers for extra tools, and expose this app's own tools to Claude Desktop, Claude Code or any MCP client
 - PDF report card builder from Student Management
 - global school branding set by an admin under **Settings** (name, tagline, address, logo, theme colour, contacts) applied to every report card, receipt, statement, ID card and the app header
 - student photos stored on the record and printed on ID cards and report cards
