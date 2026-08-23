@@ -304,10 +304,19 @@ export const salvageQuestionsFromText = (text) => {
     // first numbered item and is not a question.
     if (!NUMBERED.test(block)) continue;
 
-    const cleaned = block
+    const withoutNumber = block
       .replace(NUMBERED, '')
       .replace(/\*\*/g, '')
       .trim();
+    if (!withoutNumber) continue;
+
+    // A question and its answer, options and mark scheme sit on consecutive lines; a blank line
+    // after them marks the model moving on ("Let me know if you want these adapted..."). Split
+    // there so closing prose is not glued onto the last question's stem — it is kept as a note
+    // rather than dropped.
+    const [core, ...trailing] = withoutNumber.split(/\n\s*\n/);
+    const cleaned = core.trim();
+    const trailingNote = trailing.join('\n\n').trim();
     if (!cleaned) continue;
 
     const lines = cleaned.split(/\n/).map((line) => line.trim()).filter(Boolean);
@@ -351,6 +360,8 @@ export const salvageQuestionsFromText = (text) => {
           marks: marks ? Number(marks[1]) : 1,
         };
       }),
+      // Kept so nothing the model wrote is lost; it surfaces as a review note on the question.
+      reviewNotes: trailingNote,
       citationIndexes: [],
     });
   }
