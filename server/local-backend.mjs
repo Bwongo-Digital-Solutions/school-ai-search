@@ -13,6 +13,7 @@ import { createSubscriptionCharge } from './services/payment-gateway.mjs';
 import { isPaymentWebhook, isWebhookSignatureValid } from './security/webhooks.mjs';
 import { renderActivationEmail, sendEmail } from './services/email.mjs';
 import {
+  DESIGNATIONS,
   designationsForRole,
   normaliseProfile,
   profileLabel,
@@ -567,6 +568,18 @@ const TABLES = {
     columns: [
       'id', 'student_id', 'direction', 'authorised_by', 'reason', 'recorded_by', 'recorded_at',
       'decision', 'permission_id', 'destination', 'note',
+    ],
+  },
+  exam_clearances: {
+    columns: [
+      'id', 'student_id', 'exam_id', 'status', 'note', 'granted_by', 'granted_by_email',
+      'granted_at', 'valid_until', 'revoked_at', 'revoked_by',
+    ],
+  },
+  exam_admissions: {
+    columns: [
+      'id', 'student_id', 'exam_id', 'clearance_id', 'decision', 'note',
+      'recorded_by', 'recorded_at',
     ],
   },
   gate_permissions: {
@@ -1304,6 +1317,10 @@ const todayIso = () => new Date().toISOString().slice(0, 10);
 
 const MEALS = ['breakfast', 'lunch', 'supper'];
 
+const ATTENDANCE_STATUSES = ['present', 'absent', 'late', 'excused'];
+
+const trimmedText = (value) => String(value ?? '').trim();
+
 const findStudentByCode = async (database, rawCode) => {
   const code = parseStudentCode(rawCode);
   if (!code) return null;
@@ -1436,18 +1453,59 @@ const handleStudentCardFunction = async (database, body = {}) => {
   }
 
   if (wants('exam_clearance')) {
-    // A student sits their exams once the fees are settled; with nothing invoiced there is
-    // nothing to clear, so an unbilled student is not held back at the exam room door.
-    const cleared = balance <= 0;
+    // Two different things share this section. The fees position is what the school knows
+    // automatically; the clearance is what a member of staff actually decided. The invigilator
+    // needs the second — a bursar may clear a student the ledger would still hold back.
+    const feesSettled = balance <= 0;
+    const [clearance, lastAdmission] = await Promise.all([
+      activeClearanceFor(database, student.id),
+      database.query(
+        'SELECT * FROM exam_admissions WHERE student_id = $1 ORDER BY recorded_at DESC LIMIT 1',
+        [student.id],
+      ).then((rows) => rows.rows[0] || null),
+    ]);
+
     card.exam_clearance = {
-      cleared,
+      cleared: Boolean(clearance),
+      clearance,
+      last_admission: lastAdmission,
+      fees_settled: feesSettled,
       balance_due: balance,
       currency: invoiceRows[0]?.currency || 'UGX',
-      reason: cleared
-        ? invoiceRows.length === 0
-          ? 'No fees invoiced'
-          : 'Fees cleared'
-        : 'Outstanding fees balance',
+      reason: clearance
+        ? `Cleared by ${clearance.granted_by || 'staff'}`
+        : feesSettled
+          ? invoiceRows.length === 0
+            ? 'No fees invoiced, but no clearance granted'
+            : 'Fees cleared, but no clearance granted'
+          : 'Outstanding fees balance and no clearance granted',
+    };
+  }
+
+  if (wants('exam_clearance_grant')) {
+    const rows = await database.query(
+      'SELECT * FROM exam_clearances WHERE student_id = $1 ORDER BY granted_at DESC LIMIT 10',
+      [student.id],
+    );
+    card.exam_clearance_grant = {
+      active: rows.rows.find((row) => row.status === 'active') || null,
+      history: rows.rows,
+      fees_settled: balance <= 0,
+      balance_due: balance,
+      currency: invoiceRows[0]?.currency || 'UGX',
+    };
+  }
+
+  if (wants('roll_call')) {
+    const today = todayIso();
+    const mark = await database.query(
+      'SELECT status, reason, marked_by, created_at FROM attendance_records WHERE student_id = $1 AND attendance_date = $2 LIMIT 1',
+      [student.id, today],
+    );
+    card.roll_call = {
+      date: today,
+      marked: mark.rows[0] || null,
+      class: { grade_level: student.grade_level, class_section: student.class_section },
     };
   }
 
@@ -1530,6 +1588,430 @@ const handleStudentCardFunction = async (database, body = {}) => {
 };
 
 /** Records a movement through the gate. Only the askari's profile grants this. */
+/* ── staff messages and events ─────────────────────────────────────── */
+
+const MESSAGE_AUDIENCES = ['user', 'role', 'designation', 'all'];
+const MESSAGE_PRIORITIES = ['normal', 'high'];
+
+const findUserByEmail = async (database, email) => {
+  const clean = String(email || '').trim().toLowerCase();
+  if (!clean) return null;
+  const rows = await database.query(
+    'SELECT id, auth_email, display_name, role, designation FROM users WHERE auth_email = $1 LIMIT 1',
+    [clean],
+  );
+  return rows.rows[0] || null;
+};
+
+/**
+ * The clause that decides whether a message is addressed to one person. A message reaches them
+ * when it names them, names a group they belong to, or names everybody — and never when they
+ * sent it themselves, because a broadcast should not ring its author's bell.
+ */
+const audienceClause = (user, startIndex) => ({
+  sql: `(
+      (m.audience_kind = 'all')
+      OR (m.audience_kind = 'role' AND m.audience_value = $${startIndex})
+      OR (m.audience_kind = 'designation' AND m.audience_value = $${startIndex + 1})
+      OR (m.audience_kind = 'user' AND m.recipient_user_id = $${startIndex + 2})
+    )
+    AND (m.sender_user_id IS NULL OR m.sender_user_id <> $${startIndex + 2})`,
+  values: [user.role, user.designation || '\u0000', user.id],
+});
+
+const listInbox = async (database, user, { limit = 50 } = {}) => {
+  const where = audienceClause(user, 1);
+  const rows = await database.query(
+    `
+      SELECT m.*, r.read_at AS reader_read_at
+      FROM internal_messages m
+      LEFT JOIN internal_message_reads r ON r.message_id = m.id AND r.user_id = $4
+      WHERE ${where.sql}
+      ORDER BY m.created_at DESC
+      LIMIT ${Math.min(Number(limit) || 50, 200)}
+    `,
+    [...where.values, user.id],
+  );
+
+  const messages = rows.rows.map((row) => ({
+    id: row.id,
+    subject: row.subject,
+    body: row.body,
+    category: row.category,
+    priority: row.priority,
+    sender_name: row.sender_name,
+    audience_kind: row.audience_kind,
+    audience_value: row.audience_value,
+    student_id: row.student_id,
+    created_at: row.created_at,
+    read: Boolean(row.reader_read_at),
+  }));
+
+  return { messages, unread: messages.filter((m) => !m.read).length };
+};
+
+/**
+ * Writes a message into the staff feed. Used both by staff sending to each other and by the
+ * system reporting an event, which is why the sender is optional.
+ */
+const postStaffMessage = async (database, {
+  senderUserId = null, senderName = '', recipientUserId = null,
+  audienceKind = 'all', audienceValue = '', subject, body,
+  priority = 'normal', category = 'message', studentId = null,
+}) => {
+  const inserted = await database.query(
+    `
+      INSERT INTO internal_messages
+        (id, sender_user_id, sender_name, recipient_user_id, student_id, subject, body,
+         audience_kind, audience_value, priority, category)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      RETURNING *
+    `,
+    [
+      randomUUID(), senderUserId, senderName, recipientUserId, studentId,
+      subject, body, audienceKind, audienceValue, priority, category,
+    ],
+  );
+  return inserted.rows[0];
+};
+
+/** Fire-and-forget event notice; a failure here must never break the action that caused it. */
+const notifyStaff = async (database, payload) => {
+  try {
+    await postStaffMessage(database, { ...payload, category: 'event' });
+  } catch (error) {
+    console.warn('Could not record a staff notification:', error instanceof Error ? error.message : error);
+  }
+};
+
+const handleMessagesFunction = async (database, body = {}) => {
+  const action = body.action || 'inbox';
+  const me = await findUserByEmail(database, body.actorEmail);
+  if (!me) return { error: 'Unknown staff account' };
+
+  if (action === 'inbox') {
+    return listInbox(database, me, { limit: body.limit });
+  }
+
+  if (action === 'staff') {
+    // The recipient picker: who can be written to, and which groups exist.
+    const rows = await database.query(
+      `
+        SELECT id, auth_email, display_name, role, designation
+        FROM users
+        WHERE approval_status = 'approved' AND id <> $1
+        ORDER BY display_name
+      `,
+      [me.id],
+    );
+    const groups = await database.query(
+      `
+        SELECT role, designation, COUNT(*)::int AS members
+        FROM users WHERE approval_status = 'approved'
+        GROUP BY role, designation
+      `,
+    );
+    return { staff: rows.rows, groups: groups.rows };
+  }
+
+  if (action === 'send') {
+    const subject = trimmedText(body.subject);
+    const text = trimmedText(body.body);
+    if (!subject) return { error: 'A subject is required' };
+    if (!text) return { error: 'A message is required' };
+
+    const audienceKind = MESSAGE_AUDIENCES.includes(body.audienceKind) ? body.audienceKind : null;
+    if (!audienceKind) return { error: `Audience must be one of ${MESSAGE_AUDIENCES.join(', ')}` };
+
+    let recipientUserId = null;
+    let audienceValue = trimmedText(body.audienceValue);
+
+    if (audienceKind === 'user') {
+      const recipient = await findUserByEmail(database, body.recipientEmail);
+      if (!recipient) return { error: 'No staff account with that email' };
+      recipientUserId = recipient.id;
+      audienceValue = '';
+    } else if (audienceKind === 'role') {
+      if (!['admin', 'teacher', 'support_staff'].includes(audienceValue)) {
+        return { error: 'Unknown staff role' };
+      }
+    } else if (audienceKind === 'designation') {
+      if (!DESIGNATIONS.includes(audienceValue)) return { error: 'Unknown staff designation' };
+    } else {
+      audienceValue = '';
+    }
+
+    const message = await postStaffMessage(database, {
+      senderUserId: me.id,
+      senderName: me.display_name,
+      recipientUserId,
+      audienceKind,
+      audienceValue,
+      subject,
+      body: text,
+      priority: MESSAGE_PRIORITIES.includes(body.priority) ? body.priority : 'normal',
+      studentId: body.studentId || null,
+    });
+    return { message };
+  }
+
+  if (action === 'read' || action === 'read_all') {
+    const ids = action === 'read'
+      ? [trimmedText(body.messageId)].filter(Boolean)
+      : (await listInbox(database, me)).messages.filter((m) => !m.read).map((m) => m.id);
+    if (action === 'read' && ids.length === 0) return { error: 'A message id is required' };
+
+    for (const id of ids) {
+      const existing = await database.query(
+        'SELECT id FROM internal_message_reads WHERE message_id = $1 AND user_id = $2 LIMIT 1',
+        [id, me.id],
+      );
+      if (!existing.rows[0]) {
+        await database.query(
+          'INSERT INTO internal_message_reads (id, message_id, user_id) VALUES ($1, $2, $3)',
+          [randomUUID(), id, me.id],
+        );
+      }
+    }
+    return listInbox(database, me);
+  }
+
+  return { error: `Unsupported action: ${action}` };
+};
+
+/**
+ * Roll call. The register is the class list for a day with each student's mark against it, and
+ * marking is an upsert: calling the register and scanning cards are two ways of doing the same
+ * thing, and a student scanned after being marked absent should end up present, not rejected by
+ * the unique index.
+ */
+const handleRollCallFunction = async (database, body = {}) => {
+  const action = body.action || 'register';
+  const date = body.date || todayIso();
+
+  if (action === 'classes') {
+    const rows = await database.query(
+      `
+        SELECT grade_level, class_section, COUNT(*)::int AS students
+        FROM students
+        WHERE status = 'active'
+        GROUP BY grade_level, class_section
+        ORDER BY grade_level, class_section
+      `,
+    );
+    return { classes: rows.rows };
+  }
+
+  if (action === 'register') {
+    const gradeLevel = body.gradeLevel === undefined || body.gradeLevel === null || body.gradeLevel === ''
+      ? null
+      : Number(body.gradeLevel);
+    const section = trimmedText(body.classSection);
+    if (gradeLevel === null || Number.isNaN(gradeLevel) || !section) {
+      return { error: 'A grade level and class section are required' };
+    }
+
+    const rows = await database.query(
+      `
+        SELECT s.id, s.student_id, s.first_name, s.last_name,
+               a.status, a.reason, a.marked_by, a.created_at AS marked_at
+        FROM students s
+        LEFT JOIN attendance_records a
+          ON a.student_id = s.id AND a.attendance_date = $3
+        WHERE s.grade_level = $1 AND s.class_section = $2 AND s.status = 'active'
+        ORDER BY s.last_name, s.first_name
+      `,
+      [gradeLevel, section, date],
+    );
+
+    const students = rows.rows.map((row) => ({
+      id: row.id,
+      student_id: row.student_id,
+      full_name: `${row.first_name} ${row.last_name}`,
+      status: row.status || null,
+      reason: row.reason || '',
+      marked_by: row.marked_by || '',
+      marked_at: row.marked_at || null,
+    }));
+
+    const tally = (name) => students.filter((student) => student.status === name).length;
+    return {
+      date,
+      class: { grade_level: gradeLevel, class_section: section },
+      students,
+      counts: {
+        roll: students.length,
+        present: tally('present'),
+        absent: tally('absent'),
+        late: tally('late'),
+        excused: tally('excused'),
+        unmarked: students.filter((student) => !student.status).length,
+      },
+    };
+  }
+
+  if (action === 'mark') {
+    const student = await findStudentByCode(database, body.code);
+    if (!student) return { error: 'No student matches that ID' };
+
+    const status = ATTENDANCE_STATUSES.includes(body.status) ? body.status : null;
+    if (!status) return { error: `Status must be one of ${ATTENDANCE_STATUSES.join(', ')}` };
+
+    const existing = await database.query(
+      'SELECT id FROM attendance_records WHERE student_id = $1 AND attendance_date = $2 LIMIT 1',
+      [student.id, date],
+    );
+
+    const row = existing.rows[0]
+      ? await database.query(
+          `
+            UPDATE attendance_records
+            SET status = $2, reason = $3, marked_by = $4
+            WHERE id = $1
+            RETURNING *
+          `,
+          [existing.rows[0].id, status, trimmedText(body.reason), trimmedText(body.markedBy)],
+        )
+      : await database.query(
+          `
+            INSERT INTO attendance_records (id, student_id, attendance_date, status, reason, marked_by)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING *
+          `,
+          [randomUUID(), student.id, date, status, trimmedText(body.reason), trimmedText(body.markedBy)],
+        );
+
+    return {
+      record: row.rows[0],
+      student: { id: student.id, student_id: student.student_id,
+        full_name: `${student.first_name} ${student.last_name}` },
+      updated: Boolean(existing.rows[0]),
+    };
+  }
+
+  return { error: `Unsupported action: ${action}` };
+};
+
+/** The clearance an invigilator checks at the exam room door, and their verdict on it. */
+const handleExamClearanceFunction = async (database, body = {}) => {
+  const action = body.action || 'status';
+
+  if (action === 'grant') {
+    const student = await findStudentByCode(database, body.code);
+    if (!student) return { error: 'No student matches that ID' };
+
+    const grantedBy = trimmedText(body.grantedBy);
+    if (!grantedBy) return { error: 'The granting staff member is required' };
+
+    // One active clearance at a time: re-granting supersedes rather than stacking.
+    await database.query(
+      `
+        UPDATE exam_clearances SET status = 'revoked', revoked_at = NOW(), revoked_by = $2
+        WHERE student_id = $1 AND status = 'active'
+      `,
+      [student.id, grantedBy],
+    );
+
+    const inserted = await database.query(
+      `
+        INSERT INTO exam_clearances
+          (id, student_id, exam_id, note, granted_by, granted_by_email, valid_until)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING *
+      `,
+      [
+        randomUUID(), student.id, body.examId || null, trimmedText(body.note),
+        grantedBy, trimmedText(body.grantedByEmail), body.validUntil || null,
+      ],
+    );
+    return { clearance: inserted.rows[0] };
+  }
+
+  if (action === 'revoke') {
+    const id = trimmedText(body.clearanceId);
+    if (!id) return { error: 'A clearance id is required' };
+    const updated = await database.query(
+      `
+        UPDATE exam_clearances
+        SET status = 'revoked', revoked_at = NOW(), revoked_by = $2
+        WHERE id = $1 AND status = 'active'
+        RETURNING *
+      `,
+      [id, trimmedText(body.by)],
+    );
+    if (!updated.rows[0]) return { error: 'No active clearance with that id' };
+    return { clearance: updated.rows[0] };
+  }
+
+  if (action === 'admit') {
+    const student = await findStudentByCode(database, body.code);
+    if (!student) return { error: 'No student matches that ID' };
+
+    const decision = body.decision === 'rejected' ? 'rejected' : 'approved';
+    const note = trimmedText(body.note);
+    if (decision === 'rejected' && !note) {
+      return { error: 'A reason is required when turning a student away' };
+    }
+
+    const clearance = await activeClearanceFor(database, student.id);
+    const inserted = await database.query(
+      `
+        INSERT INTO exam_admissions
+          (id, student_id, exam_id, clearance_id, decision, note, recorded_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING *
+      `,
+      [
+        randomUUID(), student.id, body.examId || null, clearance ? clearance.id : null,
+        decision, note, trimmedText(body.recordedBy),
+      ],
+    );
+    if (decision === 'rejected') {
+      await notifyStaff(database, {
+        audienceKind: 'role', audienceValue: 'admin', priority: 'high', studentId: student.id,
+        subject: `${student.first_name} ${student.last_name} turned away from an exam`,
+        body: `${student.first_name} ${student.last_name} (${student.student_id}) was not admitted`
+          + `${note ? `: ${note}` : '.'}`,
+      });
+    }
+
+    return { admission: inserted.rows[0], clearance };
+  }
+
+  if (action === 'list') {
+    const student = await findStudentByCode(database, body.code);
+    if (!student) return { error: 'No student matches that ID' };
+    const [clearances, admissions] = await Promise.all([
+      database.query(
+        'SELECT * FROM exam_clearances WHERE student_id = $1 ORDER BY granted_at DESC LIMIT 10',
+        [student.id],
+      ),
+      database.query(
+        'SELECT * FROM exam_admissions WHERE student_id = $1 ORDER BY recorded_at DESC LIMIT 10',
+        [student.id],
+      ),
+    ]);
+    return { clearances: clearances.rows, admissions: admissions.rows };
+  }
+
+  return { error: `Unsupported action: ${action}` };
+};
+
+/** The clearance still good to present at the exam room door, or null. */
+const activeClearanceFor = async (database, studentId) => {
+  const rows = await database.query(
+    `
+      SELECT * FROM exam_clearances
+      WHERE student_id = $1 AND status = 'active'
+        AND (valid_until IS NULL OR valid_until >= NOW())
+      ORDER BY granted_at DESC
+      LIMIT 1
+    `,
+    [studentId],
+  );
+  return rows.rows[0] || null;
+};
+
 /** The permission slip a teacher, matron or admin issues before a student may leave. */
 const handleGatePermissionFunction = async (database, body = {}) => {
   const action = body.action || 'grant';
@@ -1564,6 +2046,13 @@ const handleGatePermissionFunction = async (database, body = {}) => {
         body.expectedReturn || null,
       ],
     );
+
+    await notifyStaff(database, {
+      audienceKind: 'designation', audienceValue: 'askari', studentId: student.id,
+      subject: `Gate pass for ${student.first_name} ${student.last_name}`,
+      body: `${grantedBy} allowed ${student.first_name} ${student.last_name} (${student.student_id}) `
+        + `to travel to ${destination}. Reason: ${reason}.`,
+    });
 
     return { permission: inserted.rows[0] };
   }
@@ -1682,6 +2171,16 @@ const handleGatePassFunction = async (database, body = {}) => {
         [permission.id, String(body.recordedBy || '').trim(), note],
       );
     }
+  }
+
+  const studentName = `${student.first_name} ${student.last_name}`;
+  if (decision === 'declined') {
+    await notifyStaff(database, {
+      audienceKind: 'role', audienceValue: 'admin', priority: 'high', studentId: student.id,
+      subject: `${studentName} turned back at the gate`,
+      body: `${studentName} (${student.student_id}) was refused exit${
+        note ? `: ${note}` : '.'}`,
+    });
   }
 
   const onPremises = decision === 'declined' ? true : direction === 'in';
@@ -2630,6 +3129,27 @@ export const createAppRuntime = async ({
         const data = await handleStudentCardFunction(database, body);
         return data?.error
           ? { type: 'json', status: 404, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/messages') {
+        const data = await handleMessagesFunction(database, body);
+        return data?.error
+          ? { type: 'json', status: 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/roll-call') {
+        const data = await handleRollCallFunction(database, body);
+        return data?.error
+          ? { type: 'json', status: 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/exam-clearance') {
+        const data = await handleExamClearanceFunction(database, body);
+        return data?.error
+          ? { type: 'json', status: 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
       }
 

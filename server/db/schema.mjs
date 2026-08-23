@@ -652,6 +652,31 @@ CREATE TABLE IF NOT EXISTS internal_messages (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Who a message is for. It was one named recipient; a staff room also needs "every teacher",
+-- "the gate" and "everybody", so the audience is a kind and a value: 'user' with the
+-- recipient_user_id above, 'role' or 'designation' with the group named in audience_value, or
+-- 'all'. Existing rows are direct messages, which is what the defaults say.
+ALTER TABLE internal_messages ADD COLUMN IF NOT EXISTS audience_kind TEXT NOT NULL DEFAULT 'user';
+ALTER TABLE internal_messages DROP CONSTRAINT IF EXISTS internal_messages_audience_check;
+ALTER TABLE internal_messages ADD CONSTRAINT internal_messages_audience_check
+  CHECK (audience_kind IN ('user', 'role', 'designation', 'all'));
+ALTER TABLE internal_messages ADD COLUMN IF NOT EXISTS audience_value TEXT NOT NULL DEFAULT '';
+-- Denormalised so a message still says who sent it after the account is deleted.
+ALTER TABLE internal_messages ADD COLUMN IF NOT EXISTS sender_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE internal_messages ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'normal';
+-- 'message' is staff writing to each other; 'event' is the system reporting something that
+-- happened. They share a feed because the bell is one bell.
+ALTER TABLE internal_messages ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'message';
+
+-- Read state per person, because one message now reaches many. The row on
+-- internal_messages could only ever describe a single reader.
+CREATE TABLE IF NOT EXISTS internal_message_reads (
+  id TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL REFERENCES internal_messages(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  read_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS library_books (
   id TEXT PRIMARY KEY,
   isbn TEXT,
@@ -755,6 +780,36 @@ ALTER TABLE gate_passes ADD COLUMN IF NOT EXISTS permission_id TEXT
   REFERENCES gate_permissions(id) ON DELETE SET NULL;
 ALTER TABLE gate_passes ADD COLUMN IF NOT EXISTS destination TEXT NOT NULL DEFAULT '';
 ALTER TABLE gate_passes ADD COLUMN IF NOT EXISTS note TEXT NOT NULL DEFAULT '';
+
+-- Permission to sit an examination, granted by the bursar or an administrator once the
+-- student's obligations are settled. The invigilator does not grant clearance, they check
+-- one: they scan at the exam room door and admit or turn the student away.
+CREATE TABLE IF NOT EXISTS exam_clearances (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  exam_id TEXT REFERENCES exams(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
+  note TEXT NOT NULL DEFAULT '',
+  granted_by TEXT NOT NULL DEFAULT '',
+  granted_by_email TEXT NOT NULL DEFAULT '',
+  granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  valid_until TIMESTAMPTZ,
+  revoked_at TIMESTAMPTZ,
+  revoked_by TEXT NOT NULL DEFAULT ''
+);
+
+-- The invigilator's verdict at the exam room door. A rejection is recorded rather than
+-- dropped, so a student turned away can be accounted for afterwards.
+CREATE TABLE IF NOT EXISTS exam_admissions (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  exam_id TEXT REFERENCES exams(id) ON DELETE SET NULL,
+  clearance_id TEXT REFERENCES exam_clearances(id) ON DELETE SET NULL,
+  decision TEXT NOT NULL CHECK (decision IN ('approved', 'rejected')),
+  note TEXT NOT NULL DEFAULT '',
+  recorded_by TEXT NOT NULL DEFAULT '',
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 -- One row per meal a student has actually been served, written when the cook scans an ID
 -- card at the serving point. The absence of a row is what "has not eaten" means, so the
@@ -883,6 +938,7 @@ export const initializeDatabase = async (database, { httpClient = fetch } = {}) 
   await ensureStudentsSeeded(database);
   await ensureSchoolSettingsSeeded(database);
   await ensureAttendanceUniqueness(database);
+  await ensureMessageReadUniqueness(database);
   await seedCurriculumCorpus(database, httpClient);
 };
 
@@ -909,6 +965,20 @@ const seedCurriculumCorpus = async (database, httpClient) => {
  * new duplicates — but that upsert needs this index to exist, so a database with duplicates cannot
  * record attendance until they are cleaned up. The warning says so.
  */
+/** One read per person per message; re-reading is a no-op rather than a duplicate row. */
+const ensureMessageReadUniqueness = async (database) => {
+  try {
+    await database.query(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_message_read_unique ON internal_message_reads(message_id, user_id)',
+    );
+  } catch (error) {
+    console.warn(
+      'Could not create the unique index on internal_message_reads:',
+      error instanceof Error ? error.message : error,
+    );
+  }
+};
+
 const ensureAttendanceUniqueness = async (database) => {
   try {
     await database.query(

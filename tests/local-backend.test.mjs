@@ -2787,7 +2787,7 @@ test('a scan card carries only the sections the staff profile grants', async () 
     assert.equal(bursar.status, 200);
     assert.equal(bursar.body.data.profile.label, 'Bursar');
     assert.deepEqual(bursar.body.data.sections,
-      ['fees', 'bio', 'class', 'dormitory', 'parents', 'gate_permission']);
+      ['fees', 'bio', 'class', 'dormitory', 'parents', 'gate_permission', 'exam_clearance_grant']);
 
     // The gate needs to know who the student is and whether they may leave — nothing else.
     const askari = await card('support_staff', 'askari');
@@ -2826,7 +2826,7 @@ test('a scan card carries only the sections the staff profile grants', async () 
   }
 });
 
-test('exam clearance follows the fees balance', async () => {
+test('the fees position and exam clearance are reported separately', async () => {
   const { runtime, cleanup } = await startTestRuntime();
   const clearance = async (code) => {
     const res = await dispatch(runtime, 'POST', '/api/functions/student-card', { code, role: 'teacher' });
@@ -2834,10 +2834,11 @@ test('exam clearance follows the fees balance', async () => {
   };
 
   try {
-    // Nothing invoiced yet, so there is nothing to clear and the student is not held back.
+    // Nothing invoiced, so the ledger has no objection — but clearance is a decision a member of
+    // staff makes, and nobody has made it, so the invigilator is not told to let the student in.
     const unbilled = await clearance('STU-2026-001');
-    assert.equal(unbilled.cleared, true);
-    assert.equal(unbilled.reason, 'No fees invoiced');
+    assert.equal(unbilled.fees_settled, true);
+    assert.equal(unbilled.cleared, false);
 
     await dispatch(runtime, 'POST', '/api/db', {
       table: 'invoices', operation: 'insert', columns: '*', single: true,
@@ -2848,18 +2849,20 @@ test('exam clearance follows the fees balance', async () => {
     });
 
     const owing = await clearance('STU-2026-001');
-    assert.equal(owing.cleared, false);
+    assert.equal(owing.fees_settled, false);
     assert.equal(owing.balance_due, 400000);
+    assert.equal(owing.cleared, false);
 
-    await dispatch(runtime, 'POST', '/api/db', {
-      table: 'invoices', operation: 'update', columns: '*', single: true,
-      filters: [{ field: 'id', operator: 'eq', value: 'inv-exam-1' }],
-      payload: { balance_due: 0, status: 'paid' },
+    // A bursar may clear a student the ledger would still hold back — a hardship case, a
+    // promise to pay — so the grant wins over the balance.
+    await dispatch(runtime, 'POST', '/api/functions/exam-clearance', {
+      action: 'grant', code: 'STU-2026-001', grantedBy: 'Bursar', note: 'Hardship case',
     });
 
-    const settled = await clearance('STU-2026-001');
-    assert.equal(settled.cleared, true);
-    assert.equal(settled.reason, 'Fees cleared');
+    const granted = await clearance('STU-2026-001');
+    assert.equal(granted.cleared, true);
+    assert.equal(granted.fees_settled, false, 'the balance is still owed and still reported');
+    assert.equal(granted.reason, 'Cleared by Bursar');
   } finally {
     await cleanup();
   }
@@ -5831,6 +5834,290 @@ test('an exit with no permission on file needs an explicit authoriser', async ()
     assert.equal(override.status, 200);
     assert.equal(override.body.data.permission, null);
     assert.equal(override.body.data.pass.authorised_by, 'Head Teacher (phoned)');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('roll call marks a register and re-marking upserts', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+
+  try {
+    const classes = await call('/api/functions/roll-call', { action: 'classes' });
+    assert.equal(classes.status, 200);
+    assert.ok(classes.body.data.classes.length > 0);
+    const { grade_level: gradeLevel, class_section: classSection } = classes.body.data.classes[0];
+
+    const needsClass = await call('/api/functions/roll-call', { action: 'register' });
+    assert.equal(needsClass.status, 400);
+
+    const register = await call('/api/functions/roll-call', {
+      action: 'register', gradeLevel, classSection,
+    });
+    assert.equal(register.status, 200);
+    const roll = register.body.data.students;
+    assert.ok(roll.length > 0);
+    // Nobody is marked until the register is called.
+    assert.equal(register.body.data.counts.unmarked, roll.length);
+    assert.equal(roll[0].status, null);
+
+    const badStatus = await call('/api/functions/roll-call', {
+      action: 'mark', code: roll[0].student_id, status: 'wandering',
+    });
+    assert.equal(badStatus.status, 400);
+
+    const marked = await call('/api/functions/roll-call', {
+      action: 'mark', code: roll[0].student_id, status: 'present', markedBy: 'Teacher',
+    });
+    assert.equal(marked.body.data.record.status, 'present');
+    assert.equal(marked.body.data.updated, false);
+
+    // Calling the register and scanning a card are two routes to the same record, so a second
+    // mark for the same day updates rather than colliding with the unique index.
+    const corrected = await call('/api/functions/roll-call', {
+      action: 'mark', code: roll[0].student_id, status: 'absent', reason: 'Sick', markedBy: 'Teacher',
+    });
+    assert.equal(corrected.status, 200);
+    assert.equal(corrected.body.data.record.status, 'absent');
+    assert.equal(corrected.body.data.updated, true);
+
+    const after = await call('/api/functions/roll-call', { action: 'register', gradeLevel, classSection });
+    assert.equal(after.body.data.counts.absent, 1);
+    assert.equal(after.body.data.counts.unmarked, roll.length - 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('an invigilator checks clearance and admits or turns a student away', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+  const invigilatorCard = async () => {
+    const res = await call('/api/functions/student-card', { code: 'STU-2026-002', role: 'teacher' });
+    return res.body.data;
+  };
+
+  try {
+    // Fees being settled is not the same as clearance: the invigilator waits on a person.
+    const before = await invigilatorCard();
+    assert.equal(before.exam_clearance.cleared, false);
+    assert.equal(before.exam_clearance.fees_settled, true);
+    assert.equal(before.sections.includes('exam_clearance_grant'), false);
+
+    const bursar = await call('/api/functions/student-card', {
+      code: 'STU-2026-002', role: 'admin', designation: 'bursar',
+    });
+    assert.equal(bursar.body.data.sections.includes('exam_clearance_grant'), true);
+
+    const noGranter = await call('/api/functions/exam-clearance', { action: 'grant', code: 'STU-2026-002' });
+    assert.equal(noGranter.status, 400);
+
+    const granted = await call('/api/functions/exam-clearance', {
+      action: 'grant', code: 'STU-2026-002', grantedBy: 'Bursar', note: 'Paid in cash',
+    });
+    assert.equal(granted.status, 200);
+
+    const cleared = await invigilatorCard();
+    assert.equal(cleared.exam_clearance.cleared, true);
+    assert.equal(cleared.exam_clearance.clearance.granted_by, 'Bursar');
+
+    const noReason = await call('/api/functions/exam-clearance', {
+      action: 'admit', code: 'STU-2026-002', decision: 'rejected',
+    });
+    assert.equal(noReason.status, 400);
+
+    const admitted = await call('/api/functions/exam-clearance', {
+      action: 'admit', code: 'STU-2026-002', decision: 'approved', recordedBy: 'Invigilator',
+    });
+    assert.equal(admitted.body.data.admission.decision, 'approved');
+    assert.equal(admitted.body.data.admission.clearance_id, granted.body.data.clearance.id);
+    assert.equal((await invigilatorCard()).exam_clearance.last_admission.decision, 'approved');
+
+    const revoked = await call('/api/functions/exam-clearance', {
+      action: 'revoke', clearanceId: granted.body.data.clearance.id, by: 'Admin',
+    });
+    assert.equal(revoked.status, 200);
+    assert.equal((await invigilatorCard()).exam_clearance.cleared, false);
+
+    // Turning a student away is recorded even when there was no clearance to check.
+    const rejected = await call('/api/functions/exam-clearance', {
+      action: 'admit', code: 'STU-2026-002', decision: 'rejected',
+      note: 'No clearance on file', recordedBy: 'Invigilator',
+    });
+    assert.equal(rejected.body.data.clearance, null);
+    assert.equal(rejected.body.data.admission.decision, 'rejected');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('re-granting exam clearance supersedes the previous one', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+
+  try {
+    await call('/api/functions/exam-clearance', {
+      action: 'grant', code: 'STU-2026-005', grantedBy: 'Bursar',
+    });
+    await call('/api/functions/exam-clearance', {
+      action: 'grant', code: 'STU-2026-005', grantedBy: 'Head Teacher',
+    });
+
+    const list = await call('/api/functions/exam-clearance', { action: 'list', code: 'STU-2026-005' });
+    const active = list.body.data.clearances.filter((row) => row.status === 'active');
+    assert.equal(active.length, 1, 'only one clearance is ever active');
+    assert.equal(active[0].granted_by, 'Head Teacher');
+  } finally {
+    await cleanup();
+  }
+});
+
+const seedStaff = async (runtime) => {
+  const make = async (email, name, role, designation) => {
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email, password: 'password123', displayName: name,
+    });
+    await runtime.database.query(
+      'UPDATE users SET role = $1, approval_status = $2 WHERE auth_email = $3',
+      [role, 'approved', email],
+    );
+    if (designation) {
+      await dispatch(runtime, 'POST', '/api/functions/auth', {
+        action: 'set_designation', email, designation,
+      });
+    }
+  };
+  await make('head@school.local', 'Head', 'admin', null);
+  await make('t1@school.local', 'Teacher One', 'teacher', null);
+  await make('t2@school.local', 'Teacher Two', 'teacher', null);
+  await make('askari@school.local', 'Askari', 'support_staff', 'askari');
+  await make('cook@school.local', 'Cook', 'support_staff', 'cook');
+};
+
+test('a staff message reaches one person, a group, or everybody', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (body) => dispatch(runtime, 'POST', '/api/functions/messages', body);
+  const unread = async (email) => (await call({ action: 'inbox', actorEmail: email })).body.data.unread;
+
+  try {
+    await seedStaff(runtime);
+
+    await call({
+      action: 'send', actorEmail: 'head@school.local', audienceKind: 'user',
+      recipientEmail: 't1@school.local', subject: 'About P5', body: 'See me at break.',
+    });
+    assert.equal(await unread('t1@school.local'), 1);
+    assert.equal(await unread('t2@school.local'), 0, 'a direct message reaches nobody else');
+
+    await call({
+      action: 'send', actorEmail: 'head@school.local', audienceKind: 'role',
+      audienceValue: 'teacher', subject: 'Staff meeting', body: 'Friday 4pm.',
+    });
+    assert.equal(await unread('t2@school.local'), 1);
+    assert.equal(await unread('askari@school.local'), 0, 'a role group stops at that role');
+
+    await call({
+      action: 'send', actorEmail: 'head@school.local', audienceKind: 'designation',
+      audienceValue: 'askari', subject: 'Gate duty', body: 'Cover the night shift.',
+    });
+    assert.equal(await unread('askari@school.local'), 1);
+    assert.equal(await unread('cook@school.local'), 0, 'a designation group stops at that job');
+
+    const before = await unread('t1@school.local');
+    await call({
+      action: 'send', actorEmail: 't1@school.local', audienceKind: 'all',
+      subject: 'Lost keys', body: 'Found a bunch of keys.',
+    });
+    assert.equal(await unread('cook@school.local'), 1);
+    // A broadcast should not ring its own author's bell.
+    assert.equal(await unread('t1@school.local'), before);
+
+    for (const bad of [
+      { audienceKind: 'all', body: 'x' },
+      { audienceKind: 'all', subject: 'x' },
+      { audienceKind: 'everyone', subject: 'x', body: 'y' },
+      { audienceKind: 'user', recipientEmail: 'nobody@school.local', subject: 'x', body: 'y' },
+    ]) {
+      const res = await call({ action: 'send', actorEmail: 'head@school.local', ...bad });
+      assert.equal(res.status, 400);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test('read state is per person and re-reading is idempotent', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (body) => dispatch(runtime, 'POST', '/api/functions/messages', body);
+
+  try {
+    await seedStaff(runtime);
+    await call({
+      action: 'send', actorEmail: 'head@school.local', audienceKind: 'all',
+      subject: 'Sports day', body: 'Saturday.',
+    });
+
+    const inbox = (await call({ action: 'inbox', actorEmail: 't1@school.local' })).body.data;
+    assert.equal(inbox.unread, 1);
+
+    const read = await call({
+      action: 'read', actorEmail: 't1@school.local', messageId: inbox.messages[0].id,
+    });
+    assert.equal(read.body.data.unread, 0);
+
+    // One row per reader per message, so opening it twice is not a second read.
+    const again = await call({
+      action: 'read', actorEmail: 't1@school.local', messageId: inbox.messages[0].id,
+    });
+    assert.equal(again.body.data.unread, 0);
+
+    // The same broadcast is still unread for everyone else.
+    const other = await call({ action: 'inbox', actorEmail: 't2@school.local' });
+    assert.equal(other.body.data.unread, 1);
+
+    const all = await call({ action: 'read_all', actorEmail: 't2@school.local' });
+    assert.equal(all.body.data.unread, 0);
+    assert.equal((await call({ action: 'inbox', actorEmail: 'cook@school.local' })).body.data.unread, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('gate and exam refusals raise an event for the office', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+  const inbox = async (email) =>
+    (await call('/api/functions/messages', { action: 'inbox', actorEmail: email })).body.data;
+
+  try {
+    await seedStaff(runtime);
+
+    await call('/api/functions/gate-pass', {
+      code: 'STU-2026-001', direction: 'out', decision: 'declined',
+      note: 'No slip', recordedBy: 'Askari',
+    });
+    const office = await inbox('head@school.local');
+    const gateEvent = office.messages.find((m) => m.category === 'event');
+    assert.ok(gateEvent, 'the office hears about a student turned back');
+    assert.equal(gateEvent.priority, 'high');
+    // The whole staff room does not need to know.
+    assert.equal((await inbox('t2@school.local')).messages.some((m) => m.category === 'event'), false);
+
+    // Granting a pass tells the gate a slip is coming before the student arrives.
+    await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-002', reason: 'Home',
+      destination: 'Jinja', grantedBy: 'Matron',
+    });
+    assert.ok((await inbox('askari@school.local')).messages
+      .some((m) => m.category === 'event' && /Gate pass for/.test(m.subject)));
+
+    await call('/api/functions/exam-clearance', {
+      action: 'admit', code: 'STU-2026-003', decision: 'rejected',
+      note: 'No clearance', recordedBy: 'Invigilator',
+    });
+    assert.ok((await inbox('head@school.local')).messages
+      .some((m) => /turned away from an exam/.test(m.subject)));
   } finally {
     await cleanup();
   }
