@@ -2786,7 +2786,8 @@ test('a scan card carries only the sections the staff profile grants', async () 
     const bursar = await card('admin', 'bursar');
     assert.equal(bursar.status, 200);
     assert.equal(bursar.body.data.profile.label, 'Bursar');
-    assert.deepEqual(bursar.body.data.sections, ['fees', 'bio', 'class', 'dormitory', 'parents']);
+    assert.deepEqual(bursar.body.data.sections,
+      ['fees', 'bio', 'class', 'dormitory', 'parents', 'gate_permission']);
 
     // The gate needs to know who the student is and whether they may leave — nothing else.
     const askari = await card('support_staff', 'askari');
@@ -2802,7 +2803,8 @@ test('a scan card carries only the sections the staff profile grants', async () 
     assert.equal(cook.body.data.meal_card.meals.length, 3);
 
     const matron = await card('support_staff', 'matron');
-    assert.deepEqual(matron.body.data.sections, ['bio', 'class', 'dormitory', 'parents']);
+    assert.deepEqual(matron.body.data.sections,
+      ['bio', 'class', 'dormitory', 'parents', 'gate_permission']);
     assert.equal('fees' in matron.body.data, false);
 
     // Support staff with no designation keep the fees-only card they had before designations.
@@ -5687,6 +5689,149 @@ test('a failed generation still returns what the model wrote, so the screen can 
   } finally {
     if (originalBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
     else process.env.OLLAMA_BASE_URL = originalBaseUrl;
+    await cleanup();
+  }
+});
+
+test('a gate permission is granted away from the gate and spent at it', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+  const askariCard = async () => {
+    const res = await call('/api/functions/student-card', {
+      code: 'STU-2026-003', role: 'support_staff', designation: 'askari',
+    });
+    return res.body.data;
+  };
+
+  try {
+    const noDestination = await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-003', reason: 'Sick',
+    });
+    assert.equal(noDestination.status, 400);
+
+    const granted = await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-003', reason: 'Going home for mid-term',
+      destination: 'Kampala', grantedBy: 'Matron', expectedReturn: '2026-08-25',
+    });
+    assert.equal(granted.status, 200);
+    assert.equal(granted.body.data.permission.status, 'active');
+
+    // The gate reads the slip: who allowed the trip, why, and where to.
+    const card = await askariCard();
+    assert.equal(card.gate_pass.permission.granted_by, 'Matron');
+    assert.equal(card.gate_pass.permission.destination, 'Kampala');
+    // ...but may not issue one. The officer at the gate is never the authoriser.
+    assert.equal(card.sections.includes('gate_permission'), false);
+
+    const approved = await call('/api/functions/gate-pass', {
+      code: 'STU-2026-003', direction: 'out', decision: 'approved', recordedBy: 'Askari',
+    });
+    assert.equal(approved.status, 200);
+    // The movement copies the slip so it stays readable once the slip is closed.
+    assert.equal(approved.body.data.pass.authorised_by, 'Matron');
+    assert.equal(approved.body.data.pass.destination, 'Kampala');
+    assert.equal(approved.body.data.on_premises, false);
+
+    // A spent slip cannot be presented to the next officer on duty.
+    const afterUse = await askariCard();
+    assert.equal(afterUse.gate_pass.permission, null);
+    assert.equal(afterUse.gate_pass.on_premises, false);
+
+    const back = await call('/api/functions/gate-pass', {
+      code: 'STU-2026-003', direction: 'in', recordedBy: 'Askari',
+    });
+    assert.equal(back.status, 200);
+    assert.equal((await askariCard()).gate_pass.on_premises, true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a declined exit is recorded and leaves the student on the premises', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+
+  try {
+    await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-004', reason: 'Trip', destination: 'Town', grantedBy: 'Teacher',
+    });
+
+    const noReason = await call('/api/functions/gate-pass', {
+      code: 'STU-2026-004', direction: 'out', decision: 'declined',
+    });
+    assert.equal(noReason.status, 400);
+
+    const declined = await call('/api/functions/gate-pass', {
+      code: 'STU-2026-004', direction: 'out', decision: 'declined',
+      note: 'No parent escort', recordedBy: 'Askari',
+    });
+    assert.equal(declined.status, 200);
+    assert.equal(declined.body.data.pass.decision, 'declined');
+    // Turned back at the gate: the student never left.
+    assert.equal(declined.body.data.on_premises, true);
+
+    const card = await dispatch(runtime, 'POST', '/api/functions/student-card', {
+      code: 'STU-2026-004', role: 'support_staff', designation: 'askari',
+    });
+    assert.equal(card.body.data.gate_pass.on_premises, true);
+    // The refused slip is closed, so it cannot be re-presented.
+    assert.equal(card.body.data.gate_pass.permission, null);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the gate log reports movements, verdicts and times', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+
+  try {
+    await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-005', reason: 'Home', destination: 'Jinja', grantedBy: 'Matron',
+    });
+    await call('/api/functions/gate-pass', { code: 'STU-2026-005', direction: 'out', recordedBy: 'Askari' });
+    await call('/api/functions/gate-pass', { code: 'STU-2026-005', direction: 'in', recordedBy: 'Askari' });
+    await call('/api/functions/gate-pass', {
+      code: 'STU-2026-006', direction: 'out', decision: 'declined',
+      note: 'No permission on file', recordedBy: 'Askari',
+    });
+
+    const log = await call('/api/functions/gate-log', { limit: 50 });
+    assert.equal(log.status, 200);
+    assert.deepEqual(log.body.data.counts, { total: 3, out: 1, in: 1, declined: 1 });
+
+    const [newest] = log.body.data.movements;
+    assert.equal(newest.decision, 'declined');
+    assert.ok(newest.full_name, 'a movement names the student');
+    assert.ok(newest.student_number, 'a movement carries the student number');
+    assert.ok(newest.recorded_at, 'a movement carries its time');
+
+    // A day with no movements reads as empty rather than failing.
+    const empty = await call('/api/functions/gate-log', { date: '1999-01-01' });
+    assert.equal(empty.body.data.movements.length, 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('an exit with no permission on file needs an explicit authoriser', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+
+  try {
+    // Nothing was granted, so the gate cannot fall back to a slip.
+    const bare = await call('/api/functions/gate-pass', { code: 'STU-2026-008', direction: 'out' });
+    assert.equal(bare.status, 400);
+
+    // An override is allowed but must name whoever authorised it, so the log stays answerable.
+    const override = await call('/api/functions/gate-pass', {
+      code: 'STU-2026-008', direction: 'out', authorisedBy: 'Head Teacher (phoned)',
+      reason: 'Family emergency', recordedBy: 'Askari',
+    });
+    assert.equal(override.status, 200);
+    assert.equal(override.body.data.permission, null);
+    assert.equal(override.body.data.pass.authorised_by, 'Head Teacher (phoned)');
+  } finally {
     await cleanup();
   }
 });

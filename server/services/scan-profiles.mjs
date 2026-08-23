@@ -23,10 +23,13 @@ export const SCAN_SECTIONS = [
   'attendance',
   'exam_clearance',
   'gate_pass',
+  'gate_permission',
   'meal_card',
 ];
 
-const ADMIN_SECTIONS = ['fees', 'bio', 'class', 'dormitory', 'parents'];
+const ADMIN_SECTIONS = [
+  'fees', 'bio', 'class', 'dormitory', 'parents', 'gate_permission',
+];
 
 /* Designations are only meaningful inside their own role; a cook is support staff and an
  * admin who keeps the books is a bursar. An unrecognised pairing falls back to the role. */
@@ -45,13 +48,16 @@ const PROFILES = {
       'bio',
       'dormitory',
       'parents',
+      'gate_permission',
     ],
   },
   support_staff: {
     // Plain support staff predate the designations and stay on fees only.
     default: ['fees'],
+    // The gate checks a permission, it never issues one — whoever mans the gate must not also
+    // be the person who authorised the exit.
     askari: ['class', 'gate_pass'],
-    matron: ['bio', 'class', 'dormitory', 'parents'],
+    matron: ['bio', 'class', 'dormitory', 'parents', 'gate_permission'],
     cook: ['class', 'meal_card'],
   },
 };

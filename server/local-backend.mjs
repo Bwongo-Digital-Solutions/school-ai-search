@@ -564,7 +564,17 @@ const TABLES = {
     columns: ['id', 'student_id', 'room_id', 'bed_number', 'start_date', 'end_date', 'status'],
   },
   gate_passes: {
-    columns: ['id', 'student_id', 'direction', 'authorised_by', 'reason', 'recorded_by', 'recorded_at'],
+    columns: [
+      'id', 'student_id', 'direction', 'authorised_by', 'reason', 'recorded_by', 'recorded_at',
+      'decision', 'permission_id', 'destination', 'note',
+    ],
+  },
+  gate_permissions: {
+    columns: [
+      'id', 'student_id', 'reason', 'destination', 'granted_by', 'granted_by_email',
+      'granted_at', 'valid_until', 'expected_return', 'status', 'closed_at', 'closed_by',
+      'decline_reason',
+    ],
   },
   meal_records: {
     columns: ['id', 'student_id', 'meal_date', 'meal', 'served_by', 'served_at'],
@@ -1369,7 +1379,7 @@ const handleStudentCardFunction = async (database, body = {}) => {
       : null,
     wants('gate_pass')
       ? database.query(
-          'SELECT id, direction, authorised_by, reason, recorded_by, recorded_at FROM gate_passes WHERE student_id = $1 ORDER BY recorded_at DESC LIMIT 5',
+          'SELECT id, direction, decision, authorised_by, reason, destination, note, recorded_by, recorded_at FROM gate_passes WHERE student_id = $1 ORDER BY recorded_at DESC LIMIT 8',
           [student.id],
         )
       : null,
@@ -1482,12 +1492,24 @@ const handleStudentCardFunction = async (database, body = {}) => {
 
   if (wants('gate_pass')) {
     const rows = passes.rows;
-    const last = rows[0] || null;
+    // Only an approved movement moves a student; a decline leaves them where they were.
+    const lastApproved = rows.find((row) => row.decision !== 'declined') || null;
     card.gate_pass = {
-      // Out on the last movement means the student is currently off the premises.
-      on_premises: !last || last.direction === 'in',
-      last_movement: last,
+      on_premises: !lastApproved || lastApproved.direction === 'in',
+      last_movement: lastApproved,
+      permission: await activePermissionFor(database, student.id),
       history: rows,
+    };
+  }
+
+  if (wants('gate_permission')) {
+    const rows = await database.query(
+      'SELECT * FROM gate_permissions WHERE student_id = $1 ORDER BY granted_at DESC LIMIT 10',
+      [student.id],
+    );
+    card.gate_permission = {
+      active: rows.rows.find((row) => row.status === 'active') || null,
+      history: rows.rows,
     };
   }
 
@@ -1508,6 +1530,93 @@ const handleStudentCardFunction = async (database, body = {}) => {
 };
 
 /** Records a movement through the gate. Only the askari's profile grants this. */
+/** The permission slip a teacher, matron or admin issues before a student may leave. */
+const handleGatePermissionFunction = async (database, body = {}) => {
+  const action = body.action || 'grant';
+
+  if (action === 'grant') {
+    const student = await findStudentByCode(database, body.code);
+    if (!student) return { error: 'No student matches that ID' };
+
+    const reason = String(body.reason || '').trim();
+    const destination = String(body.destination || '').trim();
+    if (!reason) return { error: 'A reason is required' };
+    if (!destination) return { error: 'A destination is required' };
+
+    const grantedBy = String(body.grantedBy || '').trim();
+    if (!grantedBy) return { error: 'The granting staff member is required' };
+
+    const inserted = await database.query(
+      `
+        INSERT INTO gate_permissions
+          (id, student_id, reason, destination, granted_by, granted_by_email, valid_until, expected_return)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING *
+      `,
+      [
+        randomUUID(),
+        student.id,
+        reason,
+        destination,
+        grantedBy,
+        String(body.grantedByEmail || '').trim(),
+        body.validUntil || null,
+        body.expectedReturn || null,
+      ],
+    );
+
+    return { permission: inserted.rows[0] };
+  }
+
+  if (action === 'cancel') {
+    const id = String(body.permissionId || '').trim();
+    if (!id) return { error: 'A permission id is required' };
+    const updated = await database.query(
+      `
+        UPDATE gate_permissions
+        SET status = 'cancelled', closed_at = NOW(), closed_by = $2
+        WHERE id = $1 AND status = 'active'
+        RETURNING *
+      `,
+      [id, String(body.by || '').trim()],
+    );
+    if (!updated.rows[0]) return { error: 'No active permission with that id' };
+    return { permission: updated.rows[0] };
+  }
+
+  if (action === 'list') {
+    const student = await findStudentByCode(database, body.code);
+    if (!student) return { error: 'No student matches that ID' };
+    const rows = await database.query(
+      'SELECT * FROM gate_permissions WHERE student_id = $1 ORDER BY granted_at DESC LIMIT 20',
+      [student.id],
+    );
+    return { permissions: rows.rows };
+  }
+
+  return { error: `Unsupported action: ${action}` };
+};
+
+/** The most recent permission still good for a trip out, or null. */
+const activePermissionFor = async (database, studentId) => {
+  const rows = await database.query(
+    `
+      SELECT * FROM gate_permissions
+      WHERE student_id = $1 AND status = 'active'
+        AND (valid_until IS NULL OR valid_until >= NOW())
+      ORDER BY granted_at DESC
+      LIMIT 1
+    `,
+    [studentId],
+  );
+  return rows.rows[0] || null;
+};
+
+/**
+ * The gate's verdict on a movement. A decline is recorded rather than dropped — a student turned
+ * back at the gate is precisely what a security log is for — and only approved movements move the
+ * student in or out, so a declined exit leaves them on the premises.
+ */
 const handleGatePassFunction = async (database, body = {}) => {
   const student = await findStudentByCode(database, body.code);
   if (!student) return { error: 'No student matches that ID' };
@@ -1515,26 +1624,121 @@ const handleGatePassFunction = async (database, body = {}) => {
   const direction = body.direction === 'out' ? 'out' : body.direction === 'in' ? 'in' : null;
   if (!direction) return { error: 'Direction must be "out" or "in"' };
 
-  const authorisedBy = String(body.authorisedBy || '').trim();
-  if (!authorisedBy) return { error: 'An authorising person is required' };
+  const decision = body.decision === 'declined' ? 'declined' : 'approved';
+  const note = String(body.note || '').trim();
+  if (decision === 'declined' && !note) {
+    return { error: 'A reason is required when declining' };
+  }
+
+  // An exit runs off the permission slip when there is one; the authoriser is copied from it so
+  // the movement stays readable after the permission is closed.
+  const permission = direction === 'out'
+    ? await activePermissionFor(database, student.id)
+    : null;
+
+  const authorisedBy = permission
+    ? permission.granted_by
+    : String(body.authorisedBy || '').trim();
+  if (direction === 'out' && decision === 'approved' && !authorisedBy) {
+    return { error: 'An authorising person is required' };
+  }
 
   const inserted = await database.query(
     `
-      INSERT INTO gate_passes (id, student_id, direction, authorised_by, reason, recorded_by)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      RETURNING id, direction, authorised_by, reason, recorded_by, recorded_at
+      INSERT INTO gate_passes
+        (id, student_id, direction, authorised_by, reason, recorded_by, decision, permission_id, destination, note)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      RETURNING *
     `,
     [
       randomUUID(),
       student.id,
       direction,
       authorisedBy,
-      String(body.reason || '').trim(),
+      permission ? permission.reason : String(body.reason || '').trim(),
       String(body.recordedBy || '').trim(),
+      decision,
+      permission ? permission.id : null,
+      permission ? permission.destination : String(body.destination || '').trim(),
+      note,
     ],
   );
 
-  return { pass: inserted.rows[0], on_premises: direction === 'in' };
+  // An approved exit spends the slip; a declined one closes it with the gate's reason so the
+  // student cannot simply present the same slip to the next officer on duty.
+  if (permission) {
+    if (decision === 'approved') {
+      await database.query(
+        "UPDATE gate_permissions SET status = 'used', closed_at = NOW(), closed_by = $2 WHERE id = $1",
+        [permission.id, String(body.recordedBy || '').trim()],
+      );
+    } else {
+      await database.query(
+        `
+          UPDATE gate_permissions
+          SET status = 'declined', closed_at = NOW(), closed_by = $2, decline_reason = $3
+          WHERE id = $1
+        `,
+        [permission.id, String(body.recordedBy || '').trim(), note],
+      );
+    }
+  }
+
+  const onPremises = decision === 'declined' ? true : direction === 'in';
+  return { pass: inserted.rows[0], permission, on_premises: onPremises };
+};
+
+/** The gate's own record: who moved which way, when, and whether they were let through. */
+const handleGateLogFunction = async (database, body = {}) => {
+  const limit = Math.min(Number(body.limit) || 50, 200);
+  const params = [];
+  let where = '';
+  if (body.date) {
+    params.push(body.date);
+    where = `WHERE CAST(g.recorded_at AS DATE) = $${params.length}`;
+  }
+
+  const rows = await database.query(
+    `
+      SELECT g.id, g.direction, g.decision, g.authorised_by, g.reason, g.destination,
+             g.note, g.recorded_by, g.recorded_at,
+             s.student_id AS student_number, s.first_name, s.last_name,
+             s.grade_level, s.class_section
+      FROM gate_passes g
+      JOIN students s ON s.id = g.student_id
+      ${where}
+      ORDER BY g.recorded_at DESC
+      LIMIT ${limit}
+    `,
+    params,
+  );
+
+  const movements = rows.rows.map((row) => ({
+    id: row.id,
+    direction: row.direction,
+    decision: row.decision,
+    authorised_by: row.authorised_by,
+    reason: row.reason,
+    destination: row.destination,
+    note: row.note,
+    recorded_by: row.recorded_by,
+    recorded_at: row.recorded_at,
+    student_number: row.student_number,
+    full_name: `${row.first_name} ${row.last_name}`,
+    grade_level: row.grade_level,
+    class_section: row.class_section,
+  }));
+
+  const approved = movements.filter((m) => m.decision === 'approved');
+  return {
+    movements,
+    counts: {
+      total: movements.length,
+      out: approved.filter((m) => m.direction === 'out').length,
+      in: approved.filter((m) => m.direction === 'in').length,
+      declined: movements.length - approved.length,
+    },
+  };
 };
 
 /**
@@ -2427,6 +2631,18 @@ export const createAppRuntime = async ({
         return data?.error
           ? { type: 'json', status: 404, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/gate-permission') {
+        const data = await handleGatePermissionFunction(database, body);
+        return data?.error
+          ? { type: 'json', status: 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/gate-log') {
+        const data = await handleGateLogFunction(database, body);
+        return { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/gate-pass') {
