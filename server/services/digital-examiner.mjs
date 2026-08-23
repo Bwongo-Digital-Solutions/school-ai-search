@@ -308,33 +308,49 @@ export const salvageQuestionsFromText = (text) => {
       .replace(NUMBERED, '')
       .replace(/\*\*/g, '')
       .trim();
-    if (cleaned.length < 15) continue;
+    if (!cleaned) continue;
 
     const lines = cleaned.split(/\n/).map((line) => line.trim()).filter(Boolean);
 
-    // "A. 0.5" style choices, which mark this as multiple choice and are worth keeping.
-    const optionLines = lines.filter((line) => /^[A-Ha-h][.)]\s+/.test(line));
-    const options = optionLines.map((line) => line.replace(/^[A-Ha-h][.)]\s+/, '').trim());
+    const isOption = (line) => /^[A-Ha-h][.)]\s+/.test(line);
+    // "Answer: ...", "Solution -", "Expected answer:" — however the model chose to label it.
+    const ANSWER = /^(?:answer|ans|solution|expected answer|correct answer)\s*[:\-—]\s*/i;
+    // Bullet points under a question are almost always the mark allocation.
+    const isBullet = (line) => /^[-*•]\s+/.test(line);
+
+    const options = lines.filter(isOption).map((line) => line.replace(/^[A-Ha-h][.)]\s+/, '').trim());
+    const answerLine = lines.find((line) => ANSWER.test(line));
+    const bulletLines = lines.filter(isBullet);
 
     // "[5 marks]" or "(5 marks)" is the usual way a model annotates the allocation.
     const marksMatch = cleaned.match(/[[(]\s*(\d+)\s*marks?\s*[\])]/i);
 
-    const stemLines = lines.filter((line) => !/^[A-Ha-h][.)]\s+/.test(line));
-    const stem = stemLines
+    const stem = lines
+      .filter((line) => !isOption(line) && !ANSWER.test(line) && !isBullet(line))
       .join(' ')
       .replace(/[[(]\s*\d+\s*marks?\s*[\])]/i, '')
       .trim();
-    if (!stem) continue;
+
+    // Keep the block even when the stem is empty but something else survived, rather than dropping
+    // content the model produced. Only a wholly empty block is skipped.
+    if (!stem && options.length === 0 && !answerLine) continue;
 
     questions.push({
-      stem,
+      stem: stem || cleaned,
       marks: marksMatch ? Number(marksMatch[1]) : 1,
       questionType: options.length >= 2 ? 'mcq' : 'short_answer',
       options,
-      // Deliberately blank: nothing here is grounded in a retrieved passage or reviewed, and
-      // inventing a marking scheme would be worse than leaving it for the teacher to write.
-      correctAnswer: '',
-      markingScheme: [],
+      // Captured when the model wrote one. Previously these were blanked, which threw away an
+      // answer and mark scheme that were sitting right there in the reply.
+      correctAnswer: answerLine ? answerLine.replace(ANSWER, '').trim() : '',
+      markingScheme: bulletLines.map((line) => {
+        const point = line.replace(/^[-*•]\s+/, '').trim();
+        const marks = point.match(/\((\d+)\)\s*$/);
+        return {
+          point: point.replace(/\s*\(\d+\)\s*$/, '').trim(),
+          marks: marks ? Number(marks[1]) : 1,
+        };
+      }),
       citationIndexes: [],
     });
   }
@@ -576,7 +592,10 @@ const generateQuestions = async ({ database, body, actor, httpClient }) => {
   };
 
   const saved = [];
-  for (const question of collected.slice(0, count)) {
+  // Everything the model produced is kept. `count` is what was asked for, not a ceiling on what
+  // comes back: if it wrote eight when asked for five, discarding three is throwing away work that
+  // has already been paid for and that the teacher may well want.
+  for (const question of collected) {
     const references = toStoredCitations(
       (question.citationIndexes || [])
         .map((index) => citationsByIndex.get(Number(index)))
@@ -631,7 +650,9 @@ const generateQuestions = async ({ database, body, actor, httpClient }) => {
     // Flagged so the UI can say these were read out of prose rather than returned structurally,
     // and therefore deserve a closer read before approval.
     recoveredFromProse,
-    rawReply: recoveredFromProse ? result.message : '',
+    // Always returned, not only on recovery: the reply often carries notes, a rationale or extra
+    // material around the questions, and dropping it loses context the teacher may want.
+    rawReply: result.message || '',
     citations: toStoredCitations(context.citations),
     weakTopics,
     model: { id: model.id, label: model.label, provider: model.provider, model: model.model },

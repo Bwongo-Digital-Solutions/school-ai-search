@@ -19,6 +19,8 @@ interface ParsedQuestion {
   stem: string;
   options: string[];
   marks: number | null;
+  answer: string;
+  scheme: string[];
 }
 
 const NUMBERED = /^\s*(?:\*\*)?(?:Question\s*)?(\d+)[.)：:]/i;
@@ -37,26 +39,34 @@ const parseQuestions = (text: string): ParsedQuestion[] => {
     if (!match) continue;
 
     const cleaned = block.replace(NUMBERED, '').replace(/\*\*/g, '').trim();
-    if (cleaned.length < 10) continue;
+    if (!cleaned) continue;
 
     const lines = cleaned.split(/\n/).map(line => line.trim()).filter(Boolean);
     const isOption = (line: string) => /^[A-Ha-h][.)]\s+/.test(line);
+    const ANSWER = /^(?:answer|ans|solution|expected answer|correct answer)\s*[:\-—]\s*/i;
+    const isBullet = (line: string) => /^[-*•]\s+/.test(line);
 
     const marksMatch = cleaned.match(/[[(]\s*(\d+)\s*marks?\s*[\])]/i);
+    const answerLine = lines.find(line => ANSWER.test(line));
+
+    const stem = lines
+      .filter(line => !isOption(line) && !ANSWER.test(line) && !isBullet(line))
+      .join(' ')
+      .replace(/[[(]\s*\d+\s*marks?\s*[\])]/i, '')
+      .trim();
 
     parsed.push({
       number: match[1],
-      stem: lines
-        .filter(line => !isOption(line))
-        .join(' ')
-        .replace(/[[(]\s*\d+\s*marks?\s*[\])]/i, '')
-        .trim(),
+      // Falls back to the whole block rather than dropping content that did not fit the shape.
+      stem: stem || cleaned,
       options: lines.filter(isOption).map(line => line.replace(/^[A-Ha-h][.)]\s+/, '').trim()),
       marks: marksMatch ? Number(marksMatch[1]) : null,
+      answer: answerLine ? answerLine.replace(ANSWER, '').trim() : '',
+      scheme: lines.filter(isBullet).map(line => line.replace(/^[-*•]\s+/, '').trim()),
     });
   }
 
-  return parsed.filter(question => question.stem);
+  return parsed;
 };
 
 const UnbankedReply: React.FC<{ reply: string; subject?: string }> = ({ reply, subject }) => {
@@ -86,8 +96,17 @@ const UnbankedReply: React.FC<{ reply: string; subject?: string }> = ({ reply, s
             ...question.options.map(
               (option, index) => `${String.fromCharCode(65 + index)}. ${option}`,
             ),
-            '',
+            question.options.length > 0 ? '' : '',
+            ...(question.answer ? [`**Answer:** ${question.answer}`, ''] : []),
+            ...(question.scheme.length > 0
+              ? ['**Marking scheme:**', ...question.scheme.map(point => `- ${point}`), '']
+              : []),
           ]),
+          '---',
+          '',
+          "## The model's full reply",
+          '',
+          reply,
         ]
       : [`# Model reply${subject ? ` — ${subject}` : ''}`, '', reply];
 
@@ -162,6 +181,22 @@ const UnbankedReply: React.FC<{ reply: string; subject?: string }> = ({ reply, s
                       </li>
                     ))}
                   </ol>
+                )}
+
+                {question.answer && (
+                  <p className="mt-1.5 text-xs text-emerald-700 dark:text-emerald-400">
+                    <span className="font-medium">Answer:</span> {question.answer}
+                  </p>
+                )}
+
+                {question.scheme.length > 0 && (
+                  <ul className="mt-1 space-y-0.5">
+                    {question.scheme.map((point, index) => (
+                      <li key={index} className="text-[11px] text-gray-500 dark:text-gray-400">
+                        • {point}
+                      </li>
+                    ))}
+                  </ul>
                 )}
               </div>
               {question.marks !== null && (
