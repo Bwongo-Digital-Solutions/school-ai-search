@@ -6122,3 +6122,44 @@ test('gate and exam refusals raise an event for the office', async () => {
     await cleanup();
   }
 });
+
+test('no query parameter carries a NUL byte', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    await seedStaff(runtime);
+    await dispatch(runtime, 'POST', '/api/functions/messages', {
+      action: 'send', actorEmail: 'head@school.local', audienceKind: 'designation',
+      audienceValue: 'askari', subject: 'Gate duty', body: 'Night shift.',
+    });
+
+    // pg-mem accepts a NUL inside text; Postgres rejects it outright with
+    // 'invalid byte sequence for encoding "UTF8": 0x00'. A sentinel that looks harmless under
+    // the test database can therefore take out every query against a real one, so the
+    // parameters are inspected here rather than trusted to the in-memory engine.
+    const NUL = String.fromCharCode(0);
+    const offenders = [];
+    const realQuery = runtime.database.query.bind(runtime.database);
+    runtime.database.query = (text, params) => {
+      for (const value of params || []) {
+        if (typeof value === 'string' && value.includes(NUL)) {
+          offenders.push({ text: String(text).slice(0, 80), value });
+        }
+      }
+      return realQuery(text, params);
+    };
+
+    // Staff with a designation and staff without both build the audience clause.
+    for (const email of ['askari@school.local', 'head@school.local', 't1@school.local']) {
+      const res = await dispatch(runtime, 'POST', '/api/functions/messages', {
+        action: 'inbox', actorEmail: email,
+      });
+      assert.equal(res.status, 200);
+    }
+
+    runtime.database.query = realQuery;
+    assert.deepEqual(offenders, [], 'a NUL byte reached a query parameter');
+  } finally {
+    await cleanup();
+  }
+});

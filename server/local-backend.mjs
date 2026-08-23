@@ -1616,7 +1616,11 @@ const audienceClause = (user, startIndex) => ({
       OR (m.audience_kind = 'user' AND m.recipient_user_id = $${startIndex + 2})
     )
     AND (m.sender_user_id IS NULL OR m.sender_user_id <> $${startIndex + 2})`,
-  values: [user.role, user.designation || '\u0000', user.id],
+  // A user with no designation passes NULL, and `audience_value = NULL` is never true, so
+  // they simply never match a designation-targeted message. An earlier version used a NUL
+  // byte as that sentinel; Postgres rejects NUL inside text, and pg-mem does not, so the
+  // whole inbox failed against a real database while every test passed.
+  values: [user.role, user.designation || null, user.id],
 });
 
 const listInbox = async (database, user, { limit = 50 } = {}) => {
