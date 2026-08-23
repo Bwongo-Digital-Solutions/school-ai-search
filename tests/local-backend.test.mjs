@@ -1790,15 +1790,22 @@ test('fee receipts and statements render as PDFs for admins only', async () => {
     assert.equal(statement.type, 'binary');
     assert.ok(statement.body.length > 500);
 
-    // A support-staff browser must not be able to pull a full fee statement.
-    for (const role of ['support_staff', 'teacher']) {
-      const denied = await runtime.dispatch({
-        method: 'GET',
-        pathname: `/api/fees/statements/${invoice.student_id}.pdf`,
-        searchParams: new URLSearchParams({ requesterRole: role }),
-      });
-      assert.equal(denied.status, 403);
-    }
+    // A support-staff browser must not be able to pull a full fee statement. Teachers now can:
+    // one student's history is a read a teacher fielding "has this family paid?" legitimately
+    // needs, and it is a different thing from the school-wide financial report below.
+    const asTeacher = await runtime.dispatch({
+      method: 'GET',
+      pathname: `/api/fees/statements/${invoice.student_id}.pdf`,
+      searchParams: new URLSearchParams({ requesterRole: 'teacher' }),
+    });
+    assert.equal(asTeacher.status, 200);
+
+    const denied = await runtime.dispatch({
+      method: 'GET',
+      pathname: `/api/fees/statements/${invoice.student_id}.pdf`,
+      searchParams: new URLSearchParams({ requesterRole: 'support_staff' }),
+    });
+    assert.equal(denied.status, 403);
 
     const anonymous = await runtime.dispatch({
       method: 'GET',
@@ -3631,7 +3638,9 @@ test('generation refuses the local rules engine and reports a model that never s
         count: 3,
       });
       assert.equal(noSubmission.status, 400);
-      assert.match(noSubmission.body.error, /without submitting any questions/);
+      // Prose containing no readable questions still fails — but the message now says why and the
+      // model's reply is returned, so the screen can show it instead of discarding it in a dialog.
+      assert.match(noSubmission.body.error, /did not produce anything that could be read as questions/);
       assert.equal(await countRows(runtime, 'exam_questions'), 0);
     } finally {
       await cleanup();
@@ -4222,7 +4231,7 @@ test('chat replays conversation history and persists tool steps and citations', 
   });
 });
 
-test('agent mode falls back to a direct call on a provider that cannot use tools', async () => {
+test('Ollama now runs agent mode rather than falling back to a plain call', async () => {
   const originalBaseUrl = process.env.OLLAMA_BASE_URL;
   process.env.OLLAMA_BASE_URL = 'http://ollama.test';
 
@@ -4243,8 +4252,11 @@ test('agent mode falls back to a direct call on a provider that cannot use tools
     });
 
     assert.equal(response.status, 200);
-    assert.equal(response.body.data.mode, 'direct-fallback');
-    assert.match(response.body.data.notice, /cannot call tools/);
+    // Ollama accepts a tools array on /api/chat, so it is no longer excluded from agent mode. It
+    // answers without calling one here, which ends the loop on the first turn — that is a model
+    // choice, not a capability limit, and no "cannot call tools" notice belongs on it.
+    assert.equal(response.body.data.mode, 'agent');
+    assert.equal(response.body.data.notice, undefined);
     assert.equal(response.body.data.message, 'Answered without tools.');
   } finally {
     if (originalBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
@@ -4877,6 +4889,754 @@ test('a conversation downloads as a printable PDF report carrying its sources', 
     assert.equal(empty.status, 404);
     assert.match(empty.body.error, /no messages/);
   } finally {
+    await cleanup();
+  }
+});
+
+test('a chat conversation downloads as a PDF report and emails with the same content', async () => {
+  const originalMode = process.env.EMAIL_MODE;
+  const originalKey = process.env.EMAIL_API_KEY;
+  process.env.EMAIL_MODE = 'http';
+  process.env.EMAIL_API_KEY = 'test-email-key';
+
+  let sentPayload = null;
+  const httpClient = async (url, options) => {
+    sentPayload = JSON.parse(options.body);
+    return new Response(JSON.stringify({ id: 'email_1' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const chat = (body) =>
+      dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+        requesterRole: 'teacher',
+        actorName: 'Grace Nakato',
+        modelId: 'local-rules',
+        ...body,
+      });
+
+    const opening = await chat({ message: 'Who are the top 5 students by GPA?' });
+    const conversationId = opening.body.data.conversationId;
+    await chat({ conversationId, message: 'Tell me about Emma Johnson' });
+
+    const download = await runtime.dispatch({
+      method: 'GET',
+      pathname: `/api/chat-reports/${conversationId}.pdf`,
+      searchParams: new URLSearchParams({ requesterRole: 'teacher' }),
+    });
+    assert.equal(download.status, 200);
+    assert.equal(download.headers['Content-Type'], 'application/pdf');
+    assert.equal(download.body.subarray(0, 5).toString(), '%PDF-');
+    assert.ok(download.body.length > 2000);
+
+    // The transcript carries student records, so it is gated exactly like the chat itself.
+    const refused = await runtime.dispatch({
+      method: 'GET',
+      pathname: `/api/chat-reports/${conversationId}.pdf`,
+      searchParams: new URLSearchParams({ requesterRole: 'support_staff' }),
+    });
+    assert.equal(refused.status, 403);
+
+    const sent = await dispatch(runtime, 'POST', '/api/functions/chat-report', {
+      action: 'send',
+      requesterRole: 'teacher',
+      actorName: 'Grace Nakato',
+      conversationId,
+      recipient: 'head@school.ug',
+      note: 'For the staff meeting.',
+    });
+    assert.equal(sent.status, 200);
+    assert.equal(sent.body.data.sent, true);
+    assert.equal(sent.body.data.recipient, 'head@school.ug');
+
+    // The report travels as an attachment, so the recipient needs no account to read it.
+    assert.equal(sentPayload.to, 'head@school.ug');
+    assert.equal(sentPayload.attachments.length, 1);
+    assert.match(sentPayload.attachments[0].filename, /\.pdf$/);
+    assert.ok(sentPayload.text.startsWith('For the staff meeting.'));
+
+    const emailed = Buffer.from(sentPayload.attachments[0].content, 'base64');
+    assert.equal(emailed.subarray(0, 5).toString(), '%PDF-');
+    // Byte length differs run to run (pdf-lib stamps a creation time), so compare the size band
+    // rather than the bytes — both are built by the same loader from the same messages.
+    assert.ok(Math.abs(emailed.length - download.body.length) < 200);
+
+    const badAddress = await dispatch(runtime, 'POST', '/api/functions/chat-report', {
+      action: 'send',
+      requesterRole: 'teacher',
+      conversationId,
+      recipient: 'not-an-address',
+    });
+    assert.equal(badAddress.status, 400);
+    assert.match(badAddress.body.error, /valid email address/);
+
+    for (const requesterRole of ['support_staff', undefined]) {
+      const denied = await dispatch(runtime, 'POST', '/api/functions/chat-report', {
+        action: 'send',
+        requesterRole,
+        conversationId,
+        recipient: 'head@school.ug',
+      });
+      assert.equal(denied.status, 403);
+      assert.equal(denied.body.error, 'Unauthorized');
+    }
+  } finally {
+    if (originalMode === undefined) delete process.env.EMAIL_MODE;
+    else process.env.EMAIL_MODE = originalMode;
+    if (originalKey === undefined) delete process.env.EMAIL_API_KEY;
+    else process.env.EMAIL_API_KEY = originalKey;
+    await cleanup();
+  }
+});
+
+test('sending a report says so plainly when email is not configured', async () => {
+  const original = process.env.EMAIL_MODE;
+  delete process.env.EMAIL_MODE;
+
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const opening = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+      requesterRole: 'teacher',
+      modelId: 'local-rules',
+      message: 'Summary',
+    });
+
+    const sent = await dispatch(runtime, 'POST', '/api/functions/chat-report', {
+      action: 'send',
+      requesterRole: 'teacher',
+      conversationId: opening.body.data.conversationId,
+      recipient: 'head@school.ug',
+    });
+
+    // A mock-mode deployment must not claim a delivery that never happened.
+    assert.equal(sent.status, 400);
+    assert.match(sent.body.error, /Email is not configured/);
+    assert.match(sent.body.error, /Download it instead/);
+  } finally {
+    if (original === undefined) delete process.env.EMAIL_MODE;
+    else process.env.EMAIL_MODE = original;
+    await cleanup();
+  }
+});
+
+test('a student profile in chat carries their fee position, and the statement lists every transaction', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const fees = (action, body = {}) =>
+      dispatch(runtime, 'POST', '/api/functions/fees', {
+        action,
+        requesterRole: 'admin',
+        actorEmail: 'admin@school.ug',
+        actorName: 'Admin',
+        ...body,
+      });
+
+    await fees('save_fee_structure', {
+      name: 'Term 1 Tuition',
+      academicYear: '2026/2027',
+      term: 'Term 1',
+      amount: 900000,
+      gradeLevel: 10,
+    });
+    const structure = (await fees('list_fee_structures')).body.data.structures[0];
+    await fees('bill_student', { studentId: 'student-001', feeStructureId: structure.id });
+    await fees('record_payment', { studentId: 'student-001', amount: 400000, paymentMethod: 'MTN MoMo' });
+
+    // A pending and a failed gateway attempt: money that did not move, which the ledger's running
+    // balance must ignore but the statement must still show.
+    await runtime.database.query(`
+      INSERT INTO payment_transactions (id, student_id, provider, amount, currency, external_reference, status)
+      VALUES ('tx-pending', 'student-001', 'mtn_momo', 250000, 'UGX', 'EXT-1', 'pending'),
+             ('tx-failed', 'student-001', 'airtel_money', 250000, 'UGX', 'EXT-2', 'failed')
+    `);
+
+    const ledger = (await fees('student_ledger', { studentId: 'student-001' })).body.data;
+    assert.equal(ledger.summary.balance_due, 500000, 'unsettled attempts must not reduce the balance');
+    assert.equal(ledger.transactions.length, 2);
+    assert.ok(ledger.transactions.every((transaction) => transaction.settled === false));
+
+    // The chat profile now answers "have they paid?" without a separate lookup.
+    const profile = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+      requesterRole: 'teacher',
+      modelId: 'local-rules',
+      message: 'Tell me about Emma Johnson',
+    });
+    assert.match(profile.body.data.message, /### School fees/);
+    assert.match(profile.body.data.message, /Partly paid/);
+    assert.match(profile.body.data.message, /Balance: UGX 500,000/);
+
+    // A teacher can pull the statement; support staff still cannot, and the school-wide financial
+    // report stays admin-only.
+    const asTeacher = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/fees/statements/student-001.pdf',
+      searchParams: new URLSearchParams({ requesterRole: 'teacher' }),
+    });
+    assert.equal(asTeacher.status, 200);
+    assert.equal(asTeacher.body.subarray(0, 5).toString(), '%PDF-');
+
+    for (const [role, path, expected] of [
+      ['support_staff', '/api/fees/statements/student-001.pdf', 403],
+      ['teacher', '/api/fees/report.pdf', 403],
+    ]) {
+      const response = await runtime.dispatch({
+        method: 'GET',
+        pathname: path,
+        searchParams: new URLSearchParams({ requesterRole: role }),
+      });
+      assert.equal(response.status, expected, `${role} on ${path}`);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+/** Captures what is actually sent to Meilisearch, so the role filter can be asserted at the wire. */
+const createMeiliStub = ({ hitsByIndex = {} } = {}) => {
+  const requests = [];
+
+  const httpClient = async (url, options = {}) => {
+    const body = options.body ? JSON.parse(options.body) : null;
+    requests.push({ url, method: options.method || 'GET', body });
+
+    if (url.endsWith('/multi-search')) {
+      return new Response(
+        JSON.stringify({
+          results: (body.queries || []).map((query) => ({
+            indexUid: query.indexUid,
+            hits: hitsByIndex[query.indexUid] || [],
+            estimatedTotalHits: (hitsByIndex[query.indexUid] || []).length,
+            processingTimeMs: 1,
+          })),
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+
+    if (/\/tasks\//.test(url)) {
+      return new Response(JSON.stringify({ status: 'succeeded' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    return new Response(JSON.stringify({ taskUid: requests.length }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  return { httpClient, requests };
+};
+
+const withMeili = async (run) => {
+  const originalHost = process.env.MEILISEARCH_HOST;
+  const originalKey = process.env.MEILISEARCH_API_KEY;
+  process.env.MEILISEARCH_HOST = 'http://meili.test';
+  process.env.MEILISEARCH_API_KEY = 'test-key';
+  try {
+    return await run();
+  } finally {
+    if (originalHost === undefined) delete process.env.MEILISEARCH_HOST;
+    else process.env.MEILISEARCH_HOST = originalHost;
+    if (originalKey === undefined) delete process.env.MEILISEARCH_API_KEY;
+    else process.env.MEILISEARCH_API_KEY = originalKey;
+  }
+};
+
+test('global search falls back to Postgres when Meilisearch is not configured', async () => {
+  // The default state of every existing deployment, so this path matters most.
+  const original = process.env.MEILISEARCH_HOST;
+  delete process.env.MEILISEARCH_HOST;
+
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const result = await dispatch(runtime, 'POST', '/api/functions/search', {
+      action: 'query',
+      requesterRole: 'teacher',
+      query: 'Johnson',
+    });
+
+    assert.equal(result.status, 200);
+    assert.equal(result.body.data.engine, 'postgres');
+    assert.equal(result.body.data.groups[0].index, 'students');
+    assert.match(result.body.data.groups[0].hits[0].title, /Johnson/);
+    // Said plainly rather than implying the results are as good as search gets.
+    assert.match(result.body.data.notice, /not configured/);
+
+    const status = await dispatch(runtime, 'POST', '/api/functions/search', {
+      action: 'status',
+      requesterRole: 'admin',
+    });
+    assert.equal(status.body.data.configured, false);
+    assert.equal(status.body.data.engine, 'postgres');
+  } finally {
+    if (original === undefined) delete process.env.MEILISEARCH_HOST;
+    else process.env.MEILISEARCH_HOST = original;
+    await cleanup();
+  }
+});
+
+test('search results are scoped to the requester role, enforced on the wire', async () => {
+  await withMeili(async () => {
+    const { httpClient, requests } = createMeiliStub();
+    const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+    try {
+      const query = (body) =>
+        dispatch(runtime, 'POST', '/api/functions/search', { action: 'query', query: 'osmosis', ...body });
+
+      const lastQueries = () => requests.filter((r) => r.url.endsWith('/multi-search')).at(-1).body.queries;
+
+      // A teacher must never reach the fees index — the ledger is admin-only in the database, and
+      // an index that answered here would quietly undo that.
+      await query({ requesterRole: 'teacher' });
+      const asTeacher = lastQueries();
+      assert.ok(!asTeacher.some((entry) => entry.indexUid === 'fees'), 'teacher must not query fees');
+      assert.ok(asTeacher.every((entry) => entry.filter === 'roles = teacher'));
+
+      await query({ requesterRole: 'admin' });
+      const asAdmin = lastQueries();
+      assert.ok(asAdmin.some((entry) => entry.indexUid === 'fees'), 'admin may query fees');
+      assert.ok(asAdmin.every((entry) => entry.filter === 'roles = admin'));
+
+      // Naming an index explicitly must not widen scope beyond the role.
+      await query({ requesterRole: 'teacher', indexes: ['fees', 'students'] });
+      assert.deepEqual(lastQueries().map((entry) => entry.indexUid), ['students']);
+
+      // Support staff get no search at all: their access is the fee-status endpoint.
+      for (const requesterRole of ['support_staff', undefined]) {
+        const denied = await query({ requesterRole });
+        assert.equal(denied.status, 403);
+        assert.equal(denied.body.error, 'Unauthorized');
+      }
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+test('search returns results grouped by type, and reindexing is admin-only', async () => {
+  await withMeili(async () => {
+    const { httpClient } = createMeiliStub({
+      hitsByIndex: {
+        students: [
+          {
+            id: 'student-001',
+            kind: 'student',
+            full_name: 'Emma Johnson',
+            student_id: 'STU-2026-001',
+            grade_level: 10,
+            class_section: 'A',
+            status: 'active',
+          },
+        ],
+        exam_questions: [
+          {
+            id: 'q1',
+            kind: 'exam_question',
+            stem: 'Describe how you would investigate osmosis.',
+            subject_name: 'Biology',
+            topic: 'Osmosis',
+            difficulty: 'moderate',
+            marks: 5,
+            status: 'approved',
+          },
+        ],
+      },
+    });
+
+    const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+    try {
+      const result = await dispatch(runtime, 'POST', '/api/functions/search', {
+        action: 'query',
+        requesterRole: 'teacher',
+        query: 'osmosis',
+      });
+
+      assert.equal(result.body.data.engine, 'meilisearch');
+      // Empty groups are dropped so the palette does not render six empty headings.
+      const indexes = result.body.data.groups.map((group) => group.index);
+      assert.deepEqual(indexes.sort(), ['exam_questions', 'students']);
+
+      const students = result.body.data.groups.find((group) => group.index === 'students');
+      assert.equal(students.hits[0].title, 'Emma Johnson');
+      assert.match(students.hits[0].subtitle, /STU-2026-001/);
+
+      const questions = result.body.data.groups.find((group) => group.index === 'exam_questions');
+      assert.match(questions.hits[0].title, /investigate osmosis/);
+      assert.match(questions.hits[0].subtitle, /Biology/);
+
+      const asTeacher = await dispatch(runtime, 'POST', '/api/functions/search', {
+        action: 'reindex',
+        requesterRole: 'teacher',
+      });
+      assert.equal(asTeacher.status, 400);
+      assert.match(asTeacher.body.error, /Only an administrator/);
+
+      const asAdmin = await dispatch(runtime, 'POST', '/api/functions/search', {
+        action: 'reindex',
+        requesterRole: 'admin',
+      });
+      assert.equal(asAdmin.status, 200);
+      // The seeded students and curriculum corpus should both have been indexed.
+      assert.ok(asAdmin.body.data.counts.students > 0);
+      assert.ok(asAdmin.body.data.counts.curriculum > 0);
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+test('an unreachable search server degrades to the basic search rather than failing', async () => {
+  await withMeili(async () => {
+    const httpClient = async () => {
+      throw new Error('connect ECONNREFUSED');
+    };
+
+    const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+    try {
+      const result = await dispatch(runtime, 'POST', '/api/functions/search', {
+        action: 'query',
+        requesterRole: 'teacher',
+        query: 'Johnson',
+      });
+
+      assert.equal(result.status, 200);
+      assert.equal(result.body.data.engine, 'postgres');
+      assert.match(result.body.data.groups[0].hits[0].title, /Johnson/);
+      assert.match(result.body.data.notice, /unreachable/);
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+test('the MCP server maps each token to its own role, so LibreChat sees the right tools', async () => {
+  const originalToken = process.env.MCP_SERVER_TOKEN;
+  const originalTokens = process.env.MCP_SERVER_TOKENS;
+  delete process.env.MCP_SERVER_TOKEN;
+  process.env.MCP_SERVER_TOKENS = JSON.stringify({ 'tok-admin': 'admin', 'tok-teacher': 'teacher' });
+
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const rpc = (body, headers = {}) => runtime.dispatch({ method: 'POST', pathname: '/api/mcp', body, headers });
+
+  try {
+    const listFor = async (token) => {
+      const response = await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' }, { authorization: `Bearer ${token}` });
+      assert.equal(response.status, 200);
+      return response.body.result.tools.map((tool) => tool.name);
+    };
+
+    // Both roles get the teaching tools; the registry is what decides, so this is a lookup change
+    // rather than a second gate to keep in step.
+    const teacherTools = await listFor('tok-teacher');
+    const adminTools = await listFor('tok-admin');
+    assert.ok(teacherTools.includes('search_students'));
+    assert.ok(adminTools.includes('search_students'));
+
+    // An unknown token grants nothing.
+    const unknown = await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' }, { authorization: 'Bearer nope' });
+    assert.equal(unknown.status, 401);
+
+    // The single-token form still works, for deployments configured before per-role tokens existed.
+    delete process.env.MCP_SERVER_TOKENS;
+    process.env.MCP_SERVER_TOKEN = 'legacy-token';
+    process.env.MCP_SERVER_ROLE = 'admin';
+    const legacy = await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' }, { authorization: 'Bearer legacy-token' });
+    assert.equal(legacy.status, 200);
+    assert.ok(legacy.body.result.tools.length > 0);
+  } finally {
+    if (originalToken === undefined) delete process.env.MCP_SERVER_TOKEN;
+    else process.env.MCP_SERVER_TOKEN = originalToken;
+    if (originalTokens === undefined) delete process.env.MCP_SERVER_TOKENS;
+    else process.env.MCP_SERVER_TOKENS = originalTokens;
+    delete process.env.MCP_SERVER_ROLE;
+    await cleanup();
+  }
+});
+
+test('every indexed document id is one Meilisearch will accept', async () => {
+  const { INDEXES, isValidDocumentId } = await import('../server/search/indexer.mjs');
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    // Give the fees index something to build, since that is the one that synthesises composite ids
+    // and so the one that can violate the charset. A colon here fails the whole batch with an
+    // opaque task error, which a stubbed server never surfaces.
+    const fees = (action, body = {}) =>
+      dispatch(runtime, 'POST', '/api/functions/fees', {
+        action,
+        requesterRole: 'admin',
+        actorEmail: 'admin@school.ug',
+        actorName: 'Admin',
+        ...body,
+      });
+
+    await fees('save_fee_structure', {
+      name: 'Term 1 Tuition',
+      academicYear: '2026/2027',
+      term: 'Term 1',
+      amount: 900000,
+      gradeLevel: 10,
+    });
+    const structure = (await fees('list_fee_structures')).body.data.structures[0];
+    await fees('bill_student', { studentId: 'student-001', feeStructureId: structure.id });
+    await fees('record_payment', { studentId: 'student-001', amount: 400000, paymentMethod: 'MTN MoMo' });
+
+    let checked = 0;
+    for (const [name, definition] of Object.entries(INDEXES)) {
+      const documents = await definition.build(runtime.database);
+      for (const document of documents) {
+        assert.ok(
+          isValidDocumentId(document.id),
+          `${name} produced an id Meilisearch would reject: ${document.id}`,
+        );
+        checked += 1;
+      }
+    }
+
+    assert.ok(checked > 0, 'expected documents to check');
+    // The fees index must actually have produced rows, or this test proves nothing about it.
+    assert.ok((await INDEXES.fees.build(runtime.database)).length >= 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('questions a model wrote as prose are recovered rather than reported as a failure', async () => {
+  // Exactly what a small local model does: ignores the submit tool and answers in prose. Discarding
+  // that work and showing an error is the wrong outcome — the questions are right there.
+  const httpClient = async () =>
+    new Response(
+      JSON.stringify({
+        message: {
+          content: [
+            'Sure! Below are five exam questions that cover trigonometry at S4:',
+            '',
+            '1. State the three primary trigonometric ratios for a right-angled triangle. [3 marks]',
+            '',
+            '2. A ladder leans against a wall at 65 degrees. Calculate the height it reaches. [4 marks]',
+            '',
+            '3. Which of the following is equal to sin(30)? [1 mark]',
+            'A. 0.5',
+            'B. 0.866',
+            'C. 1.0',
+            'D. 0.707',
+            '',
+            '4. Prove that sin^2(x) + cos^2(x) = 1. [5 marks]',
+          ].join('\n'),
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+
+  const originalBaseUrl = process.env.OLLAMA_BASE_URL;
+  process.env.OLLAMA_BASE_URL = 'http://ollama.test';
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const result = await dispatch(runtime, 'POST', '/api/functions/digital-examiner', {
+      action: 'generate_questions',
+      requesterRole: 'teacher',
+      actorName: 'Grace Nakato',
+      modelId: 'ollama-default',
+      subjectName: 'Mathematics',
+      gradeLevel: 11,
+      topics: ['Trigonometry'],
+      count: 5,
+    });
+
+    assert.equal(result.status, 200, 'prose must not be reported as a failure');
+    assert.equal(result.body.data.questions.length, 4);
+
+    // Flagged, because these were not grounded or structured and need a closer read.
+    assert.equal(result.body.data.recoveredFromProse, true);
+    assert.ok(result.body.data.rawReply.includes('Below are five exam questions'));
+
+    // The lead-in is not a question.
+    assert.ok(
+      !result.body.data.questions.some((question) => /Below are five/.test(question.stem)),
+      "the model's preamble must not become a question",
+    );
+
+    const [first] = result.body.data.questions;
+    assert.match(first.stem, /three primary trigonometric ratios/);
+    assert.equal(first.marks, 3);
+    assert.equal(first.status, 'draft', 'recovered questions still need review');
+
+    // Multiple-choice options survive the round trip.
+    const mcq = result.body.data.questions.find((question) => question.question_type === 'mcq');
+    assert.ok(mcq, 'the A-D question should be recognised as multiple choice');
+    assert.deepEqual(mcq.options, ['0.5', '0.866', '1.0', '0.707']);
+
+    // They are real banked rows, editable and approvable like any other.
+    const banked = await dispatch(runtime, 'POST', '/api/functions/digital-examiner', {
+      action: 'list_questions',
+      requesterRole: 'teacher',
+      status: 'draft',
+    });
+    assert.equal(banked.body.data.questions.length, 4);
+  } finally {
+    if (originalBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
+    else process.env.OLLAMA_BASE_URL = originalBaseUrl;
+    await cleanup();
+  }
+});
+
+test('Ollama is given tools, and a tool call written into the text is recovered', async () => {
+  const requests = [];
+  const httpClient = async (url, options) => {
+    const body = JSON.parse(options.body);
+    requests.push(body);
+
+    // First turn: emit the tool call as fenced JSON in the content, the way small models do.
+    if (requests.length === 1) {
+      return new Response(
+        JSON.stringify({
+          message: {
+            content:
+              'I will search the syllabus.\n```json\n' +
+              JSON.stringify({ name: 'search_curriculum', arguments: { query: 'osmosis', subject: 'Biology' } }) +
+              '\n```',
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+
+    return new Response(JSON.stringify({ message: { content: 'Osmosis is covered under Cell Biology.' } }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  const originalBaseUrl = process.env.OLLAMA_BASE_URL;
+  process.env.OLLAMA_BASE_URL = 'http://ollama.test';
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const response = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+      requesterRole: 'teacher',
+      message: 'What does the syllabus say about osmosis?',
+      modelId: 'ollama-default',
+      mode: 'agent',
+    });
+
+    assert.equal(response.status, 200);
+    // Previously Ollama was told about no tools at all and could only ever answer in prose.
+    assert.ok(requests[0].tools?.length > 0, 'Ollama must be sent the tool definitions');
+    assert.ok(requests[0].tools.some((tool) => tool.function.name === 'search_curriculum'));
+
+    // The fenced-JSON call was recovered and executed, so this ran as a real agent turn.
+    assert.equal(response.body.data.mode, 'agent');
+    assert.equal(response.body.data.steps.length, 1);
+    assert.equal(response.body.data.steps[0].tool, 'search_curriculum');
+    assert.equal(response.body.data.steps[0].isError, false);
+  } finally {
+    if (originalBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
+    else process.env.OLLAMA_BASE_URL = originalBaseUrl;
+    await cleanup();
+  }
+});
+
+test('the Ollama adapter matches the documented tool-calling wire format', async () => {
+  // Checked against https://docs.ollama.com/capabilities/tool-calling. Ollama has no tool_call_id:
+  // a result is matched to its call by `tool_name`, so omitting that leaves parallel results
+  // ambiguous — which is exactly what several `tool` messages in a row would otherwise be.
+  const chats = [];
+  let turn = 0;
+
+  const httpClient = async (url, options) => {
+    if (!url.endsWith('/api/chat')) {
+      return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    chats.push(JSON.parse(options.body));
+    turn += 1;
+
+    if (turn === 1) {
+      return new Response(
+        JSON.stringify({
+          message: {
+            content: 'Looking those up.',
+            tool_calls: [
+              { type: 'function', function: { index: 0, name: 'search_curriculum', arguments: { query: 'osmosis' } } },
+              { type: 'function', function: { index: 1, name: 'search_students', arguments: { gradeLevel: 10 } } },
+            ],
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+
+    return new Response(JSON.stringify({ message: { content: 'Both done.' } }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  const originalBaseUrl = process.env.OLLAMA_BASE_URL;
+  process.env.OLLAMA_BASE_URL = 'http://ollama.test';
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const response = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+      requesterRole: 'teacher',
+      message: 'osmosis and grade 10',
+      modelId: 'ollama-default',
+      mode: 'agent',
+    });
+    assert.equal(response.status, 200);
+
+    // Request: tools are {type:'function', function:{name, description, parameters}}.
+    const [first, followUp] = chats;
+    assert.ok(first.tools.length > 0, 'Ollama must be sent tool definitions');
+    assert.equal(first.tools[0].type, 'function');
+    assert.deepEqual(Object.keys(first.tools[0].function).sort(), ['description', 'name', 'parameters']);
+
+    // Follow-up: the assistant turn carries type + function.index, and arguments stay an object
+    // (Ollama does not use the JSON-string form OpenAI does).
+    const assistant = followUp.messages.find((message) => message.role === 'assistant' && message.tool_calls);
+    assert.ok(assistant, 'the tool-call turn must be replayed');
+    assert.equal(assistant.tool_calls.length, 2);
+    assistant.tool_calls.forEach((call, index) => {
+      assert.equal(call.type, 'function');
+      assert.equal(call.function.index, index);
+      assert.equal(typeof call.function.arguments, 'object');
+    });
+
+    // Results carry tool_name, in the same order as the calls.
+    const results = followUp.messages.filter((message) => message.role === 'tool');
+    assert.equal(results.length, 2);
+    assert.deepEqual(
+      results.map((result) => result.tool_name),
+      ['search_curriculum', 'search_students'],
+    );
+    assert.ok(results.every((result) => result.content));
+    // There is no tool_call_id in Ollama's protocol; sending one would be noise.
+    assert.ok(results.every((result) => result.tool_call_id === undefined));
+
+    assert.deepEqual(
+      response.body.data.steps.map((step) => step.tool),
+      ['search_curriculum', 'search_students'],
+    );
+  } finally {
+    if (originalBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
+    else process.env.OLLAMA_BASE_URL = originalBaseUrl;
     await cleanup();
   }
 });

@@ -40,6 +40,10 @@ import { handleFeesFunction } from './services/fees.mjs';
 import { handleCurriculumFunction } from './services/curriculum.mjs';
 import { handleDigitalExaminerFunction, loadPaper } from './services/digital-examiner.mjs';
 import { handleLessonPlannerFunction } from './services/lesson-planner.mjs';
+import { handleChatReportFunction, renderChatReport } from './services/chat-report.mjs';
+import { handleSearchFunction } from './services/search.mjs';
+import { removeFromIndex, syncTable } from './search/indexer.mjs';
+import { isSearchConfigured } from './search/meili.mjs';
 import { buildExamPaperPdf } from './reports/exam-paper.mjs';
 import { buildLessonPlanPdf } from './reports/lesson-plan.mjs';
 import { buildChatReportPdf } from './reports/chat-report.mjs';
@@ -765,7 +769,26 @@ const buildConflictClause = (config, insertColumns) => {
   ].join(' ');
 };
 
-const handleDbQuery = async (database, body) => {
+/**
+ * Refreshes the search index after a write, without making the caller wait for it.
+ *
+ * Deliberately not awaited: a search index falling behind must never fail or delay the record that
+ * triggered it. Postgres stays the system of record, and a reindex from Settings repairs anything
+ * a missed sync left stale.
+ */
+const scheduleSearchSync = (database, table, { deletedIds = null, httpClient } = {}) => {
+  if (!isSearchConfigured()) return;
+
+  const work = deletedIds
+    ? removeFromIndex(table, deletedIds, { httpClient })
+    : syncTable(database, table, { httpClient });
+
+  work.catch((error) => {
+    console.warn('Search sync failed:', error instanceof Error ? error.message : error);
+  });
+};
+
+const handleDbQuery = async (database, body, httpClient = fetch) => {
   const { table, operation, columns, filters = [], orderBy, limit, payload, single } = body || {};
   const config = requireTable(table);
   const selectedColumns = resolveColumns(columns, config.columns);
@@ -812,6 +835,7 @@ const handleDbQuery = async (database, body) => {
       insertedRows.push(...result.rows.map(formatRow));
     }
 
+    scheduleSearchSync(database, table, { httpClient });
     return single ? insertedRows[0] ?? null : insertedRows;
   }
 
@@ -844,6 +868,7 @@ const handleDbQuery = async (database, body) => {
       values,
     );
 
+    scheduleSearchSync(database, table, { httpClient });
     return single ? result.rows[0] ?? null : result.rows.map(formatRow);
   }
 
@@ -857,6 +882,12 @@ const handleDbQuery = async (database, body) => {
       `DELETE FROM "${table}"${where.clause} RETURNING ${selectedColumns.map((column) => `"${column}"`).join(', ')}`,
       where.values,
     );
+
+    // Mirrored rather than left to the next reindex: a deleted student must leave the index.
+    scheduleSearchSync(database, table, {
+      deletedIds: result.rows.map((row) => row.id).filter(Boolean),
+      httpClient,
+    });
     return single ? result.rows[0] ?? null : result.rows.map(formatRow);
   }
 
@@ -1635,6 +1666,22 @@ const handleFeeStatusFunction = async (database, body = {}) => {
 // check that actually holds, matching the guard every other service here puts ahead of its actions.
 const CHAT_ROLES = ['admin', 'teacher'];
 
+/**
+ * Per-student fee summaries for the rules engine, which is synchronous and so cannot fetch them
+ * itself. Reuses the fee-status aggregation rather than duplicating the arithmetic.
+ *
+ * Best-effort: a school with no billing data, or a database predating the fee tables, simply gets
+ * no fee section on the profile rather than a failed chat request.
+ */
+const loadFeeSummaries = async (database) => {
+  try {
+    const result = await handleFeeStatusFunction(database, {});
+    return new Map((result.students || []).map((summary) => [summary.student_id, summary]));
+  } catch {
+    return null;
+  }
+};
+
 const handleAiChatFunction = async (database, body, httpClient) => {
   if (!CHAT_ROLES.includes(body?.requesterRole)) {
     return { error: 'Unauthorized' };
@@ -1679,6 +1726,7 @@ const handleAiChatFunction = async (database, body, httpClient) => {
       },
       httpClient,
       generateLocalReply: generateAssistantReply,
+      feeSummaries: await loadFeeSummaries(database),
     });
   } catch (error) {
     reply = {
@@ -1959,38 +2007,17 @@ const handleChatReportRequest = async (database, pathname, searchParams) => {
     return { type: 'json', status: 403, body: { error: 'Unauthorized' } };
   }
 
-  const conversationId = decodeURIComponent(match[1]);
-  const { rows: conversations } = await database.query(
-    'SELECT id, title, created_at, updated_at FROM conversations WHERE id = $1',
-    [conversationId],
-  );
-  const conversation = conversations[0];
-  if (!conversation) {
+  // Built through the shared loader, so a downloaded report and an emailed one always carry the
+  // same content. (The bytes differ — pdf-lib stamps each render with a creation time.)
+  const report = await renderChatReport(database, decodeURIComponent(match[1]));
+  if (!report) {
     return { type: 'json', status: 404, body: { error: 'Conversation not found' } };
   }
-
-  const { rows: messages } = await database.query(
-    'SELECT role, content, metadata, created_at FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC',
-    [conversationId],
-  );
-
-  if (messages.length === 0) {
+  if (report.messages.length === 0) {
     return { type: 'json', status: 404, body: { error: 'This conversation has no messages to report on' } };
   }
 
-  const settings = await loadSchoolSettings(database);
-  const pdfBytes = await buildChatReportPdf({
-    school: settings,
-    themeColor: settings.theme_color,
-    conversation: formatRow(conversation),
-    messages: messages.map(formatRow),
-  });
-
-  const slug = String(conversation.title || 'ai-chat-report')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '');
-  return pdfResponse(pdfBytes, `${slug || 'ai-chat-report'}.pdf`);
+  return pdfResponse(report.pdf, report.filename);
 };
 
 /**
@@ -2078,7 +2105,12 @@ const handleFeeDocumentRequest = async (database, pathname, searchParams) => {
     return null;
   }
 
-  if (searchParams.get('requesterRole') !== 'admin') {
+  // Receipts and the school-wide financial report stay admin-only. A single student's statement is
+  // open to teaching staff too: a teacher fielding "has this family paid?" needs the history, and it
+  // is a read of one student rather than a view of the school's finances.
+  const requesterRole = searchParams.get('requesterRole');
+  const allowedRoles = statementMatch ? ['admin', 'teacher'] : ['admin'];
+  if (!allowedRoles.includes(requesterRole)) {
     return { type: 'json', status: 403, body: { error: 'Unauthorized' } };
   }
 
@@ -2173,6 +2205,11 @@ const handleFeeDocumentRequest = async (database, pathname, searchParams) => {
     student: ledger.student,
     entries,
     summary: ledger.summary,
+    // Every mobile-money and bank attempt, settled or not, listed after the balance so a parent can
+    // see a pending or failed request rather than concluding their payment vanished.
+    transactions: (ledger.transactions || []).filter(
+      (transaction) => (!from || transaction.date >= from) && (!to || transaction.date <= to),
+    ),
     asOf: to || new Date(),
   });
 
@@ -2369,7 +2406,7 @@ export const createAppRuntime = async ({
       }
 
       if (method === 'POST' && pathname === '/api/db') {
-        const data = await handleDbQuery(database, body);
+        const data = await handleDbQuery(database, body, httpClient);
         return { type: 'json', status: 200, body: { data } };
       }
 
@@ -2454,6 +2491,20 @@ export const createAppRuntime = async ({
         return result.body === null
           ? { type: 'json', status: result.status, body: {} }
           : { type: 'json', status: result.status, body: result.body };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/search') {
+        const data = await handleSearchFunction(database, body, httpClient);
+        return data?.error
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/chat-report') {
+        const data = await handleChatReportFunction(database, body, httpClient);
+        return data?.error
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/lesson-planner') {

@@ -115,6 +115,15 @@ There are two fee screens:
 - **Fees** — a read-only **School Fees Status** table (who owes what). Support staff see only this.
 - **Finance** — full fee management (administrators only).
 
+### Payment history in chat
+
+Ask the assistant about a student and their fee position now comes back with the profile — status,
+invoiced, paid, balance, next due date and last payment. Ask for the statement to get the itemised
+document.
+
+Teachers as well as administrators can open a **single student's** statement. The school-wide
+financial report stays administrator-only, and support staff still see payment status alone.
+
 ### Fee Management (admin) — the tabs
 1. **Fee Structures** — define what a cohort is charged: name, grade, day/boarding, term, year,
    amount, currency, due date. Leave the grade blank to bill all grades. A structure that has
@@ -290,7 +299,49 @@ you can:
 
 ---
 
-## 9. AI assistant & audit
+## 9. Finding things — global search
+
+Press **⌘K** (or **Ctrl+K**) anywhere in the app, or click **Search…** in the top bar. One box
+searches across:
+
+- **students** — by name, student number, email, parent name or subject;
+- **the curriculum library** — syllabus passages by topic;
+- **lesson plans** and **banked exam questions** — find the osmosis question you wrote last term;
+- **attendance**, and for administrators **fees** — invoices, receipts and payment references.
+
+Results are grouped by type; pick one to jump to it.
+
+> **You only ever see what your role allows.** A teacher's search never returns fee records, even
+> though they are indexed. Support staff have no search at all — they see fee status on their own
+> screen. This is enforced on the server, not just hidden in the page.
+
+Search is **typo-tolerant** once an administrator has connected Meilisearch — "Jonson" finds
+"Johnson". Until then ⌘K still works, but falls back to a plain student-name match and says so.
+
+**Administrators:** connect it under **Settings → Search & LibreChat**, then press **Rebuild search
+index**. Records are indexed as they change; rebuild after a bulk import or if search looks stale.
+
+---
+
+## 10. Using LibreChat with your school data
+
+If your school already runs [LibreChat](https://www.librechat.ai), it can answer questions from your
+real records — students, fees, the curriculum, the gradebook — instead of guessing.
+
+LibreChat connects *to* e-School rather than the other way round. Under **Settings → Search &
+LibreChat** you will find a configuration block to paste into your `librechat.yaml`, plus the
+address of this deployment.
+
+An administrator issues an access token for it. Tokens carry a role, so a token issued for teachers
+lets LibreChat see only what a teacher may see — it cannot reach the fee ledger. **Treat tokens like
+passwords:** anyone holding one can read whatever that role can read.
+
+> This is one-directional by design. LibreChat is a chat application that talks to AI providers; it
+> is not itself something e-School can send messages to, so it does not appear in the model picker.
+
+---
+
+## 11. AI assistant & audit
 
 **Chat** provides a natural-language student search ("top 5 by GPA", "who has attendance below
 85%"). By default it answers only from student records.
@@ -320,12 +371,27 @@ rather than taken on trust.
 Send at least one message first; there is nothing to report on before that. The plain text, JSON and
 CSV exports are still there for when you want the raw transcript.
 
+### Keeping a chat answer
+
+The **Export** button (top right) turns the current conversation into a branded PDF report carrying
+the questions, the answers, and the sources and lookups behind each one:
+
+- **Printable Report (.pdf)** — download it to file or hand over.
+- **Print Report** — straight to the printer, without leaving the conversation.
+- **Email Report…** — send it as a PDF attachment to any address, prefilled with your own. Add a
+  short note if you like. The recipient needs no account to read it.
+
+> The report contains whatever student data was discussed, so check the address before sending. If
+> your school has not set up email, the app says so rather than pretending it sent.
+
+Plain `.txt`, `.json` and `.csv` exports are still there for anyone who wants the raw text.
+
 **Audit** (admin) shows a history of sensitive actions — billing runs, payments, bursaries, standing
 overrides, account approvals, exam publishing, settings changes — each with who did it and when.
 
 ---
 
-## 10. For platform operators — onboarding schools
+## 12. For platform operators — onboarding schools
 
 e-School can run many schools from one deployment, each with its **own isolated database**, reached
 at its **own subdomain** (`your-school.eschool.app`).
@@ -353,7 +419,7 @@ keys, and (optionally) an email provider for the activation email. See
 
 ---
 
-## 11. Troubleshooting
+## 13. Troubleshooting
 
 | Symptom | Likely cause / fix |
 | --- | --- |
@@ -365,6 +431,11 @@ keys, and (optionally) an email provider for the activation email. See
 | **Admit & Bill** says no fee structure matches | Create an active fee structure for that grade/term under **Finance → Fee Structures** first. |
 | A student can't be marked twice for the same day | Expected — attendance keeps one record per day; marking again updates that day. |
 | A school's page shows *"subscription has lapsed"* | The subscription is unpaid/suspended — renew from `/signup`. |
+| A parent says they paid by MoMo but the balance is unchanged | Open their **statement** — the Gateway Transactions section at the end lists every mobile money and bank attempt, including pending and failed ones, with the reason. |
+| "Email is not configured on this deployment" when sending a report | Expected until an administrator sets `EMAIL_MODE` and `EMAIL_API_KEY`. Download or print the report instead. |
+| ⌘K search misses a student I know exists | Search may be falling back to plain matching — check **Settings → Search & LibreChat**. If Meilisearch is connected, press **Rebuild search index**. |
+| A teacher cannot find an invoice in search | Working as intended — fee records are visible to administrators only. Teachers can still open a single student's statement from their record. |
+| LibreChat shows no SchoolBot tools | Check the token in its `SCHOOLBOT_MCP_TOKEN` matches one in the app's `MCP_SERVER_TOKENS`, and that the URL in `librechat.yaml` is reachable from the LibreChat container. |
 | Report card / ID card shows the wrong school name or colours | Update **Settings**; documents read the global branding. |
 | Report cards grade on the wrong scale | Set the **school level** and **examination system** under **Settings → Branding**. Secondary schools get O-Level and A-Level automatically from each student's class. |
 | A report card shows an aggregate but no Division | Not enough subjects are recorded yet — a Division needs eight subjects at UCE, four at PLE. The card says *Provisional* until then. |

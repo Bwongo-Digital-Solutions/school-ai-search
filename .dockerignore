@@ -4,5 +4,7 @@ dist
 .gitignore
 .npm-cache
 .codex
+.env
+.env.local
 .env.production
 .env.development

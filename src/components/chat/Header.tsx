@@ -3,20 +3,26 @@ import {
   Menu, Download, Settings, HelpCircle,
   Moon, Sun, X, ChevronDown, LogOut, User, Shield, HardHat,
   MessageSquare, Users, Clock, ClipboardList, UserCog, Wallet, Landmark,
-  ClipboardCheck, GraduationCap, NotebookPen, FileText, Loader2
+  ClipboardCheck, GraduationCap, NotebookPen, FileText, Loader2,
+  Mail, Printer
 } from 'lucide-react';
-import { downloadFromUrl } from '@/lib/download';
-import { teachingDocumentUrl } from '@/lib/teaching';
+import { downloadFromUrl, printFromUrl } from '@/lib/download';
+import { callChatReport, teachingDocumentUrl } from '@/lib/teaching';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { getRoleLabel, getRoleShortLabel } from '@/lib/roles';
 import AuthModal from './AuthModal';
+import GlobalSearch from './GlobalSearch';
 
 const Header: React.FC = () => {
   const { toggleSidebar, messages, activeView, setActiveView, currentConversationId } = useChatContext();
   const { user, isAuthenticated, isAdmin, isSupportStaff, signOut } = useAuth();
   const [buildingReport, setBuildingReport] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
+  const [showSendDialog, setShowSendDialog] = useState(false);
+  const [sendTo, setSendTo] = useState('');
+  const [sendNote, setSendNote] = useState('');
+  const [sending, setSending] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   // The two teaching tools share one nav entry: the bar already carries seven buttons, and adding
@@ -86,6 +92,56 @@ const Header: React.FC = () => {
       alert(`Could not build the report: ${err instanceof Error ? err.message : 'Unexpected error'}`);
     } finally {
       setBuildingReport(false);
+    }
+  };
+
+  /** Same report, straight to the printer, without losing the conversation on screen. */
+  const handleReportPrint = async () => {
+    if (!currentConversationId) {
+      alert('Send a message first — there is no saved conversation to report on yet.');
+      setShowExportMenu(false);
+      return;
+    }
+
+    setBuildingReport(true);
+    try {
+      await printFromUrl(teachingDocumentUrl(`/api/chat-reports/${currentConversationId}.pdf`, user));
+      setShowExportMenu(false);
+    } catch (err) {
+      alert(`Could not print the report: ${err instanceof Error ? err.message : 'Unexpected error'}`);
+    } finally {
+      setBuildingReport(false);
+    }
+  };
+
+  const openSendDialog = () => {
+    if (!currentConversationId) {
+      alert('Send a message first — there is no saved conversation to report on yet.');
+      setShowExportMenu(false);
+      return;
+    }
+    // Prefilled with the signed-in user's own address: sending yourself a copy is the common case,
+    // and it means the field is never blank when someone just wants to file the report.
+    setSendTo(user?.auth_email || '');
+    setSendNote('');
+    setShowExportMenu(false);
+    setShowSendDialog(true);
+  };
+
+  const handleReportSend = async () => {
+    setSending(true);
+    try {
+      await callChatReport('send', {
+        conversationId: currentConversationId,
+        recipient: sendTo,
+        note: sendNote,
+      }, user);
+      setShowSendDialog(false);
+      alert(`Report sent to ${sendTo}.`);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Could not send the report.');
+    } finally {
+      setSending(false);
     }
   };
 
@@ -266,6 +322,8 @@ const Header: React.FC = () => {
 
         {/* Right */}
         <div className="flex items-center gap-1">
+          {isAuthenticated && <GlobalSearch />}
+
           {/* Export */}
           <div className="relative">
             <button
@@ -287,6 +345,19 @@ const Header: React.FC = () => {
                   >
                     {buildingReport ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileText className="w-3.5 h-3.5 text-indigo-500" />}
                     {buildingReport ? 'Building report…' : 'Printable Report (.pdf)'}
+                  </button>
+                  <button
+                    onClick={handleReportPrint}
+                    disabled={buildingReport}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
+                  >
+                    <Printer className="w-3.5 h-3.5 text-indigo-500" /> Print Report
+                  </button>
+                  <button
+                    onClick={openSendDialog}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                  >
+                    <Mail className="w-3.5 h-3.5 text-indigo-500" /> Email Report…
                   </button>
                   <div className="my-1 border-t border-gray-100 dark:border-gray-700" />
                   <button onClick={() => handleExport('txt')} className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">
@@ -515,6 +586,74 @@ const Header: React.FC = () => {
           </div>
         </div>
       </header>
+
+      {/* Email the report */}
+      {showSendDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-md rounded-xl bg-white dark:bg-gray-800 shadow-xl border border-gray-100 dark:border-gray-700">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 dark:border-gray-700">
+              <h3 className="text-sm font-semibold text-gray-800 dark:text-white flex items-center gap-2">
+                <Mail className="w-4 h-4 text-indigo-500" /> Email this report
+              </h3>
+              <button
+                onClick={() => setShowSendDialog(false)}
+                className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
+                aria-label="Close"
+              >
+                <X className="w-3.5 h-3.5 text-gray-400" />
+              </button>
+            </div>
+
+            <div className="px-4 py-4 space-y-3">
+              <label className="block">
+                <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Send to</span>
+                <input
+                  type="email"
+                  value={sendTo}
+                  onChange={event => setSendTo(event.target.value)}
+                  placeholder="name@school.ac.ug"
+                  className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                />
+              </label>
+
+              <label className="block">
+                <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">
+                  Message (optional)
+                </span>
+                <textarea
+                  value={sendNote}
+                  onChange={event => setSendNote(event.target.value)}
+                  rows={3}
+                  placeholder="A short note to go above the report…"
+                  className="w-full resize-none bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                />
+              </label>
+
+              <p className="text-[11px] text-gray-400">
+                The report is attached as a PDF, so the recipient does not need an account to read it. It
+                contains whatever student data was discussed — check the address before sending.
+              </p>
+            </div>
+
+            <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-100 dark:border-gray-700">
+              <button
+                onClick={() => setShowSendDialog(false)}
+                className="px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleReportSend}
+                disabled={sending || !sendTo.trim()}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 text-white text-sm font-medium hover:shadow-lg transition-all disabled:opacity-50"
+              >
+                {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
+                {sending ? 'Sending…' : 'Send report'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Auth Modal */}
       <AuthModal isOpen={showAuthModal} onClose={() => setShowAuthModal(false)} />

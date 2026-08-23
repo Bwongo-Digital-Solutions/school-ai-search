@@ -12,6 +12,7 @@
  */
 import { getPublicCurriculumFrameworks, resolveFramework, yearLabelFor } from '../services/curriculum-frameworks.mjs';
 import { retrieveCurriculum } from '../rag/retriever.mjs';
+import { studentLedger } from '../services/fees.mjs';
 
 const TEACHING_ROLES = ['admin', 'teacher'];
 
@@ -176,6 +177,48 @@ const classPerformance = {
   },
 };
 
+/* --------------------------------------------------------------------- fees tools ---------- */
+
+const studentPaymentHistory = {
+  name: 'student_payment_history',
+  description:
+    "Fetch a student's full fee history: invoices raised, payments received with their receipt " +
+    'numbers, bursaries applied, the running balance, and every mobile-money or bank attempt ' +
+    'including ones that did not complete. Use this for any question about what a family owes or ' +
+    'has paid.',
+  roles: TEACHING_ROLES,
+  input_schema: {
+    type: 'object',
+    properties: {
+      studentId: { type: 'string', description: 'The student number (e.g. "STU-001") or database id.' },
+    },
+    required: ['studentId'],
+    additionalProperties: false,
+  },
+  handler: async ({ studentId }, { database }) => {
+    // Read-only, so it is reached directly rather than through handleFeesFunction — that entry
+    // point gates every action to admins because it also performs billing. Reading one student's
+    // history is not a billing operation, and teachers are meant to see it.
+    const ledger = await studentLedger({ database, body: { studentId: String(studentId) } });
+    if (ledger.error) return ledger.error;
+
+    return asJson({
+      student: ledger.student,
+      summary: ledger.summary,
+      rating: ledger.rating,
+      entries: ledger.entries,
+      bursaries: ledger.bursaries.map((bursary) => ({
+        name: bursary.name,
+        sponsor: bursary.sponsor,
+        discount_type: bursary.discount_type,
+        discount_value: bursary.discount_value,
+        status: bursary.status,
+      })),
+      gateway_transactions: ledger.transactions,
+    });
+  },
+};
+
 /* ------------------------------------------------------------------ curriculum tools -------- */
 
 const searchCurriculum = {
@@ -332,6 +375,7 @@ const getTimetable = {
 const BUILT_IN_TOOLS = [
   searchStudents,
   getStudentProfile,
+  studentPaymentHistory,
   classPerformance,
   searchCurriculum,
   listCurriculumFrameworks,

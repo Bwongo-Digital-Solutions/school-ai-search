@@ -658,15 +658,28 @@ const recordPayment = async ({ database, body, actor }) => {
 /* Ledger and arrears                                                          */
 /* -------------------------------------------------------------------------- */
 
-const studentLedger = async ({ database, body }) => {
+/**
+ * One student's complete fee history. Exported because the chat's read-only payment-history tool
+ * needs it: handleFeesFunction below gates every action to admins because it also performs billing,
+ * but reading a single student's history is not a billing operation and teaching staff are meant to
+ * be able to do it.
+ */
+export const studentLedger = async ({ database, body }) => {
   const student = await loadStudent(database, body.studentId);
   if (!student) return { error: 'Student not found' };
 
-  const [invoices, payments, receipts, bursaries] = await Promise.all([
+  const [invoices, payments, receipts, bursaries, transactions] = await Promise.all([
     database.query('SELECT * FROM invoices WHERE student_id = $1 ORDER BY issued_at ASC', [student.id]),
     database.query('SELECT * FROM payments WHERE student_id = $1 ORDER BY paid_at ASC', [student.id]),
     database.query('SELECT * FROM receipts WHERE student_id = $1 ORDER BY issued_at ASC', [student.id]),
     database.query('SELECT * FROM fee_bursaries WHERE student_id = $1 ORDER BY created_at DESC', [student.id]),
+    // Every mobile-money and bank attempt, settled or not. These are kept apart from the running
+    // balance below: a pending or failed MoMo request moves no money, so folding it into the ledger
+    // would misstate what is owed. It is what answers "I paid by MoMo, where is it?", which is the
+    // usual reason a statement gets disputed.
+    database
+      .query('SELECT * FROM payment_transactions WHERE student_id = $1 ORDER BY created_at ASC', [student.id])
+      .catch(() => ({ rows: [] })),
   ]);
 
   const receiptByPayment = new Map(receipts.rows.map((receipt) => [receipt.payment_id, receipt]));
@@ -705,6 +718,19 @@ const studentLedger = async ({ database, body }) => {
     payments: payments.rows,
     receipts: receipts.rows,
     bursaries: bursaries.rows,
+    transactions: transactions.rows.map((row) => ({
+      date: toIsoDate(row.created_at),
+      provider: row.provider,
+      amount: toAmount(row.amount),
+      currency: row.currency,
+      status: row.status,
+      reference: row.provider_reference || row.external_reference,
+      phone_number: row.phone_number,
+      status_reason: row.status_reason,
+      // A settled attempt already appears in the ledger above as a payment; saying so stops a
+      // reader counting the same money twice.
+      settled: row.status === 'successful' || row.status === 'succeeded',
+    })),
     entries,
     summary: {
       currency: invoices.rows[0]?.currency || DEFAULT_CURRENCY,

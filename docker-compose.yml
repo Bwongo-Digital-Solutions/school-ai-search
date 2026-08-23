@@ -38,6 +38,11 @@ services:
       SCHOOL_NAME: ${SCHOOL_NAME:-eSchool}
       SCHOOL_TAGLINE: ${SCHOOL_TAGLINE:-Academic Excellence and Character}
       AI_DEFAULT_MODEL_ID: ${AI_DEFAULT_MODEL_ID:-local-rules}
+      # Unset by default: global search falls back to the basic student search until Meilisearch runs.
+      MEILISEARCH_HOST: ${MEILISEARCH_HOST:-}
+      MEILISEARCH_API_KEY: ${MEILISEARCH_API_KEY:-}
+      MCP_SERVER_TOKEN: ${MCP_SERVER_TOKEN:-}
+      MCP_SERVER_TOKENS: ${MCP_SERVER_TOKENS:-}
       AI_MODEL_CATALOG: ${AI_MODEL_CATALOG:-}
       AI_TEMPERATURE: ${AI_TEMPERATURE:-0.2}
       AI_MAX_TOKENS: ${AI_MAX_TOKENS:-900}
@@ -87,5 +92,63 @@ services:
       retries: 3
       start_period: 15s
 
+  # Optional. Behind a profile so `docker compose up` is unchanged for anyone not using search:
+  # start it with `docker compose --profile search up -d`.
+  meilisearch:
+    image: getmeili/meilisearch:v1.11
+    container_name: school-ai-search-meili
+    profiles: ["search", "librechat"]
+    restart: unless-stopped
+    environment:
+      MEILI_MASTER_KEY: ${MEILISEARCH_API_KEY:-masterKey}
+      MEILI_ENV: ${MEILI_ENV:-development}
+      MEILI_NO_ANALYTICS: "true"
+    ports:
+      - "${MEILI_PORT:-7700}:7700"
+    volumes:
+      - school_ai_search_meili_data:/meili_data
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--spider", "http://127.0.0.1:7700/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Optional. LibreChat reaches into this app over MCP for school data — see Settings →
+  # Search & LibreChat for the librechat.yaml block and a token. It brings its own MongoDB, and
+  # reuses the Meilisearch above for its conversation search.
+  librechat:
+    image: ghcr.io/danny-avila/librechat:latest
+    container_name: school-ai-search-librechat
+    profiles: ["librechat"]
+    restart: unless-stopped
+    depends_on:
+      - librechat-mongo
+      - meilisearch
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${LIBRECHAT_PORT:-3080}:3080"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3080
+      MONGO_URI: mongodb://librechat-mongo:27017/LibreChat
+      MEILI_HOST: http://meilisearch:7700
+      MEILI_MASTER_KEY: ${MEILISEARCH_API_KEY:-masterKey}
+      # The token LibreChat presents to this app's MCP server. Issue it via MCP_SERVER_TOKENS.
+      SCHOOLBOT_MCP_TOKEN: ${SCHOOLBOT_MCP_TOKEN:-}
+    volumes:
+      - ./librechat.yaml:/app/librechat.yaml:ro
+
+  librechat-mongo:
+    image: mongo:7
+    container_name: school-ai-search-librechat-mongo
+    profiles: ["librechat"]
+    restart: unless-stopped
+    volumes:
+      - school_ai_search_librechat_mongo:/data/db
+
 volumes:
   school_ai_search_postgres_data:
+  school_ai_search_meili_data:
+  school_ai_search_librechat_mongo:

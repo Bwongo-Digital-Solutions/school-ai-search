@@ -67,6 +67,9 @@ The local backend lives in `server/local-backend.mjs`.
 | `/api/functions/lesson-planner` | `POST` | Lesson planning, dispatched by an `action` field: `list`, `get`, `generate`, `scheme_of_work`, `save`, `set_status`, `duplicate`, `delete`. Requires `requesterRole` of `admin` or `teacher`. |
 | `/api/functions/digital-examiner` | `POST` | Question and paper authoring, dispatched by an `action` field: blueprint CRUD, `generate_questions`, question-bank CRUD and review, `assemble_paper`, `publish_paper`, and paper listing/deletion. Requires `requesterRole` of `admin` or `teacher`. |
 | `/api/functions/curriculum` | `POST` | Curriculum library, dispatched by an `action` field: `list_documents`, `upload_document`, `delete_document`, `search`, `reindex`, `frameworks`. Teaching staff only; deleting a bundled outline is admin-only. |
+| `/api/functions/chat-report` | `POST` | Emails a chat conversation as a PDF attachment (`action: "send"` with `recipient` and an optional `note`). Teaching staff only. Reports plainly when email is unconfigured rather than claiming a delivery. |
+| `/api/chat-reports/:conversationId.pdf` | `GET` | A conversation as a branded PDF for download or print, carrying the citations and tool trace behind each answer. Teaching staff only. |
+| `/api/functions/search` | `POST` | Global search across students, curriculum, lesson plans, exam questions, fees and attendance (`query`), plus `reindex` (admin) and `status`. Teaching staff only. Results are scoped to the requester's role server-side. |
 | `/api/functions/mcp` | `POST` | External MCP server registry, dispatched by an `action` field: `list`, `save`, `delete`, `test`. Admin-only. Stored auth tokens are masked on every read and never returned to the browser. |
 | `/api/mcp` | `POST` | SchoolBot's own MCP server, speaking JSON-RPC 2.0 (`initialize`, `tools/list`, `tools/call`). Gated on a `Bearer` token matching `MCP_SERVER_TOKEN`; disabled (404) when that variable is unset. |
 | `/api/curriculum-frameworks` | `GET` | The examination frameworks the deployment supports, with year labels, question types, command words, assessment objectives and paper structures. |
@@ -81,7 +84,7 @@ The local backend lives in `server/local-backend.mjs`.
 | `/api/id-cards.pdf` | `GET` | Batch ID cards, optionally filtered by `grade` and `section`. |
 | `/api/id-cards/:studentId.png` | `GET` | The bare QR image, for on-screen preview and scan testing. |
 | `/api/fees/receipts/:paymentId.pdf` | `GET` | Printable receipt for one payment. Requires `requesterRole=admin` in the query string. |
-| `/api/fees/statements/:studentId.pdf` | `GET` | Full fee statement with running balance, optionally bounded by `from` and `to`. Requires `requesterRole=admin`. |
+| `/api/fees/statements/:studentId.pdf` | `GET` | Full fee statement with running balance, optionally bounded by `from` and `to`, plus a Gateway Transactions section listing every mobile-money and bank attempt including pending and failed ones. Requires `requesterRole` of `admin` or `teacher` — one student's history, unlike the school-wide report below. |
 | `/api/fees/report.pdf` | `GET` | School-wide financial report (collections, payment-standing distribution, arrears ageing). Requires `requesterRole=admin`. |
 | `/api/papers/:paperId.pdf` | `GET` | The question paper a learner sits. Requires `requesterRole` of `admin` or `teacher`. |
 | `/api/papers/:paperId/marking-scheme.pdf` | `GET` | The marking scheme, with the expected answer, mark-by-mark award points, and the syllabus passages each question was generated from. Same role gate. |
@@ -208,6 +211,72 @@ Chat orchestration lives in `server/agent/chat.mjs`, which picks one of three mo
 The teacher picks per message in the composer: an **Agent** toggle, a **Curriculum** (RAG) toggle, and an **MCP** multi-select. A provider that cannot call tools — Ollama, or the rules engine — falls back to a direct call with the retrieved context and says so in the reply, rather than silently doing nothing.
 
 Conversation history is replayed (the last `AI_HISTORY_TURNS` turns, default 8). The inlined roster is capped at `AI_ROSTER_INLINE_LIMIT` students (default 50); past that the prompt states it is showing a subset, so the model reports "not in the records I can see" rather than "no such student".
+
+## Global Search (Meilisearch)
+
+Optional, and additive. With `MEILISEARCH_HOST` unset — the default — search falls back to the SQL
+student-name query the app already used and reports `engine: 'postgres'`, so no existing deployment
+changes behaviour by upgrading.
+
+`server/search/meili.mjs` is a small REST client over raw `fetch` with an injectable `httpClient`,
+matching the LLM and MCP layers. No new dependency. `server/search/indexer.mjs` defines six indexes
+and builds their documents from Postgres, which stays the system of record.
+
+| Index | Searchable | Visible to |
+| --- | --- | --- |
+| `students` | name, student number, email, parent name, subjects, notes | admin, teacher |
+| `curriculum` | title, heading, passage text | admin, teacher |
+| `lesson_plans` | title, topic, outcomes, competencies | admin, teacher |
+| `exam_questions` | stem, topic, subject, command word | admin, teacher |
+| `fees` | student name, invoice/receipt number, reference | **admin only** |
+| `attendance` | student name, reason, status | admin, teacher |
+
+### The role filter is the security boundary
+
+Copying student, fee and attendance data into a second store means the index has to enforce the same
+access rules the database does, or search becomes a way around them. Three things hold that:
+
+- **Every document carries a `roles` array**, and `services/search.mjs` injects
+  `filter: roles = <requesterRole>` into every query. A caller cannot widen it — naming an index the
+  role may not see strips it from the request rather than honouring it.
+- **The role also decides which indexes are queried at all**, so a teacher's request never reaches
+  the `fees` index. Both layers matter: the index list is the coarse gate, the filter the fine one.
+- **The browser never talks to Meilisearch.** The usual pattern is a public search key queried
+  straight from the client, which is faster — but it cannot enforce per-role filtering, and with fees
+  indexed that would expose the ledger. No key or host is exposed to the client.
+
+Support staff appear in no `roles` array anywhere: their access is fee *status* through
+`/api/functions/fee-status`, and search would be a way past it.
+
+### Keeping the index current
+
+`handleDbQuery` fires a sync after every insert, update and delete on an indexed table, and deletes
+are mirrored so a removed student leaves the index. The sync is **deliberately not awaited and never
+throws** — a search index falling behind must not fail or delay the payment or attendance mark that
+triggered it. A full `reindex` from Settings is the backstop and rebuilds every index from Postgres.
+
+## LibreChat
+
+**LibreChat consumes AI providers; it does not expose one.** There is no endpoint for another
+application to call, so it cannot be an entry in the model catalogue beside OpenAI and Anthropic.
+
+What it does support is **MCP servers over streamable HTTP with bearer auth**, which is exactly what
+this app already serves at `POST /api/mcp`. The integration therefore runs inward: LibreChat
+connects to SchoolBot, and its users get student records, fees, curriculum and the gradebook as
+tools. Settings → **Search & LibreChat** generates the `librechat.yaml` block; `librechat.yaml` in
+the repo root is a working starting point, used by the optional compose profile.
+
+`MCP_SERVER_TOKENS` maps a token to a role (`{"tok-admin":"admin","tok-teacher":"teacher"}`), so the
+tools a LibreChat user sees match who they are. `buildToolRegistry()` already filters by role, so
+this is a lookup rather than a second gate. `MCP_SERVER_TOKEN` + `MCP_SERVER_ROLE` remain supported.
+
+Both services ship as opt-in compose profiles, so `docker compose up` is unchanged for anyone not
+using them:
+
+```bash
+docker compose --profile search up -d      # Meilisearch only
+docker compose --profile librechat up -d   # LibreChat, its MongoDB, and Meilisearch
+```
 
 ## AI Agent, Retrieval, and MCP
 
@@ -455,7 +524,8 @@ Development defaults:
 | `DEV_API_PORT` | Host port for the development API. |
 | `DEV_DB_PORT` | Host port for the development database. |
 | `AI_DEFAULT_MODEL_ID` | Default model selected by the backend, default `local-rules`. |
-| `AI_MODEL_CATALOG` | Optional JSON array that replaces the built-in model catalog. |
+| `AI_MODEL_CATALOG` | Optional JSON array that **replaces** the built-in model catalogue. Prefer `AI_EXTRA_MODELS` — setting this drops Local Rules and any provider you do not restate. |
+| `AI_EXTRA_MODELS` | Optional JSON array **added to** the built-in catalogue. An entry whose `id` matches a built-in replaces just that one. This is how you offer a local Ollama model and an Ollama cloud model side by side. |
 | `AI_TEMPERATURE` | LLM sampling temperature, default `0.2`. Ignored for Claude 4.6 and later, which reject sampling parameters. |
 | `AI_MAX_TOKENS` | Maximum response tokens for ordinary chat replies, default `900`. |
 | `AI_AGENT_MAX_TOKENS` | Maximum response tokens for the agent loop and the two generators, default `16000`. A full exam paper does not fit in the chat default. |
@@ -478,7 +548,13 @@ Development defaults:
 | `EXAMINER_MAX_QUESTIONS` | Questions one generation request may produce, default `40`. |
 | `PLANNER_MAX_SCHEME_LESSONS` | Lessons one scheme-of-work request may produce, default `20`. |
 | `MCP_SERVER_TOKEN` | Bearer token for SchoolBot's own MCP server. **Unset disables the server rather than opening it.** |
-| `MCP_SERVER_ROLE` | Role an MCP client acts as, default `teacher`. |
+| `MCP_SERVER_ROLE` | Role the single `MCP_SERVER_TOKEN` acts as, default `teacher`. |
+| `MCP_SERVER_TOKENS` | JSON map of token to role, e.g. `{"tok-admin":"admin","tok-teacher":"teacher"}`, so different clients get different tool surfaces. Takes precedence alongside the single-token form. |
+| `MEILISEARCH_HOST` | Meilisearch base URL. **Unset means global search falls back to the basic student query** — the feature is additive. |
+| `MEILISEARCH_API_KEY` | Meilisearch master or admin key. |
+| `MEILISEARCH_TIMEOUT_MS` | Per-request timeout, default `10000`. |
+| `MEILISEARCH_BATCH` | Documents per indexing batch, default `500`. |
+| `SEARCH_HIT_LIMIT` | Results returned per category, default `5`. |
 | `MCP_TIMEOUT_MS` | Timeout for a call to an external MCP server, default `20000`. |
 | `OPENAI_API_KEY` | OpenAI API key. |
 | `OPENAI_MODEL` | OpenAI model name, default `gpt-4o-mini`. |
@@ -502,7 +578,7 @@ Development defaults:
 | `OPENROUTER_HTTP_REFERER` | Optional OpenRouter referer header. |
 | `OPENROUTER_APP_TITLE` | Optional OpenRouter title header. |
 | `OLLAMA_BASE_URL` | Ollama base URL, default points to host machine in Docker. |
-| `OLLAMA_MODEL` | Ollama local model name, default `qwen3.5:2b`. |
+| `OLLAMA_MODEL` | Ollama model name for the built-in entry, default `qwen3.5:2b`. Ollama serves local and cloud models through the same endpoint — a `-cloud` suffixed model runs on Ollama Cloud after `ollama signin`, so both kinds can be listed together via `AI_EXTRA_MODELS`. |
 | `PAYMENT_GATEWAY_MODE` | `mock` for local simulation or live mode for configured providers. |
 | `PAYMENT_CURRENCY` | Default payment currency, usually `UGX`. |
 | `PAYMENT_CALLBACK_URL` | Public callback URL registered with payment providers. |

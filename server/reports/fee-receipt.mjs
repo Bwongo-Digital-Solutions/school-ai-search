@@ -165,7 +165,16 @@ export const buildFeeReceiptPdf = async ({ school, tagline, themeColor, student,
 };
 
 /** A full fee statement: every invoice and payment, with a running balance. */
-export const buildFeeStatementPdf = async ({ school, tagline, themeColor, student, entries = [], summary = {}, asOf }) => {
+export const buildFeeStatementPdf = async ({
+  school,
+  tagline,
+  themeColor,
+  student,
+  entries = [],
+  summary = {},
+  transactions = [],
+  asOf,
+}) => {
   const pdf = await PDFDocument.create();
   const fonts = {
     regular: null,
@@ -261,6 +270,63 @@ export const buildFeeStatementPdf = async ({ school, tagline, themeColor, studen
     page.drawText(label, { x: A4_WIDTH - MARGIN - 200, y, size: isBalance ? 11 : 10, font: isBalance ? fonts.bold : fonts.regular, color: isBalance ? INK : MUTED });
     page.drawText(text, { x: A4_WIDTH - MARGIN - width, y, size: isBalance ? 13 : 10, font: fonts.bold, color: isBalance ? BRAND : INK });
     y -= isBalance ? 24 : 18;
+  }
+
+  // Mobile-money and bank attempts, listed separately and after the balance on purpose: a pending
+  // or failed request moves no money, so it must never look like part of the running total. A
+  // settled one is already counted above as a payment, and is marked as such.
+  if (transactions.length > 0) {
+    if (y < MARGIN + 120) {
+      page = pdf.addPage([A4_WIDTH, A4_HEIGHT]);
+      y = A4_HEIGHT - MARGIN;
+    }
+
+    y -= 12;
+    page.drawText('GATEWAY TRANSACTIONS', { x: MARGIN, y, size: 10, font: fonts.bold, color: BRAND });
+    y -= 6;
+    page.drawLine({ start: { x: MARGIN, y }, end: { x: A4_WIDTH - MARGIN, y }, thickness: 0.75, color: RULE });
+    y -= 8;
+    page.drawText('Every mobile money and bank request on this account, including those that did not complete.', {
+      x: MARGIN, y, size: 8, font: fonts.regular, color: MUTED,
+    });
+    y -= 16;
+
+    const txColumns = [MARGIN, MARGIN + 78, MARGIN + 170, MARGIN + 275, MARGIN + 370, MARGIN + 460];
+    for (const [header, x] of [['Date', txColumns[0]], ['Provider', txColumns[1]], ['Reference', txColumns[2]], ['Amount', txColumns[3]], ['Status', txColumns[4]], ['In ledger', txColumns[5]]]) {
+      page.drawText(header, { x, y, size: 9, font: fonts.bold, color: MUTED });
+    }
+    y -= 6;
+    page.drawLine({ start: { x: MARGIN, y }, end: { x: A4_WIDTH - MARGIN, y }, thickness: 0.75, color: RULE });
+    y -= 15;
+
+    for (const [index, transaction] of transactions.entries()) {
+      if (y < MARGIN + 60) {
+        page = pdf.addPage([A4_WIDTH, A4_HEIGHT]);
+        y = A4_HEIGHT - MARGIN;
+      }
+      if (index % 2 === 1) {
+        page.drawRectangle({ x: MARGIN, y: y - 4, width: A4_WIDTH - MARGIN * 2, height: 16, color: ZEBRA });
+      }
+
+      const cells = [
+        isoDate(transaction.date),
+        truncate(String(transaction.provider || '').replace(/_/g, ' '), 14),
+        truncate(transaction.reference || '—', 16),
+        money(transaction.amount, transaction.currency || currency),
+        truncate(transaction.status || '', 14),
+        transaction.settled ? 'Yes' : 'No',
+      ];
+      cells.forEach((cell, column) => {
+        page.drawText(cell, {
+          x: txColumns[column],
+          y,
+          size: 9,
+          font: fonts.regular,
+          color: transaction.settled ? INK : MUTED,
+        });
+      });
+      y -= 18;
+    }
   }
 
   return pdf.save();

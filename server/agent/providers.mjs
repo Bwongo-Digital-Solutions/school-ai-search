@@ -18,9 +18,15 @@ import { PROVIDER_ENV, anthropicSamplingParams, postJson } from '../services/llm
 
 const OPENAI_COMPATIBLE = ['openai', 'groq', 'mistral', 'openrouter'];
 
-/** Providers that can call tools. Ollama and the local rules engine answer from context alone. */
+/**
+ * Providers that can be given tools. Only the local rules engine cannot — it is not a model.
+ *
+ * Ollama accepts a `tools` array on /api/chat and returns `message.tool_calls`. Whether a given
+ * model *uses* them well is another matter: small models often emit the call as fenced JSON in the
+ * content instead, which callOllama below recovers.
+ */
 export const supportsTools = (provider) =>
-  OPENAI_COMPATIBLE.includes(provider) || provider === 'anthropic' || provider === 'google';
+  OPENAI_COMPATIBLE.includes(provider) || provider === 'anthropic' || provider === 'google' || provider === 'ollama';
 
 const agentMaxTokens = () => Number(process.env.AI_AGENT_MAX_TOKENS || 16000);
 
@@ -326,28 +332,99 @@ const callGoogle = async ({ model, system, messages, tools, httpClient }) => {
 
 /* ------------------------------------------------------------------------- Ollama ----------- */
 
-const callOllama = async ({ model, system, messages, httpClient }) => {
+/**
+ * Recovers a tool call a model wrote into its message text instead of returning structurally.
+ *
+ * Small local models do this constantly — they emit ```json {"name": "...", "arguments": {...}}```
+ * rather than populating tool_calls. Without this the call is invisible and the caller reports the
+ * model "finished without submitting anything", which is both wrong and unhelpful.
+ */
+const recoverToolCallFromText = (text, toolNames) => {
+  if (!text || toolNames.length === 0) return [];
+
+  // Prefer fenced blocks, then fall back to any balanced-looking object mentioning a known tool.
+  const candidates = [...String(text).matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map((match) => match[1]);
+  if (candidates.length === 0) candidates.push(String(text));
+
+  const calls = [];
+  for (const candidate of candidates) {
+    const start = candidate.indexOf('{');
+    const end = candidate.lastIndexOf('}');
+    if (start === -1 || end <= start) continue;
+
+    try {
+      const parsed = JSON.parse(candidate.slice(start, end + 1));
+      const name = parsed.name || parsed.tool || parsed.function?.name;
+      if (!toolNames.includes(name)) continue;
+
+      const input = parsed.arguments ?? parsed.parameters ?? parsed.input ?? parsed.function?.arguments;
+      calls.push({ id: `recovered-${calls.length}`, name, input: parseToolInput(input) });
+    } catch {
+      // Not JSON, or truncated mid-object — nothing to recover from this candidate.
+    }
+  }
+
+  return calls;
+};
+
+const callOllama = async ({ model, system, messages, tools, httpClient }) => {
   const baseUrl = (process.env.OLLAMA_BASE_URL || PROVIDER_ENV.ollama.defaultBaseUrl).replace(/\/$/, '');
 
-  const data = await postJson(httpClient, `${baseUrl}/api/chat`, {
-    body: {
-      model: model.model,
-      stream: false,
-      messages: [
-        ...(system ? [{ role: 'system', content: system }] : []),
-        ...messages
-          .filter((message) => message.role !== 'tool')
-          .map((message) => ({ role: message.role, content: message.content })),
-      ],
-      options: { temperature: Number(process.env.AI_TEMPERATURE || 0.2) },
-    },
-  });
+  const body = {
+    model: model.model,
+    stream: false,
+    messages: [
+      ...(system ? [{ role: 'system', content: system }] : []),
+      ...messages.map((message) => {
+        // Ollama identifies a tool result by `tool_name`, not by a call id — it has no
+        // tool_call_id at all. Omitting it leaves parallel results ambiguous, because several
+        // `tool` messages arrive in a row with nothing to say which call each answers.
+        if (message.role === 'tool') {
+          return { role: 'tool', tool_name: message.name, content: message.content };
+        }
+        if (message.role === 'assistant' && message.toolCalls?.length) {
+          return {
+            role: 'assistant',
+            content: message.content || '',
+            // `type` and `function.index` are part of the documented shape; index is what pairs a
+            // call with its position when the model made several.
+            tool_calls: message.toolCalls.map((call, index) => ({
+              type: 'function',
+              function: { index, name: call.name, arguments: call.input },
+            })),
+          };
+        }
+        return { role: message.role, content: message.content };
+      }),
+    ],
+    options: { temperature: Number(process.env.AI_TEMPERATURE || 0.2) },
+  };
+
+  if (tools.length > 0) {
+    body.tools = tools.map((tool) => ({
+      type: 'function',
+      function: { name: tool.name, description: tool.description, parameters: tool.input_schema },
+    }));
+  }
+
+  const data = await postJson(httpClient, `${baseUrl}/api/chat`, { body });
+
+  const text = (data?.message?.content || '').trim();
+  // Ollama returns arguments as an object rather than a JSON string, unlike OpenAI.
+  const structured = (data?.message?.tool_calls || []).map((call, index) => ({
+    id: `ollama-${index}-${call.function?.name}`,
+    name: call.function?.name,
+    input: parseToolInput(call.function?.arguments),
+  }));
+
+  const toolCalls =
+    structured.length > 0 ? structured : recoverToolCallFromText(text, tools.map((tool) => tool.name));
 
   return {
-    text: (data?.message?.content || '').trim(),
-    toolCalls: [],
+    text,
+    toolCalls,
     raw: null,
-    stopReason: 'stop',
+    stopReason: toolCalls.length > 0 ? 'tool_use' : 'stop',
     usage: { prompt_eval_count: data?.prompt_eval_count, eval_count: data?.eval_count },
     providerResponseId: null,
   };

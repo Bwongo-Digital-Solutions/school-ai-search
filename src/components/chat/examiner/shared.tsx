@@ -60,6 +60,135 @@ export const QuestionCard = ({
   question,
   actions,
   showAnswer = true,
+  editable = false,
+  onEdit,
+}: {
+  question: ExamQuestion;
+  actions?: React.ReactNode;
+  showAnswer?: boolean;
+  /** Turns the stem, answer and marks into fields that save on blur. */
+  editable?: boolean;
+  onEdit?: (patch: Partial<ExamQuestion>) => void;
+}) => {
+  if (editable && onEdit) {
+    return <EditableQuestionCard question={question} actions={actions} onEdit={onEdit} />;
+  }
+
+  return <ReadOnlyQuestionCard question={question} actions={actions} showAnswer={showAnswer} />;
+};
+
+/**
+ * A generated question a teacher can correct in place.
+ *
+ * Saves on blur rather than behind a Save button: a generated draft usually needs several small
+ * fixes, and making each one a two-step action discourages doing them at all.
+ */
+const EditableQuestionCard = ({
+  question,
+  actions,
+  onEdit,
+}: {
+  question: ExamQuestion;
+  actions?: React.ReactNode;
+  onEdit: (patch: Partial<ExamQuestion>) => void;
+}) => {
+  const [stem, setStem] = React.useState(question.stem);
+  const [answer, setAnswer] = React.useState(question.correct_answer);
+  const [marks, setMarks] = React.useState(question.marks);
+
+  // Re-sync when the saved question comes back from the server, so an edit elsewhere is not lost.
+  React.useEffect(() => {
+    setStem(question.stem);
+    setAnswer(question.correct_answer);
+    setMarks(question.marks);
+  }, [question.stem, question.correct_answer, question.marks]);
+
+  const commit = (patch: Partial<ExamQuestion>, changed: boolean) => {
+    if (changed) onEdit(patch);
+  };
+
+  return (
+    <div className="p-4 border border-gray-100 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800">
+      <div className="flex flex-wrap items-start justify-between gap-2 mb-2">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <StatusBadge status={question.status} styles={QUESTION_STATUS_STYLES} />
+          <Tag>{question.question_type.replace(/_/g, ' ')}</Tag>
+          <Tag>{question.difficulty}</Tag>
+          {question.topic && <Tag>{question.topic}</Tag>}
+        </div>
+        <label className="flex items-center gap-1.5 text-[11px] text-gray-400">
+          marks
+          <input
+            type="number"
+            min={0}
+            value={marks}
+            onChange={event => setMarks(Number(event.target.value))}
+            onBlur={() => commit({ marks }, marks !== question.marks)}
+            className="w-14 bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded px-2 py-1 text-xs text-gray-700 dark:text-gray-200 focus:outline-none focus:border-indigo-400"
+          />
+        </label>
+      </div>
+
+      <textarea
+        value={stem}
+        onChange={event => setStem(event.target.value)}
+        onBlur={() => commit({ stem }, stem !== question.stem)}
+        rows={Math.min(6, Math.max(2, Math.ceil(stem.length / 90)))}
+        className="w-full resize-none bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-800 dark:text-gray-100 focus:outline-none focus:border-indigo-400"
+      />
+
+      {question.options.length > 0 && (
+        <ol className="mt-2 space-y-0.5">
+          {question.options.map((option, index) => (
+            <li key={index} className="text-xs text-gray-600 dark:text-gray-300">
+              {OPTION_LABEL(index)}. {option}
+            </li>
+          ))}
+        </ol>
+      )}
+
+      <label className="block mt-2">
+        <span className="block text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-1">
+          Expected answer
+        </span>
+        <textarea
+          value={answer}
+          onChange={event => setAnswer(event.target.value)}
+          onBlur={() => commit({ correctAnswer: answer } as Partial<ExamQuestion>, answer !== question.correct_answer)}
+          rows={2}
+          placeholder="Write the expected answer — a generated draft may not have one."
+          className="w-full resize-none bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-xs text-gray-700 dark:text-gray-200 focus:outline-none focus:border-indigo-400"
+        />
+      </label>
+
+      {question.marking_scheme.length > 0 && (
+        <div className="mt-2">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-1 flex items-center gap-1">
+            <Wrench className="w-3 h-3" /> Marking scheme
+          </p>
+          <ul className="space-y-0.5">
+            {question.marking_scheme.map((entry, index) => (
+              <li key={index} className="text-[11px] text-gray-600 dark:text-gray-300">
+                • {entry.point} <span className="text-gray-400">({entry.marks})</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <CitationList citations={question.source_references} label="Generated from" />
+
+      {actions && (
+        <div className="flex flex-wrap gap-2 mt-3 pt-2 border-t border-gray-100 dark:border-gray-700">{actions}</div>
+      )}
+    </div>
+  );
+};
+
+const ReadOnlyQuestionCard = ({
+  question,
+  actions,
+  showAnswer = true,
 }: {
   question: ExamQuestion;
   actions?: React.ReactNode;

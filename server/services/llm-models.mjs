@@ -59,7 +59,7 @@ const createDefaultModelCatalog = () => [
     id: 'ollama-default',
     label: 'Ollama',
     provider: 'ollama',
-    model: process.env.OLLAMA_MODEL || 'qwen3.5:2b',
+    model: process.env.OLLAMA_MODEL || 'qwen2.5-coder:0.5b',
     type: 'open_source',
     description: 'Local open-source model served by Ollama.',
   },
@@ -105,16 +105,31 @@ export const PROVIDER_ENV = {
   },
 };
 
-const parseCatalogOverride = () => {
-  if (!process.env.AI_MODEL_CATALOG) return null;
+const parseModelJson = (value, variableName) => {
+  if (!value) return null;
 
   try {
-    const parsed = JSON.parse(process.env.AI_MODEL_CATALOG);
+    const parsed = JSON.parse(value);
     return Array.isArray(parsed) ? parsed : null;
-  } catch {
+  } catch (error) {
+    console.warn(`Invalid ${variableName} JSON:`, error instanceof Error ? error.message : error);
     return null;
   }
 };
+
+/** Replaces the built-in catalogue outright. */
+const parseCatalogOverride = () => parseModelJson(process.env.AI_MODEL_CATALOG, 'AI_MODEL_CATALOG');
+
+/**
+ * Adds models to the built-in catalogue instead of replacing it.
+ *
+ * The common case is wanting one more model — a second Ollama model, or an Ollama cloud model
+ * beside the local one — and AI_MODEL_CATALOG makes that awkward, because redefining the list to
+ * add one entry silently drops Local Rules and every configured provider. An entry here whose `id`
+ * matches a built-in replaces just that one, so the default Ollama entry can be retuned without
+ * restating the rest.
+ */
+const parseExtraModels = () => parseModelJson(process.env.AI_EXTRA_MODELS, 'AI_EXTRA_MODELS') || [];
 
 const providerHasCredentials = (provider) => {
   if (provider === 'local_rules') return true;
@@ -136,14 +151,27 @@ export const publicModel = (model) => ({
 
 export const getModelCatalog = () => {
   const override = parseCatalogOverride();
-  const catalog = override || createDefaultModelCatalog();
-  return catalog.map((model) => ({
-    ...model,
-    id: model.id || `${model.provider}:${model.model}`,
-    label: model.label || `${model.provider} ${model.model}`,
-    type: model.type || (model.provider === 'ollama' ? 'open_source' : 'commercial'),
-    description: model.description || '',
-  }));
+  const base = override || createDefaultModelCatalog();
+
+  // Extras are merged by id: a matching id replaces that entry in place (keeping its position),
+  // anything else is appended.
+  const merged = [...base];
+  for (const extra of parseExtraModels()) {
+    const id = extra.id || `${extra.provider}:${extra.model}`;
+    const index = merged.findIndex((model) => (model.id || `${model.provider}:${model.model}`) === id);
+    if (index >= 0) merged[index] = { ...merged[index], ...extra };
+    else merged.push(extra);
+  }
+
+  return merged
+    .filter((model) => model && model.provider)
+    .map((model) => ({
+      ...model,
+      id: model.id || `${model.provider}:${model.model}`,
+      label: model.label || `${model.provider} ${model.model}`,
+      type: model.type || (model.provider === 'ollama' ? 'open_source' : 'commercial'),
+      description: model.description || '',
+    }));
 };
 
 export const getPublicModelCatalog = () => getModelCatalog().map(publicModel);
@@ -249,7 +277,7 @@ export const postJson = async (httpClient, url, { headers = {}, body }) => {
 
 const describeOllamaConnectionError = (error) => {
   const baseUrl = process.env.OLLAMA_BASE_URL || PROVIDER_ENV.ollama.defaultBaseUrl;
-  const model = process.env.OLLAMA_MODEL || 'qwen3.5:2b';
+  const model = process.env.OLLAMA_MODEL || 'qwen2.5-coder:0.5b';
   const detail = error instanceof Error && error.message ? error.message : 'Unknown connection error';
 
   return [

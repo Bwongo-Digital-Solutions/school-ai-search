@@ -98,6 +98,9 @@ export const answerChatMessage = async ({
   actor,
   httpClient = fetch,
   generateLocalReply,
+  // Map of student id -> fee summary. Only the rules engine uses it; the agent path fetches the
+  // full history on demand through the student_payment_history tool instead of carrying it here.
+  feeSummaries = null,
 }) => {
   const history = await loadHistory(database, conversationId, { excludeMessageId });
 
@@ -109,7 +112,7 @@ export const answerChatMessage = async ({
   }
 
   if (model.provider === 'local_rules') {
-    const reply = generateLocalReply({ message, students, hasImage });
+    const reply = generateLocalReply({ message, students, hasImage, feeSummaries });
     return { ...reply, steps: [], citations: toStoredCitations(citations), mode: 'local' };
   }
 

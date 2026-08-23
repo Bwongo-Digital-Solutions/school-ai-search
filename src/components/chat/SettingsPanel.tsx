@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Plug } from 'lucide-react';
+import { Plug, Search } from 'lucide-react';
 import McpServersPanel from './McpServersPanel';
+import LibreChatPanel from './LibreChatPanel';
 import { GraduationCap, ImagePlus, Loader2, Palette, Save, Settings as SettingsIcon, Shield } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
@@ -34,7 +35,7 @@ const SettingsPanel: React.FC = () => {
   const [form, setForm] = useState<SchoolSettings>(settings);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [tab, setTab] = useState<'branding' | 'mcp'>('branding');
+  const [tab, setTab] = useState<'branding' | 'mcp' | 'integrations'>('branding');
 
   // Keep the form in sync when the global settings load/refresh.
   useEffect(() => {
@@ -92,13 +93,16 @@ const SettingsPanel: React.FC = () => {
         <p className="text-xs text-gray-400 mt-0.5">
           {tab === 'branding'
             ? 'Set the school identity used across report cards, receipts, statements, ID cards and the app header.'
-            : 'Connect external MCP servers so the assistant can use their tools.'}
+            : tab === 'mcp'
+              ? 'Connect external MCP servers so the assistant can use their tools.'
+              : 'Global search across the school, and connecting LibreChat to this data.'}
         </p>
 
         <div className="flex flex-wrap gap-1.5 mt-4">
           {([
             { key: 'branding', label: 'Branding', icon: SettingsIcon },
             { key: 'mcp', label: 'MCP Servers', icon: Plug },
+            { key: 'integrations', label: 'Search & LibreChat', icon: Search },
           ] as const).map(({ key, label, icon: Icon }) => (
             <button
               key={key}
@@ -117,7 +121,11 @@ const SettingsPanel: React.FC = () => {
       </div>
 
       <div className="flex-1 overflow-auto px-6 py-5">
-        {tab === 'mcp' ? (
+        {tab === 'integrations' ? (
+          <div className="max-w-3xl">
+            <LibreChatPanel />
+          </div>
+        ) : tab === 'mcp' ? (
           <div className="max-w-3xl">
             <McpServersPanel />
           </div>

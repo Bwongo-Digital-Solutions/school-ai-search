@@ -53,6 +53,18 @@ export const callCurriculum = <T>(
 export const callMcp = <T>(action: string, payload: Record<string, unknown>, user: UserProfile | null) =>
   callTeachingFunction<T>('mcp', action, payload, user);
 
+export const callSearch = <T>(
+  action: string,
+  payload: Record<string, unknown>,
+  user: UserProfile | null,
+) => callTeachingFunction<T>('search', action, payload, user);
+
+export const callChatReport = <T>(
+  action: string,
+  payload: Record<string, unknown>,
+  user: UserProfile | null,
+) => callTeachingFunction<T>('chat-report', action, payload, user);
+
 /** Teaching documents are GETs, so the role rides in the query string, as the fee documents do. */
 export const teachingDocumentUrl = (path: string, user: UserProfile | null) => {
   const search = new URLSearchParams({ requesterRole: user?.role || '' });

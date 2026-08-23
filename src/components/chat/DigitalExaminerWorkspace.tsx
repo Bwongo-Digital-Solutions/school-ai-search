@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { ClipboardCheck, FileText, Layers, Library, Loader2, Shield, Sparkles } from 'lucide-react';
+import { ClipboardCheck, FileText, Layers, Library, Loader2, Shield, Sparkles, X } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { callDigitalExaminer, loadCurriculumFrameworks } from '@/lib/teaching';
 import StatTile from '@/components/common/StatTile';
@@ -24,6 +24,7 @@ const DigitalExaminerWorkspace: React.FC = () => {
 
   const [section, setSection] = useState<SectionKey>('blueprint');
   const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<{ label: string; message: string } | null>(null);
   const [frameworks, setFrameworks] = useState<CurriculumFramework[]>([]);
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -60,13 +61,21 @@ const DigitalExaminerWorkspace: React.FC = () => {
     loadCounts();
   }, [loadCounts]);
 
+  /**
+   * Shared wrapper for every mutation on this screen.
+   *
+   * A failure is surfaced in the page rather than through alert(): generation failures in
+   * particular carry the model's actual reply, which the teacher may want to read, edit and keep —
+   * a modal that can only be dismissed throws that away.
+   */
   const runAction = useCallback(async (label: string, handler: () => Promise<void>) => {
     setBusy(label);
+    setError(null);
     try {
       await handler();
     } catch (err: unknown) {
       console.error(`${label} failed:`, err);
-      alert(`${label} failed: ${err instanceof Error ? err.message : 'Unexpected error'}`);
+      setError({ label, message: err instanceof Error ? err.message : 'Unexpected error' });
     } finally {
       setBusy(null);
     }
@@ -157,6 +166,26 @@ const DigitalExaminerWorkspace: React.FC = () => {
       </div>
 
       <div className="flex-1 overflow-auto px-6 py-4">
+        {error && (
+          <div className="mb-4 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-4 py-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-amber-800 dark:text-amber-300">{error.label} failed</p>
+                <p className="text-xs text-amber-700 dark:text-amber-400 mt-0.5 whitespace-pre-wrap">
+                  {error.message}
+                </p>
+              </div>
+              <button
+                onClick={() => setError(null)}
+                className="shrink-0 p-1 rounded hover:bg-amber-100 dark:hover:bg-amber-900/40"
+                aria-label="Dismiss"
+              >
+                <X className="w-3.5 h-3.5 text-amber-600" />
+              </button>
+            </div>
+          </div>
+        )}
+
         {section === 'blueprint' && (
           <BlueprintTab
             frameworks={frameworks}

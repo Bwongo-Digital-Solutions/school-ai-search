@@ -20,7 +20,42 @@ const SERVER_INFO = { name: 'schoolbot-ai', version: '1.0.0' };
 
 // The role an MCP client acts as. Token holders are trusted staff integrations, but they are not
 // interactive administrators, so they get the teacher tool surface rather than everything.
-const MCP_CLIENT_ROLE = process.env.MCP_SERVER_ROLE || 'teacher';
+const DEFAULT_MCP_ROLE = 'teacher';
+
+// Roles an MCP token may be issued for. Support staff are excluded: their access is the fee-status
+// endpoint, not a tool surface.
+const MCP_ROLES = ['admin', 'teacher'];
+
+/**
+ * Resolves the bearer token presented by a client to the role it acts as.
+ *
+ * MCP_SERVER_TOKENS is a JSON map of token to role, so a school can issue one token for
+ * administrators and another for teachers and have each LibreChat user see only the tools their
+ * role allows — buildToolRegistry() already filters by role, so this is a lookup, not new gating.
+ * MCP_SERVER_TOKEN + MCP_SERVER_ROLE remain supported as the single-token form.
+ */
+const tokenRoles = () => {
+  const map = new Map();
+
+  if (process.env.MCP_SERVER_TOKENS) {
+    try {
+      for (const [token, role] of Object.entries(JSON.parse(process.env.MCP_SERVER_TOKENS))) {
+        if (token && MCP_ROLES.includes(role)) map.set(token, role);
+      }
+    } catch (error) {
+      console.warn('Invalid MCP_SERVER_TOKENS JSON:', error instanceof Error ? error.message : error);
+    }
+  }
+
+  if (process.env.MCP_SERVER_TOKEN) {
+    const role = MCP_ROLES.includes(process.env.MCP_SERVER_ROLE)
+      ? process.env.MCP_SERVER_ROLE
+      : DEFAULT_MCP_ROLE;
+    map.set(process.env.MCP_SERVER_TOKEN, role);
+  }
+
+  return map;
+};
 
 const rpcResult = (id, result) => ({ jsonrpc: '2.0', id, result });
 
@@ -32,14 +67,14 @@ const INVALID_REQUEST = -32600;
 const METHOD_NOT_FOUND = -32601;
 const INTERNAL_ERROR = -32603;
 
-export const isMcpServerEnabled = () => Boolean(process.env.MCP_SERVER_TOKEN);
+export const isMcpServerEnabled = () => tokenRoles().size > 0;
 
-const isAuthorized = (headers = {}) => {
-  const token = process.env.MCP_SERVER_TOKEN;
-  if (!token) return false;
-
+/** Returns the role the presented token grants, or null when it grants nothing. */
+const roleForRequest = (headers = {}) => {
   const supplied = String(headers.authorization || headers.Authorization || '');
-  return supplied === `Bearer ${token}`;
+  if (!supplied.startsWith('Bearer ')) return null;
+
+  return tokenRoles().get(supplied.slice(7)) || null;
 };
 
 /**
@@ -56,7 +91,8 @@ export const handleMcpServerRequest = async ({ database, body, headers = {}, htt
     };
   }
 
-  if (!isAuthorized(headers)) {
+  const role = roleForRequest(headers);
+  if (!role) {
     return { status: 401, body: rpcError(null, INVALID_REQUEST, 'Unauthorized') };
   }
 
@@ -84,7 +120,7 @@ export const handleMcpServerRequest = async ({ database, body, headers = {}, htt
     return { status: 202, body: null };
   }
 
-  const registry = buildToolRegistry({ requesterRole: MCP_CLIENT_ROLE });
+  const registry = buildToolRegistry({ requesterRole: role });
 
   if (method === 'tools/list') {
     return {
@@ -108,8 +144,8 @@ export const handleMcpServerRequest = async ({ database, body, headers = {}, htt
     const context = createAgentContext({
       database,
       httpClient,
-      requesterRole: MCP_CLIENT_ROLE,
-      actor: { name: 'MCP client', role: MCP_CLIENT_ROLE },
+      requesterRole: role,
+      actor: { name: 'MCP client', role },
     });
 
     try {

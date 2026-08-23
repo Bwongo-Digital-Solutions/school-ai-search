@@ -262,6 +262,86 @@ const createSubmitTool = (collected) => ({
   },
 });
 
+/**
+ * Reads questions out of a model's prose reply.
+ *
+ * The submit tool is the intended path, but a model that ignored it has still written the
+ * questions — smaller local models do this constantly, answering "Sure! Below are five questions:"
+ * followed by exactly what was asked for. Discarding that and showing an error wastes the work and
+ * the tokens, so this recovers what it can.
+ *
+ * Tries JSON first (a model that emitted the tool payload as a fenced block), then falls back to
+ * numbered prose. Anything recovered is flagged so the teacher knows to read it more carefully.
+ */
+export const salvageQuestionsFromText = (text) => {
+  const source = String(text || '');
+  if (!source.trim()) return [];
+
+  // A fenced JSON array or a {questions:[...]} object is the cleanest case.
+  for (const block of [...source.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map((m) => m[1])) {
+    try {
+      const parsed = JSON.parse(block.trim());
+      const list = Array.isArray(parsed) ? parsed : parsed.questions;
+      if (Array.isArray(list) && list.length > 0 && list.some((entry) => entry?.stem || entry?.question)) {
+        return list.map((entry) => ({ ...entry, stem: entry.stem || entry.question }));
+      }
+    } catch {
+      // Not JSON; fall through to the prose reader.
+    }
+  }
+
+  // Numbered prose: "1. Describe ... [5 marks]" or "**Question 2:** ...", one block each.
+  const blocks = source
+    .split(/\n(?=\s*(?:\*\*)?(?:Question\s*)?\d+[.)：:])/i)
+    .map((block) => block.trim())
+    .filter(Boolean);
+
+  const NUMBERED = /^\s*(?:\*\*)?(?:Question\s*)?\d+[.)：:]/i;
+
+  const questions = [];
+  for (const block of blocks) {
+    // Skip the model's lead-in ("Sure! Below are five questions:"), which is everything before the
+    // first numbered item and is not a question.
+    if (!NUMBERED.test(block)) continue;
+
+    const cleaned = block
+      .replace(NUMBERED, '')
+      .replace(/\*\*/g, '')
+      .trim();
+    if (cleaned.length < 15) continue;
+
+    const lines = cleaned.split(/\n/).map((line) => line.trim()).filter(Boolean);
+
+    // "A. 0.5" style choices, which mark this as multiple choice and are worth keeping.
+    const optionLines = lines.filter((line) => /^[A-Ha-h][.)]\s+/.test(line));
+    const options = optionLines.map((line) => line.replace(/^[A-Ha-h][.)]\s+/, '').trim());
+
+    // "[5 marks]" or "(5 marks)" is the usual way a model annotates the allocation.
+    const marksMatch = cleaned.match(/[[(]\s*(\d+)\s*marks?\s*[\])]/i);
+
+    const stemLines = lines.filter((line) => !/^[A-Ha-h][.)]\s+/.test(line));
+    const stem = stemLines
+      .join(' ')
+      .replace(/[[(]\s*\d+\s*marks?\s*[\])]/i, '')
+      .trim();
+    if (!stem) continue;
+
+    questions.push({
+      stem,
+      marks: marksMatch ? Number(marksMatch[1]) : 1,
+      questionType: options.length >= 2 ? 'mcq' : 'short_answer',
+      options,
+      // Deliberately blank: nothing here is grounded in a retrieved passage or reviewed, and
+      // inventing a marking scheme would be worse than leaving it for the teacher to write.
+      correctAnswer: '',
+      markingScheme: [],
+      citationIndexes: [],
+    });
+  }
+
+  return questions;
+};
+
 const describeMix = (label, mix) => {
   const entries = Object.entries(mix || {}).filter(([, value]) => Number(value) > 0);
   if (entries.length === 0) return null;
@@ -461,12 +541,27 @@ const generateQuestions = async ({ database, body, actor, httpClient }) => {
     httpClient,
   });
 
+  // A model that wrote the questions out in prose instead of calling submit_questions has still
+  // done the work — smaller local models do this constantly. Throwing it away and showing an error
+  // is the wrong outcome, so recover what can be parsed and tell the teacher it needs a closer look.
+  let recoveredFromProse = false;
+  if (collected.length === 0 && result.message) {
+    const salvaged = salvageQuestionsFromText(result.message);
+    if (salvaged.length > 0) {
+      collected.push(...salvaged);
+      recoveredFromProse = true;
+    }
+  }
+
   if (collected.length === 0) {
     return {
-      error:
-        result.stoppedAtStepLimit
-          ? 'The model ran out of steps before submitting any questions. Try fewer questions or narrower topics.'
-          : `The model finished without submitting any questions. It said: ${result.message || '(nothing)'}`,
+      error: result.stoppedAtStepLimit
+        ? 'The model ran out of steps before writing any questions. Try fewer questions or narrower topics.'
+        : 'The model did not produce anything that could be read as questions. Its reply is below — ' +
+          'try again, or pick a larger model: small local models often cannot follow a structured format.',
+      // Returned so the UI can show what the model actually said, and let the teacher keep it,
+      // rather than discarding the response inside an error dialog.
+      rawReply: result.message || '',
       steps: result.steps,
     };
   }
@@ -533,6 +628,10 @@ const generateQuestions = async ({ database, body, actor, httpClient }) => {
   return {
     questions: saved,
     steps: result.steps,
+    // Flagged so the UI can say these were read out of prose rather than returned structurally,
+    // and therefore deserve a closer read before approval.
+    recoveredFromProse,
+    rawReply: recoveredFromProse ? result.message : '',
     citations: toStoredCitations(context.citations),
     weakTopics,
     model: { id: model.id, label: model.label, provider: model.provider, model: model.model },
