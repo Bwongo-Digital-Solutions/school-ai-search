@@ -22,13 +22,15 @@ export const SCAN_SECTIONS = [
   'academics',
   'attendance',
   'exam_clearance',
+  'exam_clearance_grant',
+  'roll_call',
   'gate_pass',
   'gate_permission',
   'meal_card',
 ];
 
 const ADMIN_SECTIONS = [
-  'fees', 'bio', 'class', 'dormitory', 'parents', 'gate_permission',
+  'fees', 'bio', 'class', 'dormitory', 'parents', 'gate_permission', 'exam_clearance_grant',
 ];
 
 /* Designations are only meaningful inside their own role; a cook is support staff and an
@@ -40,6 +42,7 @@ const PROFILES = {
   },
   teacher: {
     default: [
+      'roll_call',
       'academics',
       'attendance',
       'exam_clearance',

@@ -756,6 +756,36 @@ ALTER TABLE gate_passes ADD COLUMN IF NOT EXISTS permission_id TEXT
 ALTER TABLE gate_passes ADD COLUMN IF NOT EXISTS destination TEXT NOT NULL DEFAULT '';
 ALTER TABLE gate_passes ADD COLUMN IF NOT EXISTS note TEXT NOT NULL DEFAULT '';
 
+-- Permission to sit an examination, granted by the bursar or an administrator once the
+-- student's obligations are settled. The invigilator does not grant clearance, they check
+-- one: they scan at the exam room door and admit or turn the student away.
+CREATE TABLE IF NOT EXISTS exam_clearances (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  exam_id TEXT REFERENCES exams(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
+  note TEXT NOT NULL DEFAULT '',
+  granted_by TEXT NOT NULL DEFAULT '',
+  granted_by_email TEXT NOT NULL DEFAULT '',
+  granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  valid_until TIMESTAMPTZ,
+  revoked_at TIMESTAMPTZ,
+  revoked_by TEXT NOT NULL DEFAULT ''
+);
+
+-- The invigilator's verdict at the exam room door. A rejection is recorded rather than
+-- dropped, so a student turned away can be accounted for afterwards.
+CREATE TABLE IF NOT EXISTS exam_admissions (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  exam_id TEXT REFERENCES exams(id) ON DELETE SET NULL,
+  clearance_id TEXT REFERENCES exam_clearances(id) ON DELETE SET NULL,
+  decision TEXT NOT NULL CHECK (decision IN ('approved', 'rejected')),
+  note TEXT NOT NULL DEFAULT '',
+  recorded_by TEXT NOT NULL DEFAULT '',
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- One row per meal a student has actually been served, written when the cook scans an ID
 -- card at the serving point. The absence of a row is what "has not eaten" means, so the
 -- unique index is what stops a second helping being recorded as a first.
