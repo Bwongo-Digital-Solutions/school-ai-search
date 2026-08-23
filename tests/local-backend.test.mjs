@@ -5640,3 +5640,53 @@ test('the Ollama adapter matches the documented tool-calling wire format', async
     await cleanup();
   }
 });
+
+test('a failed generation still returns what the model wrote, so the screen can show it', async () => {
+  // The route used to null the payload on error, which is what left a teacher with a dismissible
+  // dialog and no way to recover the questions the model had just written.
+  const httpClient = async (url) => {
+    if (!url.endsWith('/api/chat')) {
+      return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response(
+      JSON.stringify({
+        message: {
+          content: 'I would rather not generate questions without seeing the syllabus first.',
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  };
+
+  const originalBaseUrl = process.env.OLLAMA_BASE_URL;
+  process.env.OLLAMA_BASE_URL = 'http://ollama.test';
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const result = await dispatch(runtime, 'POST', '/api/functions/digital-examiner', {
+      action: 'generate_questions',
+      requesterRole: 'teacher',
+      modelId: 'ollama-default',
+      subjectName: 'Mathematics',
+      gradeLevel: 11,
+      topics: ['Trigonometry'],
+      count: 5,
+    });
+
+    assert.equal(result.status, 400);
+    assert.match(result.body.error, /did not produce anything that could be read as questions/);
+
+    // The payload survives alongside the error — this is the part that was lost.
+    assert.notEqual(result.body.data, null, 'the payload must not be nulled on error');
+    assert.match(result.body.data.rawReply, /rather not generate questions/);
+    assert.ok(Array.isArray(result.body.data.steps));
+
+    // Nothing unreviewable was banked.
+    assert.equal(await countRows(runtime, 'exam_questions'), 0);
+  } finally {
+    if (originalBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
+    else process.env.OLLAMA_BASE_URL = originalBaseUrl;
+    await cleanup();
+  }
+});

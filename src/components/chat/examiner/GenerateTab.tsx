@@ -7,6 +7,7 @@ import { callDigitalExaminer, gradeOptionsFor } from '@/lib/teaching';
 import { EmptyState, Panel, PrimaryButton, SecondaryButton } from '../fees/shared';
 import { currentAcademicYear } from '../lessons/shared';
 import { QuestionCard } from './shared';
+import UnbankedReply from './UnbankedReply';
 import type { AgentStep } from '@/types/agent';
 import type { CurriculumFramework, ExamBlueprint, ExamQuestion } from '@/types/teaching';
 
@@ -51,6 +52,8 @@ const GenerateTab: React.FC<Props> = ({ frameworks, runAction, onChanged, busy, 
   const [topicText, setTopicText] = useState('');
   const [result, setResult] = useState<GenerateResult | null>(null);
   const [showSteps, setShowSteps] = useState(false);
+  /** A model reply that produced no bankable questions, kept so it can still be read and saved. */
+  const [unbankedReply, setUnbankedReply] = useState('');
 
   // Selecting a blueprint on the previous tab prefills this form and pins generation to it.
   useEffect(() => {
@@ -85,13 +88,25 @@ const GenerateTab: React.FC<Props> = ({ frameworks, runAction, onChanged, busy, 
   const generate = useCallback(
     () =>
       runAction('Writing questions', async () => {
-        const response = await callDigitalExaminer<GenerateResult>(
-          'generate_questions',
-          { ...form, topics, blueprintId: blueprint?.id, modelId: selectedModelId },
-          user,
-        );
-        setResult(response);
-        onChanged();
+        setUnbankedReply('');
+        try {
+          const response = await callDigitalExaminer<GenerateResult>(
+            'generate_questions',
+            { ...form, topics, blueprintId: blueprint?.id, modelId: selectedModelId },
+            user,
+          );
+          setResult(response);
+          onChanged();
+        } catch (err) {
+          // A failed generation still carries whatever the model wrote. Keep it so it can be shown
+          // formatted below rather than lost with the error, then re-throw so the banner appears.
+          const payload = (err as { payload?: { rawReply?: string } })?.payload;
+          if (payload?.rawReply) {
+            setResult(null);
+            setUnbankedReply(payload.rawReply);
+          }
+          throw err;
+        }
       }),
     [blueprint, form, onChanged, runAction, selectedModelId, topics, user],
   );
@@ -277,10 +292,14 @@ const GenerateTab: React.FC<Props> = ({ frameworks, runAction, onChanged, busy, 
       </Panel>
 
       <div className="space-y-3">
+        {unbankedReply && <UnbankedReply reply={unbankedReply} subject={form.subjectName} />}
+
         {!result ? (
-          <Panel>
-            <EmptyState message="Choose the topics and press Write. Every question is generated from your school's curriculum library and shows the syllabus passages it came from, so you can check it before use." />
-          </Panel>
+          !unbankedReply && (
+            <Panel>
+              <EmptyState message="Choose the topics and press Write. Every question is generated from your school's curriculum library and shows the syllabus passages it came from, so you can check it before use." />
+            </Panel>
+          )
         ) : (
           <>
             <Panel className="px-4 py-3">

@@ -2516,8 +2516,11 @@ export const createAppRuntime = async ({
 
       if (method === 'POST' && pathname === '/api/functions/digital-examiner') {
         const data = await handleDigitalExaminerFunction(database, body, httpClient);
+        // The payload is kept alongside the error rather than nulled: a failed generation still
+        // carries the model's reply, and discarding it is what left the teacher with an error
+        // dialog and no way to recover the questions it had just written.
         return data?.error
-          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data } }
           : { type: 'json', status: 200, body: { data } };
       }
 

@@ -442,7 +442,8 @@ keys, and (optionally) an email provider for the activation email. See
 | An A-Level student is graded D1–F9 instead of A–F | Their class must be Senior 5 or 6 (grade level 12 or 13). Check the student's grade on their record. |
 | Support staff sees only the fees screen | Expected — that role is limited to fee status by design. |
 | **Draft this lesson** / **Write questions** is greyed out | Pick a configured AI model in the chat composer first. The **Local Rules** engine searches student records only and cannot write. |
-| The **Agent** or **MCP** switch is greyed out | The selected model cannot call tools. Choose one that can, or check that a model with an API key is selected. |
+| The **Agent** or **MCP** switch is greyed out | Only the built-in **Local Rules** engine cannot call tools — every real model can. Pick one from the model menu. |
+| A local model writes questions as prose instead of filling in the form | Small models often cannot follow a structured format. They are read back automatically and flagged, but marks and answers may be missing — check each one, or use a larger model. |
 | A generated plan or question says the syllabus does not cover something | The curriculum library has nothing on that topic. Upload your scheme of work for it under the curriculum library, then try again. |
 | Answers cite IGCSE outlines when you teach the Uganda syllabus | Set the curriculum on the form, and upload your own material — your uploads rank above the bundled outlines for your topics. |
 | **Publish** on a paper is refused | Every question on the paper must be approved first. Open the Question Bank and approve the remaining ones. |

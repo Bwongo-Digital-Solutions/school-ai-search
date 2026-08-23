@@ -299,7 +299,8 @@ docker compose --profile librechat up -d   # LibreChat, its MongoDB, and Meilise
 | Anthropic | `tools` with `input_schema`; `tool_use` blocks answered with `tool_result`. The assistant's raw content blocks are replayed verbatim, which is what keeps thinking blocks intact across a tool loop. |
 | OpenAI-compatible (`openai`, `groq`, `mistral`, `openrouter`) | `tools` of type `function`; `tool_calls` answered with `role: "tool"` messages. |
 | Google | `functionDeclarations`; `functionCall` answered with `functionResponse` parts. Annotation keywords Gemini rejects are stripped from the schema. |
-| Ollama, `local_rules` | No tools. Retrieval is folded into the prompt instead. |
+| Ollama | `tools` of type `function` on `/api/chat`; results returned as `{role:'tool', tool_name, content}`. Ollama matches a result to its call by **name** — it has no `tool_call_id`, so omitting `tool_name` leaves parallel results ambiguous. A call the model writes into its message text as fenced JSON is recovered, which is how small local models usually emit one. |
+| `local_rules` | Not a model, so no tools. Retrieval is folded into the prompt instead. |
 
 Claude 4.6 and later removed the sampling parameters, so `temperature` is omitted for that family via a targeted deny-list; older pinned Claude models still receive it.
 

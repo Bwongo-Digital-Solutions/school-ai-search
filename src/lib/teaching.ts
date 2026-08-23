@@ -28,7 +28,12 @@ const callTeachingFunction = async <T>(
 
   // These endpoints report refusals and validation failures as { error }; surface them as
   // exceptions so each screen's runAction wrapper shows the message.
-  if (error) throw error;
+  if (error) {
+    // Carry the payload on the error. A failed generation still returns what the model produced,
+    // and a bare message would throw that away — which is the difference between "it failed" and
+    // "it failed, here is what it wrote".
+    throw Object.assign(error, { payload: data ?? null });
+  }
   return data as T;
 };
 
