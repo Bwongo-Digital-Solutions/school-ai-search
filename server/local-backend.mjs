@@ -13,6 +13,7 @@ import { createSubscriptionCharge } from './services/payment-gateway.mjs';
 import { isPaymentWebhook, isWebhookSignatureValid } from './security/webhooks.mjs';
 import { renderActivationEmail, sendEmail } from './services/email.mjs';
 import {
+  DESIGNATIONS,
   designationsForRole,
   normaliseProfile,
   profileLabel,
@@ -1587,6 +1588,197 @@ const handleStudentCardFunction = async (database, body = {}) => {
 };
 
 /** Records a movement through the gate. Only the askari's profile grants this. */
+/* ── staff messages and events ─────────────────────────────────────── */
+
+const MESSAGE_AUDIENCES = ['user', 'role', 'designation', 'all'];
+const MESSAGE_PRIORITIES = ['normal', 'high'];
+
+const findUserByEmail = async (database, email) => {
+  const clean = String(email || '').trim().toLowerCase();
+  if (!clean) return null;
+  const rows = await database.query(
+    'SELECT id, auth_email, display_name, role, designation FROM users WHERE auth_email = $1 LIMIT 1',
+    [clean],
+  );
+  return rows.rows[0] || null;
+};
+
+/**
+ * The clause that decides whether a message is addressed to one person. A message reaches them
+ * when it names them, names a group they belong to, or names everybody — and never when they
+ * sent it themselves, because a broadcast should not ring its author's bell.
+ */
+const audienceClause = (user, startIndex) => ({
+  sql: `(
+      (m.audience_kind = 'all')
+      OR (m.audience_kind = 'role' AND m.audience_value = $${startIndex})
+      OR (m.audience_kind = 'designation' AND m.audience_value = $${startIndex + 1})
+      OR (m.audience_kind = 'user' AND m.recipient_user_id = $${startIndex + 2})
+    )
+    AND (m.sender_user_id IS NULL OR m.sender_user_id <> $${startIndex + 2})`,
+  values: [user.role, user.designation || '\u0000', user.id],
+});
+
+const listInbox = async (database, user, { limit = 50 } = {}) => {
+  const where = audienceClause(user, 1);
+  const rows = await database.query(
+    `
+      SELECT m.*, r.read_at AS reader_read_at
+      FROM internal_messages m
+      LEFT JOIN internal_message_reads r ON r.message_id = m.id AND r.user_id = $4
+      WHERE ${where.sql}
+      ORDER BY m.created_at DESC
+      LIMIT ${Math.min(Number(limit) || 50, 200)}
+    `,
+    [...where.values, user.id],
+  );
+
+  const messages = rows.rows.map((row) => ({
+    id: row.id,
+    subject: row.subject,
+    body: row.body,
+    category: row.category,
+    priority: row.priority,
+    sender_name: row.sender_name,
+    audience_kind: row.audience_kind,
+    audience_value: row.audience_value,
+    student_id: row.student_id,
+    created_at: row.created_at,
+    read: Boolean(row.reader_read_at),
+  }));
+
+  return { messages, unread: messages.filter((m) => !m.read).length };
+};
+
+/**
+ * Writes a message into the staff feed. Used both by staff sending to each other and by the
+ * system reporting an event, which is why the sender is optional.
+ */
+const postStaffMessage = async (database, {
+  senderUserId = null, senderName = '', recipientUserId = null,
+  audienceKind = 'all', audienceValue = '', subject, body,
+  priority = 'normal', category = 'message', studentId = null,
+}) => {
+  const inserted = await database.query(
+    `
+      INSERT INTO internal_messages
+        (id, sender_user_id, sender_name, recipient_user_id, student_id, subject, body,
+         audience_kind, audience_value, priority, category)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      RETURNING *
+    `,
+    [
+      randomUUID(), senderUserId, senderName, recipientUserId, studentId,
+      subject, body, audienceKind, audienceValue, priority, category,
+    ],
+  );
+  return inserted.rows[0];
+};
+
+/** Fire-and-forget event notice; a failure here must never break the action that caused it. */
+const notifyStaff = async (database, payload) => {
+  try {
+    await postStaffMessage(database, { ...payload, category: 'event' });
+  } catch (error) {
+    console.warn('Could not record a staff notification:', error instanceof Error ? error.message : error);
+  }
+};
+
+const handleMessagesFunction = async (database, body = {}) => {
+  const action = body.action || 'inbox';
+  const me = await findUserByEmail(database, body.actorEmail);
+  if (!me) return { error: 'Unknown staff account' };
+
+  if (action === 'inbox') {
+    return listInbox(database, me, { limit: body.limit });
+  }
+
+  if (action === 'staff') {
+    // The recipient picker: who can be written to, and which groups exist.
+    const rows = await database.query(
+      `
+        SELECT id, auth_email, display_name, role, designation
+        FROM users
+        WHERE approval_status = 'approved' AND id <> $1
+        ORDER BY display_name
+      `,
+      [me.id],
+    );
+    const groups = await database.query(
+      `
+        SELECT role, designation, COUNT(*)::int AS members
+        FROM users WHERE approval_status = 'approved'
+        GROUP BY role, designation
+      `,
+    );
+    return { staff: rows.rows, groups: groups.rows };
+  }
+
+  if (action === 'send') {
+    const subject = trimmedText(body.subject);
+    const text = trimmedText(body.body);
+    if (!subject) return { error: 'A subject is required' };
+    if (!text) return { error: 'A message is required' };
+
+    const audienceKind = MESSAGE_AUDIENCES.includes(body.audienceKind) ? body.audienceKind : null;
+    if (!audienceKind) return { error: `Audience must be one of ${MESSAGE_AUDIENCES.join(', ')}` };
+
+    let recipientUserId = null;
+    let audienceValue = trimmedText(body.audienceValue);
+
+    if (audienceKind === 'user') {
+      const recipient = await findUserByEmail(database, body.recipientEmail);
+      if (!recipient) return { error: 'No staff account with that email' };
+      recipientUserId = recipient.id;
+      audienceValue = '';
+    } else if (audienceKind === 'role') {
+      if (!['admin', 'teacher', 'support_staff'].includes(audienceValue)) {
+        return { error: 'Unknown staff role' };
+      }
+    } else if (audienceKind === 'designation') {
+      if (!DESIGNATIONS.includes(audienceValue)) return { error: 'Unknown staff designation' };
+    } else {
+      audienceValue = '';
+    }
+
+    const message = await postStaffMessage(database, {
+      senderUserId: me.id,
+      senderName: me.display_name,
+      recipientUserId,
+      audienceKind,
+      audienceValue,
+      subject,
+      body: text,
+      priority: MESSAGE_PRIORITIES.includes(body.priority) ? body.priority : 'normal',
+      studentId: body.studentId || null,
+    });
+    return { message };
+  }
+
+  if (action === 'read' || action === 'read_all') {
+    const ids = action === 'read'
+      ? [trimmedText(body.messageId)].filter(Boolean)
+      : (await listInbox(database, me)).messages.filter((m) => !m.read).map((m) => m.id);
+    if (action === 'read' && ids.length === 0) return { error: 'A message id is required' };
+
+    for (const id of ids) {
+      const existing = await database.query(
+        'SELECT id FROM internal_message_reads WHERE message_id = $1 AND user_id = $2 LIMIT 1',
+        [id, me.id],
+      );
+      if (!existing.rows[0]) {
+        await database.query(
+          'INSERT INTO internal_message_reads (id, message_id, user_id) VALUES ($1, $2, $3)',
+          [randomUUID(), id, me.id],
+        );
+      }
+    }
+    return listInbox(database, me);
+  }
+
+  return { error: `Unsupported action: ${action}` };
+};
+
 /**
  * Roll call. The register is the class list for a day with each student's mark against it, and
  * marking is an upsert: calling the register and scanning cards are two ways of doing the same
@@ -1774,6 +1966,15 @@ const handleExamClearanceFunction = async (database, body = {}) => {
         decision, note, trimmedText(body.recordedBy),
       ],
     );
+    if (decision === 'rejected') {
+      await notifyStaff(database, {
+        audienceKind: 'role', audienceValue: 'admin', priority: 'high', studentId: student.id,
+        subject: `${student.first_name} ${student.last_name} turned away from an exam`,
+        body: `${student.first_name} ${student.last_name} (${student.student_id}) was not admitted`
+          + `${note ? `: ${note}` : '.'}`,
+      });
+    }
+
     return { admission: inserted.rows[0], clearance };
   }
 
@@ -1845,6 +2046,13 @@ const handleGatePermissionFunction = async (database, body = {}) => {
         body.expectedReturn || null,
       ],
     );
+
+    await notifyStaff(database, {
+      audienceKind: 'designation', audienceValue: 'askari', studentId: student.id,
+      subject: `Gate pass for ${student.first_name} ${student.last_name}`,
+      body: `${grantedBy} allowed ${student.first_name} ${student.last_name} (${student.student_id}) `
+        + `to travel to ${destination}. Reason: ${reason}.`,
+    });
 
     return { permission: inserted.rows[0] };
   }
@@ -1963,6 +2171,16 @@ const handleGatePassFunction = async (database, body = {}) => {
         [permission.id, String(body.recordedBy || '').trim(), note],
       );
     }
+  }
+
+  const studentName = `${student.first_name} ${student.last_name}`;
+  if (decision === 'declined') {
+    await notifyStaff(database, {
+      audienceKind: 'role', audienceValue: 'admin', priority: 'high', studentId: student.id,
+      subject: `${studentName} turned back at the gate`,
+      body: `${studentName} (${student.student_id}) was refused exit${
+        note ? `: ${note}` : '.'}`,
+    });
   }
 
   const onPremises = decision === 'declined' ? true : direction === 'in';
@@ -2911,6 +3129,13 @@ export const createAppRuntime = async ({
         const data = await handleStudentCardFunction(database, body);
         return data?.error
           ? { type: 'json', status: 404, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/messages') {
+        const data = await handleMessagesFunction(database, body);
+        return data?.error
+          ? { type: 'json', status: 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
       }
 

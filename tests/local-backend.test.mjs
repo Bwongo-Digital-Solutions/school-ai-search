@@ -5972,3 +5972,153 @@ test('re-granting exam clearance supersedes the previous one', async () => {
     await cleanup();
   }
 });
+
+const seedStaff = async (runtime) => {
+  const make = async (email, name, role, designation) => {
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email, password: 'password123', displayName: name,
+    });
+    await runtime.database.query(
+      'UPDATE users SET role = $1, approval_status = $2 WHERE auth_email = $3',
+      [role, 'approved', email],
+    );
+    if (designation) {
+      await dispatch(runtime, 'POST', '/api/functions/auth', {
+        action: 'set_designation', email, designation,
+      });
+    }
+  };
+  await make('head@school.local', 'Head', 'admin', null);
+  await make('t1@school.local', 'Teacher One', 'teacher', null);
+  await make('t2@school.local', 'Teacher Two', 'teacher', null);
+  await make('askari@school.local', 'Askari', 'support_staff', 'askari');
+  await make('cook@school.local', 'Cook', 'support_staff', 'cook');
+};
+
+test('a staff message reaches one person, a group, or everybody', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (body) => dispatch(runtime, 'POST', '/api/functions/messages', body);
+  const unread = async (email) => (await call({ action: 'inbox', actorEmail: email })).body.data.unread;
+
+  try {
+    await seedStaff(runtime);
+
+    await call({
+      action: 'send', actorEmail: 'head@school.local', audienceKind: 'user',
+      recipientEmail: 't1@school.local', subject: 'About P5', body: 'See me at break.',
+    });
+    assert.equal(await unread('t1@school.local'), 1);
+    assert.equal(await unread('t2@school.local'), 0, 'a direct message reaches nobody else');
+
+    await call({
+      action: 'send', actorEmail: 'head@school.local', audienceKind: 'role',
+      audienceValue: 'teacher', subject: 'Staff meeting', body: 'Friday 4pm.',
+    });
+    assert.equal(await unread('t2@school.local'), 1);
+    assert.equal(await unread('askari@school.local'), 0, 'a role group stops at that role');
+
+    await call({
+      action: 'send', actorEmail: 'head@school.local', audienceKind: 'designation',
+      audienceValue: 'askari', subject: 'Gate duty', body: 'Cover the night shift.',
+    });
+    assert.equal(await unread('askari@school.local'), 1);
+    assert.equal(await unread('cook@school.local'), 0, 'a designation group stops at that job');
+
+    const before = await unread('t1@school.local');
+    await call({
+      action: 'send', actorEmail: 't1@school.local', audienceKind: 'all',
+      subject: 'Lost keys', body: 'Found a bunch of keys.',
+    });
+    assert.equal(await unread('cook@school.local'), 1);
+    // A broadcast should not ring its own author's bell.
+    assert.equal(await unread('t1@school.local'), before);
+
+    for (const bad of [
+      { audienceKind: 'all', body: 'x' },
+      { audienceKind: 'all', subject: 'x' },
+      { audienceKind: 'everyone', subject: 'x', body: 'y' },
+      { audienceKind: 'user', recipientEmail: 'nobody@school.local', subject: 'x', body: 'y' },
+    ]) {
+      const res = await call({ action: 'send', actorEmail: 'head@school.local', ...bad });
+      assert.equal(res.status, 400);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test('read state is per person and re-reading is idempotent', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (body) => dispatch(runtime, 'POST', '/api/functions/messages', body);
+
+  try {
+    await seedStaff(runtime);
+    await call({
+      action: 'send', actorEmail: 'head@school.local', audienceKind: 'all',
+      subject: 'Sports day', body: 'Saturday.',
+    });
+
+    const inbox = (await call({ action: 'inbox', actorEmail: 't1@school.local' })).body.data;
+    assert.equal(inbox.unread, 1);
+
+    const read = await call({
+      action: 'read', actorEmail: 't1@school.local', messageId: inbox.messages[0].id,
+    });
+    assert.equal(read.body.data.unread, 0);
+
+    // One row per reader per message, so opening it twice is not a second read.
+    const again = await call({
+      action: 'read', actorEmail: 't1@school.local', messageId: inbox.messages[0].id,
+    });
+    assert.equal(again.body.data.unread, 0);
+
+    // The same broadcast is still unread for everyone else.
+    const other = await call({ action: 'inbox', actorEmail: 't2@school.local' });
+    assert.equal(other.body.data.unread, 1);
+
+    const all = await call({ action: 'read_all', actorEmail: 't2@school.local' });
+    assert.equal(all.body.data.unread, 0);
+    assert.equal((await call({ action: 'inbox', actorEmail: 'cook@school.local' })).body.data.unread, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('gate and exam refusals raise an event for the office', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+  const inbox = async (email) =>
+    (await call('/api/functions/messages', { action: 'inbox', actorEmail: email })).body.data;
+
+  try {
+    await seedStaff(runtime);
+
+    await call('/api/functions/gate-pass', {
+      code: 'STU-2026-001', direction: 'out', decision: 'declined',
+      note: 'No slip', recordedBy: 'Askari',
+    });
+    const office = await inbox('head@school.local');
+    const gateEvent = office.messages.find((m) => m.category === 'event');
+    assert.ok(gateEvent, 'the office hears about a student turned back');
+    assert.equal(gateEvent.priority, 'high');
+    // The whole staff room does not need to know.
+    assert.equal((await inbox('t2@school.local')).messages.some((m) => m.category === 'event'), false);
+
+    // Granting a pass tells the gate a slip is coming before the student arrives.
+    await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-002', reason: 'Home',
+      destination: 'Jinja', grantedBy: 'Matron',
+    });
+    assert.ok((await inbox('askari@school.local')).messages
+      .some((m) => m.category === 'event' && /Gate pass for/.test(m.subject)));
+
+    await call('/api/functions/exam-clearance', {
+      action: 'admit', code: 'STU-2026-003', decision: 'rejected',
+      note: 'No clearance', recordedBy: 'Invigilator',
+    });
+    assert.ok((await inbox('head@school.local')).messages
+      .some((m) => /turned away from an exam/.test(m.subject)));
+  } finally {
+    await cleanup();
+  }
+});
