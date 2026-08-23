@@ -722,6 +722,40 @@ CREATE TABLE IF NOT EXISTS gate_passes (
   recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Permission for a student to leave, granted ahead of time by a teacher, the matron or an
+-- administrator. The gate does not grant permission, it checks one: the askari scans the card,
+-- reads who allowed the trip and where the student is going, and then approves or declines.
+-- Separating the two means the person at the gate is never the person authorising the exit.
+CREATE TABLE IF NOT EXISTS gate_permissions (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  reason TEXT NOT NULL DEFAULT '',
+  destination TEXT NOT NULL DEFAULT '',
+  granted_by TEXT NOT NULL DEFAULT '',
+  granted_by_email TEXT NOT NULL DEFAULT '',
+  granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  valid_until TIMESTAMPTZ,
+  expected_return DATE,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'used', 'declined', 'cancelled')),
+  closed_at TIMESTAMPTZ,
+  closed_by TEXT NOT NULL DEFAULT '',
+  decline_reason TEXT NOT NULL DEFAULT ''
+);
+
+-- The gate's own verdict on a movement. A declined attempt is still recorded — a student turned
+-- back at the gate is exactly the event a security log exists to capture — so presence is read
+-- from approved movements only. Defaults to 'approved' so movements written before the gate
+-- could decline continue to read as approved.
+ALTER TABLE gate_passes ADD COLUMN IF NOT EXISTS decision TEXT NOT NULL DEFAULT 'approved';
+ALTER TABLE gate_passes DROP CONSTRAINT IF EXISTS gate_passes_decision_check;
+ALTER TABLE gate_passes ADD CONSTRAINT gate_passes_decision_check
+  CHECK (decision IN ('approved', 'declined'));
+ALTER TABLE gate_passes ADD COLUMN IF NOT EXISTS permission_id TEXT
+  REFERENCES gate_permissions(id) ON DELETE SET NULL;
+ALTER TABLE gate_passes ADD COLUMN IF NOT EXISTS destination TEXT NOT NULL DEFAULT '';
+ALTER TABLE gate_passes ADD COLUMN IF NOT EXISTS note TEXT NOT NULL DEFAULT '';
+
 -- One row per meal a student has actually been served, written when the cook scans an ID
 -- card at the serving point. The absence of a row is what "has not eaten" means, so the
 -- unique index is what stops a second helping being recorded as a first.
