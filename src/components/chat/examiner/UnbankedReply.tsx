@@ -21,6 +21,8 @@ interface ParsedQuestion {
   marks: number | null;
   answer: string;
   scheme: string[];
+  /** Prose the model wrote after this question — kept rather than dropped. */
+  note: string;
 }
 
 const NUMBERED = /^\s*(?:\*\*)?(?:Question\s*)?(\d+)[.)：:]/i;
@@ -38,7 +40,15 @@ const parseQuestions = (text: string): ParsedQuestion[] => {
     // Skip the model's lead-in, which is everything before the first numbered item.
     if (!match) continue;
 
-    const cleaned = block.replace(NUMBERED, '').replace(/\*\*/g, '').trim();
+    const withoutNumber = block.replace(NUMBERED, '').replace(/\*\*/g, '').trim();
+    if (!withoutNumber) continue;
+
+    // A question and its answer/options/scheme sit on consecutive lines; a blank line after them
+    // marks the model moving on. Split there so closing prose is shown as a note rather than glued
+    // onto the last question's stem — and kept, not dropped.
+    const [core, ...trailing] = withoutNumber.split(/\n\s*\n/);
+    const cleaned = core.trim();
+    const note = trailing.join('\n\n').trim();
     if (!cleaned) continue;
 
     const lines = cleaned.split(/\n/).map(line => line.trim()).filter(Boolean);
@@ -63,6 +73,7 @@ const parseQuestions = (text: string): ParsedQuestion[] => {
       marks: marksMatch ? Number(marksMatch[1]) : null,
       answer: answerLine ? answerLine.replace(ANSWER, '').trim() : '',
       scheme: lines.filter(isBullet).map(line => line.replace(/^[-*•]\s+/, '').trim()),
+      note,
     });
   }
 
@@ -197,6 +208,10 @@ const UnbankedReply: React.FC<{ reply: string; subject?: string }> = ({ reply, s
                       </li>
                     ))}
                   </ul>
+                )}
+
+                {question.note && (
+                  <p className="mt-1.5 text-[11px] italic text-gray-400">{question.note}</p>
                 )}
               </div>
               {question.marks !== null && (

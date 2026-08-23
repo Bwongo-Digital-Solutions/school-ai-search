@@ -6122,3 +6122,88 @@ test('gate and exam refusals raise an event for the office', async () => {
     await cleanup();
   }
 });
+
+test('generation keeps everything the model produced', async () => {
+  // Three things were being thrown away: questions past the requested count, answers and mark
+  // schemes written in prose, and the model's closing remarks. All of it is work already done.
+  const reply = [
+    'Sure! Below are five questions on trigonometry:',
+    '',
+    '1. State the three primary trigonometric ratios. [3 marks]',
+    'Answer: sine = opp/hyp, cosine = adj/hyp, tangent = opp/adj',
+    '- Names all three (2)',
+    '- Expresses each correctly (1)',
+    '',
+    '2. Which equals sin(30)? [1 mark]',
+    'A. 0.5',
+    'B. 0.866',
+    'Answer: A',
+    '',
+    '3. Prove sin^2(x) + cos^2(x) = 1. [5 marks]',
+    '',
+    '4. Define the unit circle. [2 marks]',
+    '',
+    '5. What is cos(0)? [1 mark]',
+    '',
+    '6. Convert 45 degrees to radians. [2 marks]',
+    '',
+    '7. State the sine rule. [2 marks]',
+    '',
+    'Let me know if you want these adapted for a different level.',
+  ].join('\n');
+
+  const httpClient = async (url) =>
+    url.endsWith('/api/chat')
+      ? new Response(JSON.stringify({ message: { content: reply } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      : new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+  const originalBaseUrl = process.env.OLLAMA_BASE_URL;
+  process.env.OLLAMA_BASE_URL = 'http://ollama.test';
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const result = await dispatch(runtime, 'POST', '/api/functions/digital-examiner', {
+      action: 'generate_questions',
+      requesterRole: 'teacher',
+      modelId: 'ollama-default',
+      subjectName: 'Mathematics',
+      topics: ['Trigonometry'],
+      count: 5,
+    });
+
+    assert.equal(result.status, 200);
+    const questions = result.body.data.questions;
+
+    // Asked for five, the model wrote seven — all seven are kept. `count` is a request, not a
+    // ceiling on what comes back.
+    assert.equal(questions.length, 7, 'questions past the requested count must not be dropped');
+
+    // Answers and mark schemes written in prose are captured, not blanked.
+    const [first] = questions;
+    assert.match(first.correct_answer, /sine = opp\/hyp/);
+    assert.equal(first.marking_scheme.length, 2);
+    assert.equal(first.marking_scheme[0].marks, 2);
+
+    const mcq = questions.find((question) => question.question_type === 'mcq');
+    assert.deepEqual(mcq.options, ['0.5', '0.866']);
+    assert.equal(mcq.correct_answer, 'A');
+
+    // The closing remark is kept as a note rather than glued onto the last question's stem.
+    const last = questions[questions.length - 1];
+    assert.match(last.stem, /State the sine rule/);
+    assert.ok(!/adapted for a different level/.test(last.stem), 'closing prose must not join the stem');
+    assert.match(last.review_notes, /adapted for a different level/);
+
+    // And the whole reply is returned regardless, so nothing is lost.
+    assert.match(result.body.data.rawReply, /Below are five questions/);
+    assert.match(result.body.data.rawReply, /adapted for a different level/);
+  } finally {
+    if (originalBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
+    else process.env.OLLAMA_BASE_URL = originalBaseUrl;
+    await cleanup();
+  }
+});

@@ -619,10 +619,10 @@ const generateQuestions = async ({ database, body, actor, httpClient }) => {
           id, blueprint_id, curriculum, subject_id, subject_name, grade_level, topic, subtopic,
           question_type, difficulty, bloom_level, command_word, stem, options, correct_answer,
           marking_scheme, marks, expected_time_minutes, assessment_objective, source_references,
-          status, generated_by, created_by
+          review_notes, status, generated_by, created_by
         ) VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
-          $20, 'draft', $21, $22
+          $20, $21, 'draft', $22, $23
         )
         RETURNING ${QUESTION_COLUMNS}
       `,
@@ -647,6 +647,8 @@ const generateQuestions = async ({ database, body, actor, httpClient }) => {
         asInteger(question.expectedTimeMinutes, 2),
         trimmed(question.assessmentObjective),
         JSON.stringify(references),
+        // Anything the model wrote around the question, so it is visible rather than lost.
+        trimmed(question.reviewNotes),
         JSON.stringify(generatedBy),
         actor.email || actor.name,
       ],
