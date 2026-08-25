@@ -354,11 +354,24 @@ const recoverToolCallFromText = (text, toolNames) => {
 
     try {
       const parsed = JSON.parse(candidate.slice(start, end + 1));
-      const name = parsed.name || parsed.tool || parsed.function?.name;
-      if (!toolNames.includes(name)) continue;
+      const declared = parsed.name || parsed.tool || parsed.function?.name;
+      const input = parseToolInput(
+        parsed.arguments ?? parsed.parameters ?? parsed.input ?? parsed.function?.arguments ?? parsed,
+      );
 
-      const input = parsed.arguments ?? parsed.parameters ?? parsed.input ?? parsed.function?.arguments;
-      calls.push({ id: `recovered-${calls.length}`, name, input: parseToolInput(input) });
+      // A model that names the call correctly is the easy case. Models also routinely put something
+      // else in `name` — the topic, a title — while the payload is exactly right. Rejecting those on
+      // the label alone threw away good work, so when a single tool is on offer the payload is
+      // accepted whatever it was called.
+      const name = toolNames.includes(declared)
+        ? declared
+        : toolNames.length === 1 && input && Object.keys(input).length > 0
+          ? toolNames[0]
+          : null;
+
+      if (!name) continue;
+
+      calls.push({ id: `recovered-${calls.length}`, name, input });
     } catch {
       // Not JSON, or truncated mid-object — nothing to recover from this candidate.
     }

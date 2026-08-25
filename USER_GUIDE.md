@@ -278,9 +278,25 @@ blank is filled in from the curriculum's own paper structure.
 **Generate** — pick the topics and how many questions you want. Tick **Target weak topics** to
 weight the paper towards whatever this cohort scored lowest on in the gradebook.
 
-Every question comes back as **Awaiting review**, showing its type, marks, difficulty, Bloom level,
-assessment objective, the expected answer, the mark-by-mark scheme, and the syllabus passage behind
-it. Approve the ones you want; retire the ones you do not.
+What comes back opens in a **text editor**, as readable questions rather than as a machine format.
+It is an ordinary document: retype a stem, add or delete an option, change the marks, remove a
+question you do not want, or write a new one at the bottom by hand. The toolbar has bold, italic,
+headings, bullet and numbered lists and links, with **Undo**/**Redo** and the usual **Ctrl+B** /
+**Ctrl+I** shortcuts; **Preview** shows the paper as it reads, and **Ctrl+S** saves.
+
+- **Save to question bank** writes the document back. Questions you edited are updated in place —
+  editing does not create a second copy — and anything you added is banked as a new draft. It says
+  how many were updated and how many added.
+- **Download** takes the document as a Markdown file, and **Copy** puts it on the clipboard, so a
+  draft is never trapped in the browser.
+
+Nothing the model wrote is thrown away. If it answers in prose, or in a format that cannot be read
+as questions at all, its reply opens in the same editor for you to shape and save, instead of
+disappearing into an error message.
+
+Below the editor, every question also appears as a card marked **Awaiting review**, showing its
+type, marks, difficulty, Bloom level, assessment objective, the expected answer, the mark-by-mark
+scheme, and the syllabus passage behind it. Approve the ones you want; retire the ones you do not.
 
 **Question Bank** — your approved questions, reusable across terms and years. Filter by status,
 topic or subject, tick the ones you want, and assemble them into a paper.
@@ -443,7 +459,8 @@ keys, and (optionally) an email provider for the activation email. See
 | Support staff sees only the fees screen | Expected — that role is limited to fee status by design. |
 | **Draft this lesson** / **Write questions** is greyed out | Pick a configured AI model in the chat composer first. The **Local Rules** engine searches student records only and cannot write. |
 | The **Agent** or **MCP** switch is greyed out | Only the built-in **Local Rules** engine cannot call tools — every real model can. Pick one from the model menu. |
-| A local model writes questions as prose instead of filling in the form | Small models often cannot follow a structured format. They are read back automatically and flagged, but marks and answers may be missing — check each one, or use a larger model. |
+| A local model writes questions as prose instead of filling in the form | They are read back automatically and flagged. Marks and answers may be missing — check each one in the editor before approving. |
+| The Digital Examiner's reply does not look like questions | It opens in the editor as the model wrote it. Number each question (`1.`, `2.`) and give it a line of text, then **Save to question bank** — nothing is lost while it sits there. |
 | A generated plan or question says the syllabus does not cover something | The curriculum library has nothing on that topic. Upload your scheme of work for it under the curriculum library, then try again. |
 | Answers cite IGCSE outlines when you teach the Uganda syllabus | Set the curriculum on the form, and upload your own material — your uploads rank above the bundled outlines for your topics. |
 | **Publish** on a paper is refused | Every question on the paper must be approved first. Open the Question Bank and approve the remaining ones. |

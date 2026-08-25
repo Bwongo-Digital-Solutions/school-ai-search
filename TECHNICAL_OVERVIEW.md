@@ -344,6 +344,18 @@ A **blueprint** is the fine-tuning object: curriculum, academic year, subject, g
 
 `generate_questions` retrieves first, then runs the agent loop with a `submit_questions` tool whose schema is the question array. With `targetWeakTopics`, it aggregates `gradebook_entries` for the cohort and weights the paper towards the topics they scored lowest on. Every generated question carries `source_references`.
 
+### Reading what the model produced
+
+`server/services/question-parse.mjs` is the single reader, used both by the recovery path and by the editor's save, so the two cannot drift.
+
+The rule is **recognise a question by its shape, not by its wrapper**. Models nest the payload differently on every run — a bare array, `{questions: […]}`, `{name: …, arguments: {…}}` labelled with the *topic* rather than the tool name, or several objects back to back in one fenced block. `extractQuestions` walks any parsed value and collects everything question-shaped: a stem under any of its usual names (`stem`, `question`, `text`, `prompt`, `description`), or two other marks of a question — a mark scheme beside options, a difficulty beside a command word. Scalars on a wrapper are carried down onto what it wraps, because a model that puts the fields under `arguments` often leaves the question text beside it in `description`. Marks default to the mark scheme's total; the stem falls back to the scheme's first point.
+
+`jsonValuesIn` scans for *balanced* JSON values rather than taking the span from the first brace to the last, which is what allows several concatenated objects to be read, and lets a reply truncated mid-object keep everything complete that came before the cut. Trailing commas get one repair attempt. Only when no JSON parses does the numbered-prose reader run.
+
+`questionsToMarkdown` / `markdownToQuestions` are the round trip behind the editor. Each question ends with an HTML comment carrying the fields prose has no place for — `id`, topic, type, difficulty, Bloom level, objective. **The `id` is what makes Save an update rather than a duplicate**; delete the comment and that question is banked as new, which is a reasonable way to fork one. The round trip being lossless is a tested property.
+
+`save_questions` takes the whole edited document in one call — `markdown` or a `questions` array, both read through the same parser — and returns `{ questions, markdown, saved, created, updated }`. The returned Markdown is the saved rows re-rendered, so the editor adopts the new ids and a second save updates the same rows. A row whose id no longer exists is inserted rather than dropped: a save must not lose the teacher's work. The editor itself is `src/components/chat/examiner/QuestionEditor.tsx` — a plain `textarea` driven through `selectionStart`/`selectionEnd`, with its own undo history because programmatic edits clear the browser's, and a preview that escapes HTML and strips the meta comments before rendering.
+
 Questions save as `draft`. **A paper refuses to publish while any of its questions is unreviewed**, and a retired question cannot reach a paper at all. Paper totals are summed from the questions themselves rather than trusted from the client, so the printed total always matches what is on the page.
 
 `publish_paper` writes a real `exams` row (and an `exam_schedules` row when a date and class are supplied) inside a transaction, and audits the action. Publishing twice is refused.

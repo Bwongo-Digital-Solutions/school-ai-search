@@ -6207,3 +6207,275 @@ test('generation keeps everything the model produced', async () => {
     await cleanup();
   }
 });
+
+test('a question labelled with its topic rather than the tool name is still banked', async () => {
+  // The reported bug, exactly as it came back: the model returned one good question as a fenced tool
+  // call, but put the *topic* in `name` and nested the question under `arguments`. Matching on the
+  // wrapper threw the whole thing away and told the teacher nothing could be read.
+  const payload = {
+    name: 'Nutrition in Plants',
+    arguments: {
+      topic: 'Nutrition in Plants',
+      questionType: 'mcq',
+      stem: 'Photosynthesis: word and balanced equations, raw materials, conditions and products.',
+      correctAnswer: 'The leaf as an organ adapted for photosynthesis.',
+      difficulty: 'moderate',
+      expectedTimeMinutes: 15,
+      markingScheme: [
+        { marks: 3, point: 'States the balanced equation' },
+        { marks: 2, point: 'Names the raw materials' },
+      ],
+      options: ['The leaf as an organ adapted for photosynthesis.', 'Testing a leaf for starch.'],
+    },
+  };
+
+  const httpClient = async () =>
+    new Response(
+      JSON.stringify({
+        message: { content: 'Here is the question.\n```json\n' + JSON.stringify(payload) + '\n```' },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+
+  const originalBaseUrl = process.env.OLLAMA_BASE_URL;
+  process.env.OLLAMA_BASE_URL = 'http://ollama.test';
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const result = await dispatch(runtime, 'POST', '/api/functions/digital-examiner', {
+      action: 'generate_questions',
+      requesterRole: 'teacher',
+      actorName: 'Grace Nakato',
+      modelId: 'ollama-default',
+      subjectName: 'Biology',
+      gradeLevel: 9,
+      topics: ['Nutrition in Plants'],
+      count: 1,
+    });
+
+    assert.equal(result.status, 200, 'a well-formed question must not be reported as a failure');
+    assert.equal(result.body.data.questions.length, 1);
+
+    const [question] = result.body.data.questions;
+    assert.match(question.stem, /Photosynthesis: word and balanced equations/);
+    assert.equal(question.question_type, 'mcq');
+    assert.equal(question.options.length, 2);
+    assert.match(question.correct_answer, /adapted for photosynthesis/);
+    assert.equal(question.marking_scheme.length, 2);
+    // Marks were not given explicitly, so they come from the mark scheme rather than defaulting to 1.
+    assert.equal(question.marks, 5);
+
+    // The editor opens on this, so it has to arrive with the response.
+    assert.match(result.body.data.markdown, /Photosynthesis: word and balanced equations/);
+    assert.match(result.body.data.markdown, new RegExp(`id:${question.id}`));
+  } finally {
+    if (originalBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
+    else process.env.OLLAMA_BASE_URL = originalBaseUrl;
+    await cleanup();
+  }
+});
+
+test('a question is recognised by its shape, whatever it is wrapped in', async () => {
+  const { extractQuestionsFromJsonBlocks } = await import('../server/services/question-parse.mjs');
+
+  const one = { stem: 'Define osmosis.', marks: 2 };
+  const two = { question: 'State two products of photosynthesis.', marks: 2 };
+
+  const shapes = {
+    'bare array': [one, two],
+    'questions key': { questions: [one, two] },
+    'nested under arguments': { name: 'submit_questions', arguments: { questions: [one, two] } },
+    'a single bare object': one,
+    'labelled with the topic': { name: 'Osmosis', arguments: one },
+  };
+
+  for (const [label, value] of Object.entries(shapes)) {
+    const parsed = extractQuestionsFromJsonBlocks('```json\n' + JSON.stringify(value) + '\n```');
+    assert.ok(parsed.length >= 1, `${label} should parse`);
+    assert.equal(parsed[0].stem, 'Define osmosis.', `${label} should keep the stem`);
+  }
+
+  // No stem key at all, but a type and an answer is signal enough.
+  const inferred = extractQuestionsFromJsonBlocks(
+    JSON.stringify({ type: 'short_answer', answer: 'Chlorophyll', prompt: 'Name the green pigment.' }),
+  );
+  assert.equal(inferred.length, 1);
+  assert.equal(inferred[0].correctAnswer, 'Chlorophyll');
+
+  // Prose with no JSON in it leaves the numbered reader to try instead.
+  assert.deepEqual(extractQuestionsFromJsonBlocks('Here are some questions for you.'), []);
+});
+
+test('several JSON objects in one block are all read, and the stem is found wherever it was put', async () => {
+  const { extractQuestionsFromJsonBlocks } = await import('../server/services/question-parse.mjs');
+
+  // What Ollama actually returns: three objects back to back inside a single fence, none of them
+  // carrying a `stem` — the question text is on the wrapper, under `description`. Reading the span
+  // from the first brace to the last is not valid JSON, which used to lose all three.
+  const question = (number) => ({
+    name: `Question ${number}`,
+    arguments: {
+      assessmentObjective: 'AO2 Handling Information and Problem Solving',
+      bloomLevel: 'moderate',
+      citationIndexes: [1],
+      commandWord: 'describe',
+      correctAnswer: 'Water and mineral salts move through the xylem.',
+      difficulty: 'medium',
+      markingScheme: [
+        { marks: 5, point: 'Names the xylem' },
+        { marks: 10, point: 'Explains transpiration pull' },
+      ],
+      options: ['Xylem', 'Phloem'],
+    },
+    description: `Describe transport in plants, part ${number}.`,
+  });
+
+  const reply =
+    '```json\n' + [1, 2, 3].map((number) => JSON.stringify(question(number), null, 2)).join('\n\n') + '\n```';
+
+  const parsed = extractQuestionsFromJsonBlocks(reply);
+  assert.equal(parsed.length, 3, 'every object in the block is a question the model wrote');
+  assert.equal(parsed[0].stem, 'Describe transport in plants, part 1.');
+  assert.equal(parsed[2].stem, 'Describe transport in plants, part 3.');
+  assert.equal(parsed[0].marks, 15, 'marks come from the scheme when none were given');
+  assert.deepEqual(parsed[1].options, ['Xylem', 'Phloem']);
+
+  // A reply cut off mid-object keeps everything that was complete before the cut.
+  const truncated = '```json\n' + JSON.stringify(question(1)) + '\n\n{ "name": "Question 2", "arguments": { "stem": "cut';
+  assert.equal(extractQuestionsFromJsonBlocks(truncated).length, 1);
+
+  // Trailing commas are the usual reason a model's JSON will not parse, and are worth one retry.
+  assert.equal(extractQuestionsFromJsonBlocks('{"questions":[{"stem":"Define osmosis.",},]}').length, 1);
+
+  // A question's own mark-scheme rows must not each be counted as questions.
+  const scored = extractQuestionsFromJsonBlocks(
+    '{"stem":"Describe transport in plants.","markingScheme":[{"marks":3,"point":"Names the xylem"},{"marks":2,"point":"Explains transpiration"}]}',
+  );
+  assert.equal(scored.length, 1, 'a scheme belongs to its question, it is not three questions');
+  assert.equal(scored[0].markingScheme.length, 2);
+});
+
+test('questions survive the round trip through the editable Markdown', async () => {
+  const { markdownToQuestions, questionsToMarkdown } = await import('../server/services/question-parse.mjs');
+
+  const questions = [
+    {
+      id: 'q-1',
+      stem: 'Which of these is a product of photosynthesis?',
+      topic: 'Nutrition in Plants',
+      questionType: 'mcq',
+      difficulty: 'easy',
+      bloomLevel: 'remember',
+      options: ['Oxygen', 'Nitrogen', 'Methane', 'Argon'],
+      correctAnswer: 'Oxygen',
+      markingScheme: [{ point: 'Names oxygen', marks: 1 }],
+      marks: 1,
+      assessmentObjective: 'AO1',
+      reviewNotes: 'Check the distractors.',
+    },
+    {
+      id: 'q-2',
+      stem: 'Explain how a leaf is adapted for photosynthesis.',
+      topic: 'Nutrition in Plants',
+      questionType: 'structured',
+      difficulty: 'moderate',
+      options: [],
+      correctAnswer: 'Broad and thin, with many chloroplasts.',
+      markingScheme: [
+        { point: 'Broad lamina for light capture', marks: 2 },
+        { point: 'Thin for short diffusion distance', marks: 1 },
+      ],
+      marks: 3,
+    },
+  ];
+
+  const markdown = questionsToMarkdown(questions);
+  const parsed = markdownToQuestions(markdown);
+
+  assert.equal(parsed.length, 2);
+  for (const [index, original] of questions.entries()) {
+    const round = parsed[index];
+    for (const field of ['id', 'stem', 'topic', 'questionType', 'difficulty', 'correctAnswer', 'marks']) {
+      assert.deepEqual(round[field], original[field], `${field} must survive the round trip`);
+    }
+    assert.deepEqual(round.options, original.options);
+    assert.deepEqual(round.markingScheme, original.markingScheme);
+  }
+
+  // A teacher who deletes the trailing marker is forking the question, not corrupting it.
+  const forked = markdownToQuestions(markdown.replace(/<!--[\s\S]*?-->/g, ''));
+  assert.equal(forked.length, 2);
+  assert.equal(forked[0].id, undefined, 'a question with no marker is treated as new');
+  assert.equal(forked[0].stem, questions[0].stem);
+});
+
+test('saving the edited draft updates the same questions instead of duplicating them', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const save = (body) =>
+      dispatch(runtime, 'POST', '/api/functions/digital-examiner', {
+        action: 'save_questions',
+        requesterRole: 'teacher',
+        actorName: 'Grace Nakato',
+        subjectName: 'Biology',
+        gradeLevel: 9,
+        ...body,
+      });
+
+    // First save: a draft typed in the editor, with no ids yet.
+    const created = await save({
+      markdown: [
+        '## 1. Define osmosis.  [2 marks]',
+        '',
+        '**Answer:** Movement of water across a partially permeable membrane.',
+        '',
+        '## 2. Which gas do plants take in?  [1 marks]',
+        '',
+        '- A. Carbon dioxide',
+        '- B. Nitrogen',
+        '',
+        '**Answer:** Carbon dioxide',
+      ].join('\n'),
+    });
+
+    assert.equal(created.status, 200);
+    assert.equal(created.body.data.created, 2);
+    assert.equal(created.body.data.updated, 0);
+    assert.equal(created.body.data.questions[0].status, 'draft', 'saved questions still need review');
+
+    // The response carries the questions back as Markdown, now with their ids, which is what the
+    // editor adopts — so the second save has to update rather than insert again.
+    const edited = created.body.data.markdown.replace('Define osmosis.', 'Define osmosis precisely.');
+    const updated = await save({ markdown: edited });
+
+    assert.equal(updated.status, 200);
+    assert.equal(updated.body.data.updated, 2, 'both questions should be recognised as existing');
+    assert.equal(updated.body.data.created, 0);
+
+    const banked = await dispatch(runtime, 'POST', '/api/functions/digital-examiner', {
+      action: 'list_questions',
+      requesterRole: 'teacher',
+    });
+    assert.equal(banked.body.data.questions.length, 2, 'editing must not duplicate the bank');
+    assert.ok(
+      banked.body.data.questions.some((question) => question.stem === 'Define osmosis precisely.'),
+      'the edit should be persisted',
+    );
+
+    // A question added by hand at the bottom joins the bank without disturbing the other two.
+    const grown = await save({
+      markdown: `${edited}\n\n## 3. Name the green pigment in leaves.  [1 marks]\n\n**Answer:** Chlorophyll\n`,
+    });
+    assert.equal(grown.body.data.created, 1);
+    assert.equal(grown.body.data.updated, 2);
+
+    // Nothing to read is reported rather than silently saving an empty question.
+    const empty = await save({ markdown: 'Just some notes with no numbered questions.' });
+    assert.equal(empty.status, 400);
+    assert.match(empty.body.error, /could be read as a question/);
+  } finally {
+    await cleanup();
+  }
+});

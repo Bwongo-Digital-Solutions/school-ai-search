@@ -173,6 +173,13 @@ If the app says `Could not reach Ollama`, check that `ollama serve` is running, 
 
 ## Docker Development
 
+> **Requires Docker Compose v2.** Docker Engine installed from a distribution package does not
+> always include it, and a missing plugin fails obscurely — the Docker CLI stops recognising
+> `compose` as a command and reads the next argument as its own, giving
+> `unknown shorthand flag: 'p' in -p`. Check with `docker compose version`; install with
+> `sudo apt-get install docker-compose-plugin` (or the equivalent for your distribution).
+> `./containers.sh` falls back to a standalone `docker-compose` if that is what the machine has.
+
 Live-reload development stack:
 
 ```bash

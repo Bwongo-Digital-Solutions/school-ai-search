@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, CheckCircle2, FileDown, Sparkles, Target, Terminal, Trash2 } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Sparkles, Target, Terminal, Trash2 } from 'lucide-react';
 import Field from '@/components/common/Field';
 import { useAuth } from '@/contexts/AuthContext';
 import { useChatContext } from '@/contexts/ChatContext';
@@ -7,7 +7,7 @@ import { callDigitalExaminer, gradeOptionsFor } from '@/lib/teaching';
 import { EmptyState, Panel, PrimaryButton, SecondaryButton } from '../fees/shared';
 import { currentAcademicYear } from '../lessons/shared';
 import { QuestionCard } from './shared';
-import UnbankedReply from './UnbankedReply';
+import QuestionEditor from './QuestionEditor';
 import type { AgentStep } from '@/types/agent';
 import type { CurriculumFramework, ExamBlueprint, ExamQuestion } from '@/types/teaching';
 
@@ -28,6 +28,16 @@ interface GenerateResult {
   recoveredFromProse?: boolean;
   /** The model's raw reply, kept so nothing it produced is lost. */
   rawReply?: string;
+  /** The questions as editable Markdown, rendered server-side so both ends read one format. */
+  markdown?: string;
+}
+
+interface SaveResult {
+  questions: ExamQuestion[];
+  markdown: string;
+  saved: number;
+  created: number;
+  updated: number;
 }
 
 /**
@@ -52,8 +62,14 @@ const GenerateTab: React.FC<Props> = ({ frameworks, runAction, onChanged, busy, 
   const [topicText, setTopicText] = useState('');
   const [result, setResult] = useState<GenerateResult | null>(null);
   const [showSteps, setShowSteps] = useState(false);
-  /** A model reply that produced no bankable questions, kept so it can still be read and saved. */
-  const [unbankedReply, setUnbankedReply] = useState('');
+  /**
+   * The editable document. Holds whatever the run produced — questions the model returned properly,
+   * or, when none could be read, its reply verbatim for the teacher to shape by hand.
+   */
+  const [draft, setDraft] = useState('');
+  /** True when the draft is the model's unparsed reply rather than banked questions. */
+  const [draftIsRaw, setDraftIsRaw] = useState(false);
+  const [saveStatus, setSaveStatus] = useState('');
 
   // Selecting a blueprint on the previous tab prefills this form and pins generation to it.
   useEffect(() => {
@@ -88,7 +104,7 @@ const GenerateTab: React.FC<Props> = ({ frameworks, runAction, onChanged, busy, 
   const generate = useCallback(
     () =>
       runAction('Writing questions', async () => {
-        setUnbankedReply('');
+        setSaveStatus('');
         try {
           const response = await callDigitalExaminer<GenerateResult>(
             'generate_questions',
@@ -96,14 +112,18 @@ const GenerateTab: React.FC<Props> = ({ frameworks, runAction, onChanged, busy, 
             user,
           );
           setResult(response);
+          setDraft(response.markdown || '');
+          setDraftIsRaw(false);
           onChanged();
         } catch (err) {
-          // A failed generation still carries whatever the model wrote. Keep it so it can be shown
-          // formatted below rather than lost with the error, then re-throw so the banner appears.
-          const payload = (err as { payload?: { rawReply?: string } })?.payload;
-          if (payload?.rawReply) {
+          // A failed generation still carries whatever the model wrote. Put it in the editor rather
+          // than losing it with the error, then re-throw so the banner appears too.
+          const payload = (err as { payload?: { markdown?: string; rawReply?: string } })?.payload;
+          const text = payload?.markdown || payload?.rawReply;
+          if (text) {
             setResult(null);
-            setUnbankedReply(payload.rawReply);
+            setDraft(text);
+            setDraftIsRaw(true);
           }
           throw err;
         }
@@ -149,41 +169,49 @@ const GenerateTab: React.FC<Props> = ({ frameworks, runAction, onChanged, busy, 
     [onChanged, runAction, user],
   );
 
-  /** Downloads what was generated as Markdown, so a draft is never trapped in the browser. */
-  const downloadDraft = useCallback(() => {
-    if (!result) return;
+  /**
+   * Parses the edited document and writes it back to the question bank.
+   *
+   * Questions that still carry their marker update in place; ones the teacher typed, or whose marker
+   * they removed, are added as new drafts. The server returns the saved rows re-rendered, so the
+   * editor picks up the new ids and a second Save updates rather than duplicating.
+   */
+  const saveDraft = useCallback(
+    () =>
+      runAction('Saving the questions', async () => {
+        const response = await callDigitalExaminer<SaveResult>(
+          'save_questions',
+          {
+            markdown: draft,
+            curriculum: form.curriculum,
+            subjectName: form.subjectName,
+            gradeLevel: form.gradeLevel,
+            blueprintId: blueprint?.id,
+          },
+          user,
+        );
 
-    const lines = [
-      `# Generated questions — ${form.subjectName || 'Untitled'}`,
-      '',
-      ...result.questions.flatMap((question, index) => [
-        `## ${index + 1}. ${question.stem}`,
-        '',
-        ...(question.options.length > 0
-          ? question.options.map((option, position) => `${String.fromCharCode(65 + position)}. ${option}`)
-          : []),
-        question.options.length > 0 ? '' : null,
-        question.correct_answer ? `**Answer:** ${question.correct_answer}` : null,
-        ...(question.marking_scheme.length > 0
-          ? ['', '**Marking scheme:**', ...question.marking_scheme.map(entry => `- ${entry.point} (${entry.marks})`)]
-          : []),
-        '',
-        `_${[question.topic, question.difficulty, `${question.marks} mark(s)`, question.status]
-          .filter(Boolean)
-          .join(' · ')}_`,
-        '',
-      ]),
-      ...(result.rawReply ? ['---', '', '## The model\'s original reply', '', result.rawReply] : []),
-    ].filter((line): line is string => line !== null);
-
-    const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `generated-questions-${new Date().toISOString().slice(0, 10)}.md`;
-    link.click();
-    URL.revokeObjectURL(url);
-  }, [form.subjectName, result]);
+        setDraft(response.markdown);
+        setDraftIsRaw(false);
+        setResult(previous => ({
+          questions: response.questions,
+          steps: previous?.steps || [],
+          weakTopics: previous?.weakTopics || [],
+          recoveredFromProse: previous?.recoveredFromProse,
+          rawReply: previous?.rawReply,
+        }));
+        setSaveStatus(
+          [
+            response.updated > 0 ? `${response.updated} updated` : null,
+            response.created > 0 ? `${response.created} added` : null,
+          ]
+            .filter(Boolean)
+            .join(' · ') || 'Saved',
+        );
+        onChanged();
+      }),
+    [blueprint, draft, form.curriculum, form.gradeLevel, form.subjectName, onChanged, runAction, user],
+  );
 
   const setStatus = useCallback(
     (question: ExamQuestion, status: string) =>
@@ -292,10 +320,26 @@ const GenerateTab: React.FC<Props> = ({ frameworks, runAction, onChanged, busy, 
       </Panel>
 
       <div className="space-y-3">
-        {unbankedReply && <UnbankedReply reply={unbankedReply} subject={form.subjectName} />}
+        {draft && (
+          <QuestionEditor
+            value={draft}
+            onChange={setDraft}
+            onSave={saveDraft}
+            busy={Boolean(busy)}
+            status={saveStatus}
+            tone={draftIsRaw ? 'warning' : 'normal'}
+            filenamePrefix={`questions-${form.subjectName || 'draft'}`.toLowerCase().replace(/\s+/g, '-')}
+            title={draftIsRaw ? "The model's reply" : `Draft questions — ${form.subjectName}`}
+            hint={
+              draftIsRaw
+                ? 'None of this came back in a form that could be banked automatically, so it is here as written. Shape it into numbered questions and press Save to add them to the bank.'
+                : 'Edit anything — stems, options, answers, marks. Save writes the changes back to the question bank.'
+            }
+          />
+        )}
 
         {!result ? (
-          !unbankedReply && (
+          !draft && (
             <Panel>
               <EmptyState message="Choose the topics and press Write. Every question is generated from your school's curriculum library and shows the syllabus passages it came from, so you can check it before use." />
             </Panel>
@@ -309,13 +353,6 @@ const GenerateTab: React.FC<Props> = ({ frameworks, runAction, onChanged, busy, 
                   {result.questions.length === 1 ? '' : 's'} written · edit anything, then approve
                 </p>
                 <div className="flex items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={downloadDraft}
-                    className="inline-flex items-center gap-1.5 text-[11px] text-gray-500 hover:text-gray-700 dark:hover:text-gray-300"
-                  >
-                    <FileDown className="w-3.5 h-3.5" /> Download draft
-                  </button>
                   <button
                     type="button"
                     onClick={() => setShowSteps(!showSteps)}

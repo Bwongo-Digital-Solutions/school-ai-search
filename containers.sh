@@ -108,8 +108,52 @@ set_environment() {
   esac
 }
 
+# Which Compose is installed, worked out once on first use.
+#
+# `docker compose` (the v2 CLI plugin) and `docker-compose` (the v1 standalone) take the same flags
+# for everything this script does. Machines that have Docker Engine from a distribution package
+# often have neither, or only the standalone one — and a missing plugin fails obscurely: the Docker
+# CLI stops recognising `compose` as a command and reads the next argument as its own, which is
+# where "unknown shorthand flag: 'p' in -p" comes from.
+compose_bin=""
+
+detect_compose() {
+  [ -n "$compose_bin" ] && return 0
+
+  if ! command -v docker >/dev/null 2>&1; then
+    cat >&2 <<'EOF'
+Docker is not installed, or is not on PATH.
+
+Install Docker Engine, then run this script again:
+  https://docs.docker.com/engine/install/
+EOF
+    exit 1
+  fi
+
+  if docker compose version >/dev/null 2>&1; then
+    compose_bin="docker compose"
+  elif command -v docker-compose >/dev/null 2>&1; then
+    compose_bin="docker-compose"
+  else
+    cat >&2 <<'EOF'
+Docker is installed, but Docker Compose is not.
+
+Install the Compose plugin, then run this script again:
+  Debian/Ubuntu:  sudo apt-get install docker-compose-plugin
+  RHEL/Fedora:    sudo dnf install docker-compose-plugin
+  Other:          https://docs.docker.com/compose/install/linux/
+
+Check it with:  docker compose version
+EOF
+    exit 1
+  fi
+}
+
 compose() {
-  docker compose -p "$project_name" -f "$compose_file" "$@"
+  detect_compose
+  # Unquoted on purpose: "docker compose" has to split into a command and its subcommand.
+  # shellcheck disable=SC2086
+  $compose_bin -p "$project_name" -f "$compose_file" "$@"
 }
 
 show_endpoints() {
