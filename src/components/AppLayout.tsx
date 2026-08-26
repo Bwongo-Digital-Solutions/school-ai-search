@@ -11,6 +11,7 @@ import FeeManagementWorkspace from './chat/FeeManagementWorkspace';
 import LessonPlannerWorkspace from './chat/LessonPlannerWorkspace';
 import DigitalExaminerWorkspace from './chat/DigitalExaminerWorkspace';
 import SettingsPanel from './chat/SettingsPanel';
+import MonitoringDashboard from './chat/MonitoringDashboard';
 import AppFooter from './common/AppFooter';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useAuth } from '@/contexts/AuthContext';
@@ -87,6 +88,8 @@ const AppLayout: React.FC = () => {
         return <LessonPlannerWorkspace />;
       case 'examiner':
         return <DigitalExaminerWorkspace />;
+      case 'monitoring':
+        return <MonitoringDashboard />;
       case 'settings':
         return <SettingsPanel />;
       default:

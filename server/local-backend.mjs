@@ -2192,6 +2192,213 @@ const handleGatePassFunction = async (database, body = {}) => {
 };
 
 /** The gate's own record: who moved which way, when, and whether they were let through. */
+/**
+ * One read for the monitoring dashboard: what happened at the gate, at the exam room door,
+ * in the register and in the kitchen, plus who is off the premises right now.
+ *
+ * Everything is scoped to a single day except the "currently out" list, which cannot be —
+ * a student signed out yesterday and not yet back is exactly who a monitoring screen exists
+ * to surface, so presence is resolved over a rolling window instead.
+ */
+const PRESENCE_WINDOW_DAYS = 30;
+
+const handleMonitoringFunction = async (database, body = {}) => {
+  const date = body.date || todayIso();
+  const limit = Math.min(Number(body.limit) || 100, 500);
+
+  const [movements, permissions, clearances, admissions, attendance, meals, presence] =
+    await Promise.all([
+      database.query(
+        `
+          SELECT g.id, g.direction, g.decision, g.authorised_by, g.reason, g.destination,
+                 g.note, g.recorded_by, g.recorded_at,
+                 s.student_id AS student_number, s.first_name, s.last_name,
+                 s.grade_level, s.class_section
+          FROM gate_passes g
+          JOIN students s ON s.id = g.student_id
+          WHERE CAST(g.recorded_at AS DATE) = $1
+          ORDER BY g.recorded_at DESC
+          LIMIT ${limit}
+        `,
+        [date],
+      ),
+      database.query(
+        `
+          SELECT p.id, p.reason, p.destination, p.granted_by, p.granted_at, p.expected_return,
+                 p.status, s.student_id AS student_number, s.first_name, s.last_name
+          FROM gate_permissions p
+          JOIN students s ON s.id = p.student_id
+          WHERE p.status = 'active'
+          ORDER BY p.granted_at DESC
+          LIMIT ${limit}
+        `,
+      ),
+      database.query(
+        `
+          SELECT c.id, c.status, c.note, c.granted_by, c.granted_at,
+                 s.student_id AS student_number, s.first_name, s.last_name
+          FROM exam_clearances c
+          JOIN students s ON s.id = c.student_id
+          ORDER BY c.granted_at DESC
+          LIMIT ${limit}
+        `,
+      ),
+      database.query(
+        `
+          SELECT a.id, a.decision, a.note, a.recorded_by, a.recorded_at,
+                 s.student_id AS student_number, s.first_name, s.last_name
+          FROM exam_admissions a
+          JOIN students s ON s.id = a.student_id
+          ORDER BY a.recorded_at DESC
+          LIMIT ${limit}
+        `,
+      ),
+      database.query(
+        `
+          SELECT a.status, s.grade_level, s.class_section
+          FROM attendance_records a
+          JOIN students s ON s.id = a.student_id
+          WHERE a.attendance_date = $1
+        `,
+        [date],
+      ),
+      database.query(
+        'SELECT meal FROM meal_records WHERE meal_date = $1',
+        [date],
+      ),
+      // Resolved in JS rather than with DISTINCT ON, which pg-mem does not support.
+      database.query(
+        `
+          SELECT g.student_id, g.direction, g.recorded_at, g.destination, g.authorised_by,
+                 s.student_id AS student_number, s.first_name, s.last_name,
+                 s.grade_level, s.class_section
+          FROM gate_passes g
+          JOIN students s ON s.id = g.student_id
+          WHERE g.decision = 'approved'
+            AND g.recorded_at >= NOW() - INTERVAL '${PRESENCE_WINDOW_DAYS} days'
+          ORDER BY g.recorded_at DESC
+        `,
+      ),
+    ]);
+
+  const named = (row) => ({
+    student_number: row.student_number,
+    full_name: `${row.first_name} ${row.last_name}`,
+    grade_level: row.grade_level,
+    class_section: row.class_section,
+  });
+
+  const gateRows = movements.rows.map((row) => ({
+    id: row.id,
+    direction: row.direction,
+    decision: row.decision,
+    authorised_by: row.authorised_by,
+    reason: row.reason,
+    destination: row.destination,
+    note: row.note,
+    recorded_by: row.recorded_by,
+    recorded_at: row.recorded_at,
+    ...named(row),
+  }));
+  const approvedGate = gateRows.filter((row) => row.decision === 'approved');
+
+  // The newest approved movement per student decides where they are now.
+  const seen = new Set();
+  const out = [];
+  for (const row of presence.rows) {
+    if (seen.has(row.student_id)) continue;
+    seen.add(row.student_id);
+    if (row.direction === 'out') {
+      out.push({
+        since: row.recorded_at,
+        destination: row.destination,
+        authorised_by: row.authorised_by,
+        ...named(row),
+      });
+    }
+  }
+
+  const tallyAttendance = (name) => attendance.rows.filter((row) => row.status === name).length;
+  const byClass = new Map();
+  for (const row of attendance.rows) {
+    const key = `${row.grade_level}|${row.class_section}`;
+    const entry = byClass.get(key)
+      || { grade_level: row.grade_level, class_section: row.class_section, present: 0, absent: 0, late: 0, excused: 0 };
+    if (entry[row.status] !== undefined) entry[row.status] += 1;
+    byClass.set(key, entry);
+  }
+
+  const tallyMeal = (name) => meals.rows.filter((row) => row.meal === name).length;
+
+  const admissionRows = admissions.rows.map((row) => ({
+    id: row.id,
+    decision: row.decision,
+    note: row.note,
+    recorded_by: row.recorded_by,
+    recorded_at: row.recorded_at,
+    ...named(row),
+  }));
+
+  return {
+    date,
+    gate: {
+      counts: {
+        out: approvedGate.filter((row) => row.direction === 'out').length,
+        in: approvedGate.filter((row) => row.direction === 'in').length,
+        declined: gateRows.length - approvedGate.length,
+        total: gateRows.length,
+      },
+      movements: gateRows,
+      active_permissions: permissions.rows.map((row) => ({
+        id: row.id,
+        reason: row.reason,
+        destination: row.destination,
+        granted_by: row.granted_by,
+        granted_at: row.granted_at,
+        expected_return: row.expected_return,
+        student_number: row.student_number,
+        full_name: `${row.first_name} ${row.last_name}`,
+      })),
+    },
+    // Who is off the premises right now, whichever day they left.
+    off_premises: out,
+    exams: {
+      active_clearances: clearances.rows.filter((row) => row.status === 'active').length,
+      clearances: clearances.rows.map((row) => ({
+        id: row.id,
+        status: row.status,
+        note: row.note,
+        granted_by: row.granted_by,
+        granted_at: row.granted_at,
+        student_number: row.student_number,
+        full_name: `${row.first_name} ${row.last_name}`,
+      })),
+      admissions: admissionRows,
+      admitted: admissionRows.filter((row) => row.decision === 'approved').length,
+      rejected: admissionRows.filter((row) => row.decision === 'rejected').length,
+    },
+    attendance: {
+      date,
+      marked: attendance.rows.length,
+      present: tallyAttendance('present'),
+      absent: tallyAttendance('absent'),
+      late: tallyAttendance('late'),
+      excused: tallyAttendance('excused'),
+      by_class: [...byClass.values()].sort(
+        (a, b) => a.grade_level - b.grade_level
+          || String(a.class_section).localeCompare(String(b.class_section)),
+      ),
+    },
+    meals: {
+      date,
+      breakfast: tallyMeal('breakfast'),
+      lunch: tallyMeal('lunch'),
+      supper: tallyMeal('supper'),
+      served: meals.rows.length,
+    },
+  };
+};
+
 const handleGateLogFunction = async (database, body = {}) => {
   const limit = Math.min(Number(body.limit) || 50, 200);
   const params = [];
@@ -3162,6 +3369,11 @@ export const createAppRuntime = async ({
         return data?.error
           ? { type: 'json', status: 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/monitoring') {
+        const data = await handleMonitoringFunction(database, body);
+        return { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/gate-log') {
