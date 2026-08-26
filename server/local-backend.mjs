@@ -5,10 +5,30 @@ import { randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import { dirname, extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { corsHeaders } from './http/cors.mjs';
+import { requestIsSecure, securityHeaders } from './http/security-headers.mjs';
 import { createDatabaseConnection, waitForDatabase } from './db/connection.mjs';
 import { initializeDatabase } from './db/schema.mjs';
-import { createTenantRegistry } from './db/tenants.mjs';
-import { createControlConnection, initializeControlSchema, getTenantBySubdomain, listTenants, lookupTenantRoute } from './db/control.mjs';
+import { DEFAULT_TENANT, createTenantRegistry } from './db/tenants.mjs';
+import {
+  createControlConnection,
+  getTenantBySubdomain,
+  initializeControlSchema,
+  listTenants,
+  lookupTenantRoute,
+  publicTenant,
+  setTenantStatus,
+} from './db/control.mjs';
+import { isPlatformOwner, platformOwnerRefusal } from './auth/platform-owner.mjs';
+import { authenticateRequest, requireRole, resolveActor } from './auth/actor.mjs';
+import {
+  clearedSessionCookie,
+  issueSessionToken,
+  sessionCookie,
+  shouldRefresh,
+  verifySessionToken,
+  readCookie,
+} from './auth/session.mjs';
 import { createSubscriptionCharge } from './services/payment-gateway.mjs';
 import { isPaymentWebhook, isWebhookSignatureValid } from './security/webhooks.mjs';
 import { renderActivationEmail, sendEmail } from './services/email.mjs';
@@ -23,6 +43,7 @@ import {
   checkAvailability,
   confirmSubscriptionPayment,
   normalizeSubdomain,
+  provisionTenant,
   startSubscription,
   sweepSubscriptions,
 } from './services/provisioning.mjs';
@@ -608,21 +629,20 @@ const TABLES = {
   },
 };
 
-const sendJson = (response, statusCode, payload) => {
+const sendJson = (response, statusCode, payload, headers = {}) => {
   response.writeHead(statusCode, {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type, X-Tenant',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    ...corsHeaders(response),
+    ...securityHeaders(response),
     'Content-Type': 'application/json; charset=utf-8',
+    ...headers,
   });
   response.end(JSON.stringify(payload));
 };
 
 const sendBinary = (response, statusCode, body, headers = {}) => {
   response.writeHead(statusCode, {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type, X-Tenant',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    ...corsHeaders(response),
+    ...securityHeaders(response),
     ...headers,
   });
   response.end(body);
@@ -630,9 +650,8 @@ const sendBinary = (response, statusCode, body, headers = {}) => {
 
 const sendText = (response, statusCode, text) => {
   response.writeHead(statusCode, {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type, X-Tenant',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    ...corsHeaders(response),
+    ...securityHeaders(response),
     'Content-Type': 'text/plain; charset=utf-8',
   });
   response.end(text);
@@ -685,7 +704,7 @@ const serveStatic = async (requestPath, response, staticRoot) => {
 
   const extension = extname(pathToServe);
   const contentType = MIME_TYPES[extension] || 'application/octet-stream';
-  response.writeHead(200, { 'Content-Type': contentType });
+  response.writeHead(200, { ...securityHeaders(response), 'Content-Type': contentType });
   createReadStream(pathToServe).pipe(response);
 };
 
@@ -711,6 +730,53 @@ const sanitizeUser = (user) => {
   const { password_hash, ...rest } = user;
   return rest;
 };
+
+/** The signed-in user's own record, as the app needs it to render. */
+const loadSessionUser = async (database, userId) => {
+  const { rows } = await database.query(
+    `SELECT id, auth_email, display_name, role, avatar_url, created_at, approval_status, designation
+     FROM users WHERE id = $1 LIMIT 1`,
+    [userId],
+  );
+  return rows[0] || null;
+};
+
+/**
+ * Who may reach each table through the generic /api/db endpoint.
+ *
+ * This endpoint had no role check of any kind: any request could read or write any of the 48 tables
+ * in the allow-list above, including every invoice and payment in the school. The allow-list only
+ * ever constrained *which* tables and columns, never *who*.
+ *
+ * The default is the teaching pair, because that is what the app's screens actually need, and the
+ * exceptions below are the tables that hold money or credentials. Support staff appear nowhere:
+ * their access is the fee-status endpoint and the ID-scan card, not the database.
+ *
+ * This is the floor, not the ceiling — a table-level rule cannot express "a teacher may edit their
+ * own class". It replaces nothing with something.
+ */
+const DB_DEFAULT_ROLES = ['admin', 'teacher'];
+
+const DB_TABLE_ROLES = {
+  fee_structures: ['admin'],
+  payments: ['admin'],
+  invoices: ['admin'],
+  receipts: ['admin'],
+  fee_bursaries: ['admin'],
+  student_fee_standings: ['admin'],
+  payment_transactions: ['admin'],
+  // Parent/guardian portal sign-in records.
+  portal_accounts: ['admin'],
+  // The bursar's stores and the school's statutory returns.
+  inventory_items: ['admin'],
+  inventory_transactions: ['admin'],
+  compliance_reports: ['admin'],
+};
+
+const rolesForTable = (table) => DB_TABLE_ROLES[table] || DB_DEFAULT_ROLES;
+
+/** Thrown when a caller may not touch a table, so the route can answer 403 rather than 500. */
+class UnauthorizedError extends Error {}
 
 const requireTable = (table) => {
   const config = TABLES[table];
@@ -799,21 +865,33 @@ const buildConflictClause = (config, insertColumns) => {
  * triggered it. Postgres stays the system of record, and a reindex from Settings repairs anything
  * a missed sync left stale.
  */
-const scheduleSearchSync = (database, table, { deletedIds = null, httpClient } = {}) => {
+const scheduleSearchSync = (database, table, { deletedIds = null, httpClient, tenantId } = {}) => {
   if (!isSearchConfigured()) return;
 
+  // The tenant decides which index is touched. Without it every school wrote into the same six
+  // indexes, and because a sync clears before refilling, one school's attendance mark wiped another
+  // school's documents and replaced them with its own.
   const work = deletedIds
-    ? removeFromIndex(table, deletedIds, { httpClient })
-    : syncTable(database, table, { httpClient });
+    ? removeFromIndex(table, deletedIds, { httpClient, tenantId })
+    : syncTable(database, table, { httpClient, tenantId });
 
   work.catch((error) => {
     console.warn('Search sync failed:', error instanceof Error ? error.message : error);
   });
 };
 
-const handleDbQuery = async (database, body, httpClient = fetch) => {
+const handleDbQuery = async (database, body, httpClient = fetch, { tenantId, actor: authenticated } = {}) => {
   const { table, operation, columns, filters = [], orderBy, limit, payload, single } = body || {};
   const config = requireTable(table);
+
+  // Unlike the action endpoints, this one never carried a role in its body, so there is nothing to
+  // fall back to: an internal caller (a test, or the server calling itself) is simply not checked,
+  // and every real request is. The HTTP layer always supplies an actor — null when there is no
+  // valid session — so in production this is enforced on every call.
+  if (authenticated !== undefined && requireRole(authenticated, rolesForTable(table))) {
+    throw new UnauthorizedError(`Not allowed to read or write ${table}`);
+  }
+
   const selectedColumns = resolveColumns(columns, config.columns);
 
   if (operation === 'select') {
@@ -858,7 +936,7 @@ const handleDbQuery = async (database, body, httpClient = fetch) => {
       insertedRows.push(...result.rows.map(formatRow));
     }
 
-    scheduleSearchSync(database, table, { httpClient });
+    scheduleSearchSync(database, table, { httpClient, tenantId });
     return single ? insertedRows[0] ?? null : insertedRows;
   }
 
@@ -891,7 +969,7 @@ const handleDbQuery = async (database, body, httpClient = fetch) => {
       values,
     );
 
-    scheduleSearchSync(database, table, { httpClient });
+    scheduleSearchSync(database, table, { httpClient, tenantId });
     return single ? result.rows[0] ?? null : result.rows.map(formatRow);
   }
 
@@ -910,6 +988,7 @@ const handleDbQuery = async (database, body, httpClient = fetch) => {
     scheduleSearchSync(database, table, {
       deletedIds: result.rows.map((row) => row.id).filter(Boolean),
       httpClient,
+      tenantId,
     });
     return single ? result.rows[0] ?? null : result.rows.map(formatRow);
   }
@@ -964,8 +1043,28 @@ const insertMessage = async (database, { conversationId, role, content, attachme
   return { id };
 };
 
-const handleAuthFunction = async (database, body) => {
+const handleAuthFunction = async (database, body, { tenantId, headers = {}, actor } = {}) => {
   const action = body?.action;
+
+  // Whether to mark the cookie Secure. Omitted on plain-HTTP localhost, where a browser would
+  // otherwise refuse to store it at all and nobody could sign in during development.
+  const secure = requestIsSecure({ headers });
+
+  /** Signing a user in is the one place a session is minted. */
+  const withSession = (user) => ({
+    user,
+    setCookie: sessionCookie(issueSessionToken({ userId: user.id, tenantId: tenantId || DEFAULT_TENANT }), { secure }),
+  });
+
+  // Who the caller is, according to their cookie. The browser used to keep the signed-in user in
+  // localStorage and be believed; this is the server's own answer to the same question.
+  if (action === 'session') {
+    return { user: actor ? await loadSessionUser(database, actor.id) : null };
+  }
+
+  if (action === 'signout') {
+    return { signedOut: true, setCookie: clearedSessionCookie({ secure }) };
+  }
 
   if (action === 'signup') {
     const email = String(body.email || '').trim().toLowerCase();
@@ -1002,7 +1101,12 @@ const handleAuthFunction = async (database, body) => {
       [randomUUID(), email, displayName, role, '', hashPassword(password), approvalStatus, designation],
     );
 
-    return { user: sanitizeUser(inserted.rows[0]), pending: approvalStatus !== 'approved' };
+    const user = sanitizeUser(inserted.rows[0]);
+    // A pending account is not signed in — it has no access until an administrator approves it — so
+    // only the founding (auto-approved) account leaves here with a session.
+    return approvalStatus === 'approved'
+      ? { ...withSession(user), pending: false }
+      : { user, pending: true };
   }
 
   if (action === 'set_designation') {
@@ -1046,7 +1150,7 @@ const handleAuthFunction = async (database, body) => {
       return { error: 'Your account is awaiting administrator approval.' };
     }
 
-    return { user: sanitizeUser(user) };
+    return withSession(sanitizeUser(user));
   }
 
   if (action === 'log_audit') {
@@ -1088,9 +1192,8 @@ const handleAuthFunction = async (database, body) => {
   }
 
   if (action === 'update_role') {
-    if (body.requesterRole !== 'admin') {
-      return { error: 'Unauthorized' };
-    }
+    const refusal = requireRole(resolveActor(actor, body), ['admin']);
+    if (refusal) return refusal;
 
     if (!USER_ROLES.includes(body.newRole)) {
       return { error: `Unsupported role: ${body.newRole}` };
@@ -1116,9 +1219,8 @@ const handleAuthFunction = async (database, body) => {
   // Edit an existing account's name, sign-in email and designation. Separate from update_role so a
   // rename cannot silently change someone's permissions, and vice versa.
   if (action === 'update_account') {
-    if (body.requesterRole !== 'admin') {
-      return { error: 'Unauthorized' };
-    }
+    const refusal = requireRole(resolveActor(actor, body), ['admin']);
+    if (refusal) return refusal;
 
     const existing = await database.query('SELECT * FROM users WHERE id = $1 LIMIT 1', [body.userId]);
     const target = existing.rows[0];
@@ -1158,16 +1260,15 @@ const handleAuthFunction = async (database, body) => {
       [displayName, email, requested || null, body.userId],
     );
 
-    await recordAccountDecision(database, body, 'account_updated', updated.rows[0]);
+    await recordAccountDecision(database, body, 'account_updated', updated.rows[0], actor);
     return { user: sanitizeUser(updated.rows[0]) };
   }
 
   // Permanently remove an account. Distinct from reject_account, which is the pending-signup path:
   // this deletes staff who have already been approved and are leaving the school.
   if (action === 'delete_account') {
-    if (body.requesterRole !== 'admin') {
-      return { error: 'Unauthorized' };
-    }
+    const refusal = requireRole(resolveActor(actor, body), ['admin']);
+    if (refusal) return refusal;
 
     const existing = await database.query('SELECT * FROM users WHERE id = $1 LIMIT 1', [body.userId]);
     const target = existing.rows[0];
@@ -1175,7 +1276,8 @@ const handleAuthFunction = async (database, body) => {
 
     // Deleting the account you are signed in as would strand you mid-session, and it is almost
     // always a misclick rather than an intention.
-    if (String(body.requesterEmail || '').trim().toLowerCase() === target.auth_email) {
+    const requesterEmail = actor === undefined ? body.requesterEmail : actor?.email;
+    if (String(requesterEmail || '').trim().toLowerCase() === target.auth_email) {
       return { error: 'You cannot delete the account you are signed in with' };
     }
 
@@ -1191,14 +1293,13 @@ const handleAuthFunction = async (database, body) => {
     }
 
     await database.query('DELETE FROM users WHERE id = $1', [body.userId]);
-    await recordAccountDecision(database, body, 'account_deleted', target);
+    await recordAccountDecision(database, body, 'account_deleted', target, actor);
     return { deleted: true, user: sanitizeUser(target) };
   }
 
   if (action === 'approve_account') {
-    if (body.requesterRole !== 'admin') {
-      return { error: 'Unauthorized' };
-    }
+    const refusal = requireRole(resolveActor(actor, body), ['admin']);
+    if (refusal) return refusal;
 
     const result = await database.query(
       `
@@ -1214,14 +1315,13 @@ const handleAuthFunction = async (database, body) => {
       return { error: 'User not found' };
     }
 
-    await recordAccountDecision(database, body, 'account_approved', result.rows[0]);
+    await recordAccountDecision(database, body, 'account_approved', result.rows[0], actor);
     return { user: result.rows[0] };
   }
 
   if (action === 'reject_account') {
-    if (body.requesterRole !== 'admin') {
-      return { error: 'Unauthorized' };
-    }
+    const refusal = requireRole(resolveActor(actor, body), ['admin']);
+    if (refusal) return refusal;
 
     // Rejection deletes the account outright. An administrator can never be rejected this way —
     // that guards against locking every admin out of the school.
@@ -1242,7 +1342,7 @@ const handleAuthFunction = async (database, body) => {
       return { error: 'User not found' };
     }
 
-    await recordAccountDecision(database, body, 'account_rejected', result.rows[0]);
+    await recordAccountDecision(database, body, 'account_rejected', result.rows[0], actor);
     return { deleted: true, user: result.rows[0] };
   }
 
@@ -1250,9 +1350,14 @@ const handleAuthFunction = async (database, body) => {
 };
 
 // Approvals and rejections are sensitive admin actions, so they are recorded server-side rather
-// than relying on the client to log them. The requester's identity rides in the request body,
-// consistent with the rest of the auth endpoint's trust-the-client model.
-const recordAccountDecision = async (database, body, auditAction, target) => {
+// than relying on the client to log them. The requester is whoever the session says, falling back
+// to the body only for an internal call that had no session to read.
+const recordAccountDecision = async (database, body, auditAction, target, actor) => {
+  const author = {
+    email: actor === undefined ? body.requesterEmail || '' : actor?.email || '',
+    name: actor === undefined ? body.requesterName || '' : actor?.name || '',
+  };
+
   await database.query(
     `
       INSERT INTO audit_logs (
@@ -1261,8 +1366,8 @@ const recordAccountDecision = async (database, body, auditAction, target) => {
     `,
     [
       randomUUID(),
-      body.requesterEmail || '',
-      body.requesterName || '',
+      author.email,
+      author.name,
       'admin',
       auditAction,
       target.id,
@@ -1688,9 +1793,12 @@ const notifyStaff = async (database, payload) => {
   }
 };
 
-const handleMessagesFunction = async (database, body = {}) => {
+const handleMessagesFunction = async (database, body = {}, { actor } = {}) => {
   const action = body.action || 'inbox';
-  const me = await findUserByEmail(database, body.actorEmail);
+
+  // Whose inbox this is comes from the session. It used to come from an email in the request body,
+  // which meant anyone could read anyone's messages by typing their address.
+  const me = await findUserByEmail(database, actor === undefined ? body.actorEmail : actor?.email);
   if (!me) return { error: 'Unknown staff account' };
 
   if (action === 'inbox') {
@@ -2484,8 +2592,23 @@ const handleMealRecordFunction = async (database, body = {}) => {
   return { meal: inserted.rows[0], already_served: false };
 };
 
-const handleFeeStatusFunction = async (database, body = {}) => {
+/**
+ * Fee status for one student by code, or for the whole school.
+ *
+ * The by-code lookup is deliberately open: it is what the gate scanner and the parent portal use,
+ * and the code *is* the credential — you have to know a student's number to ask about them.
+ *
+ * The listing form is not. With no code this returns every student in the school alongside their
+ * balances, and it used to do that for anyone at all who could reach the URL. It now needs a
+ * session, which is what the staff screens that use it have.
+ */
+const handleFeeStatusFunction = async (database, body = {}, { actor: authenticated } = {}) => {
   const code = parseStudentCode(body.code);
+
+  if (!code && authenticated !== undefined) {
+    const refusal = requireRole(authenticated, ['admin', 'teacher', 'support_staff']);
+    if (refusal) return refusal;
+  }
 
   const [students, invoices, payments] = await Promise.all([
     code
@@ -2596,10 +2719,10 @@ const loadFeeSummaries = async (database) => {
   }
 };
 
-const handleAiChatFunction = async (database, body, httpClient) => {
-  if (!CHAT_ROLES.includes(body?.requesterRole)) {
-    return { error: 'Unauthorized' };
-  }
+const handleAiChatFunction = async (database, body, httpClient, { actor: authenticated } = {}) => {
+  const actor = resolveActor(authenticated, body);
+  const refusal = requireRole(actor, CHAT_ROLES);
+  if (refusal) return refusal;
 
   const message = String(body?.message || '').trim();
   const hasImage = Boolean(body?.imageData);
@@ -2633,11 +2756,7 @@ const handleAiChatFunction = async (database, body, httpClient) => {
       mode: body?.mode === 'agent' ? 'agent' : 'direct',
       useRag: Boolean(body?.useRag),
       mcpServerIds: Array.isArray(body?.mcpServerIds) ? body.mcpServerIds : null,
-      actor: {
-        email: String(body?.actorEmail || ''),
-        name: String(body?.actorName || ''),
-        role: body.requesterRole,
-      },
+      actor,
       httpClient,
       generateLocalReply: generateAssistantReply,
       feeSummaries: await loadFeeSummaries(database),
@@ -2738,7 +2857,7 @@ const handlePaymentFunction = async (database, body, httpClient) => {
   return { error: `Unsupported payment action: ${action}` };
 };
 
-const handleReportCardRequest = async (database, pathname, searchParams, { method = 'GET', body = {} } = {}) => {
+const handleReportCardRequest = async (database, pathname, searchParams, { method = 'GET', body = {}, actor } = {}) => {
   const match = pathname.match(/^\/api\/report-cards\/([^/]+)\.pdf$/);
   if (!match) {
     return null;
@@ -2800,7 +2919,7 @@ const handleReportCardRequest = async (database, pathname, searchParams, { metho
 
 const notFound = (message) => ({ type: 'json', status: 404, body: { error: message } });
 
-const handleIdCardRequest = async (database, pathname, searchParams) => {
+const handleIdCardRequest = async (database, pathname, searchParams, { actor } = {}) => {
   const qrMatch = pathname.match(/^\/api\/id-cards\/([^/]+)\.png$/);
   if (qrMatch) {
     const student = await fetchStudentById(database, decodeURIComponent(qrMatch[1]));
@@ -2911,15 +3030,19 @@ const pdfResponse = (bytes, filename) => ({
  * Teaching staff only — the same gate as the chat itself, since the transcript contains whatever
  * student data was discussed.
  */
-const handleChatReportRequest = async (database, pathname, searchParams) => {
+const handleChatReportRequest = async (database, pathname, searchParams, { actor } = {}) => {
   const match = pathname.match(/^\/api\/chat-reports\/([^/]+)\.pdf$/);
   if (!match) {
     return null;
   }
 
-  if (!['admin', 'teacher'].includes(searchParams.get('requesterRole'))) {
-    return { type: 'json', status: 403, body: { error: 'Unauthorized' } };
-  }
+  // A download is a plain navigation, so the session cookie comes with it (SameSite=Lax). The
+  // query-string role is only the fallback for an internal call — see resolveActor.
+  const refusal = requireRole(resolveActor(actor, { requesterRole: searchParams.get('requesterRole') }), [
+    'admin',
+    'teacher',
+  ]);
+  if (refusal) return { type: 'json', status: 403, body: refusal };
 
   // Built through the shared loader, so a downloaded report and an emailed one always carry the
   // same content. (The bytes differ — pdf-lib stamps each render with a creation time.)
@@ -2938,15 +3061,19 @@ const handleChatReportRequest = async (database, pathname, searchParams) => {
  * A lesson plan as a printable PDF. Teaching staff only, checked from the query string as the other
  * document routes do.
  */
-const handleLessonPlanRequest = async (database, pathname, searchParams) => {
+const handleLessonPlanRequest = async (database, pathname, searchParams, { actor } = {}) => {
   const match = pathname.match(/^\/api\/lesson-plans\/([^/]+)\.pdf$/);
   if (!match) {
     return null;
   }
 
-  if (!['admin', 'teacher'].includes(searchParams.get('requesterRole'))) {
-    return { type: 'json', status: 403, body: { error: 'Unauthorized' } };
-  }
+  // A download is a plain navigation, so the session cookie comes with it (SameSite=Lax). The
+  // query-string role is only the fallback for an internal call — see resolveActor.
+  const refusal = requireRole(resolveActor(actor, { requesterRole: searchParams.get('requesterRole') }), [
+    'admin',
+    'teacher',
+  ]);
+  if (refusal) return { type: 'json', status: 403, body: refusal };
 
   const { rows } = await database.query('SELECT * FROM lesson_plans WHERE id = $1', [
     decodeURIComponent(match[1]),
@@ -2974,16 +3101,20 @@ const handleLessonPlanRequest = async (database, pathname, searchParams) => {
  * trust-the-client model as the fee documents below. The marking scheme is the more sensitive of
  * the two, but both come off the same paper, so the gate is identical.
  */
-const handleExamPaperRequest = async (database, pathname, searchParams) => {
+const handleExamPaperRequest = async (database, pathname, searchParams, { actor } = {}) => {
   const paperMatch = pathname.match(/^\/api\/papers\/([^/]+)\.pdf$/);
   const schemeMatch = pathname.match(/^\/api\/papers\/([^/]+)\/marking-scheme\.pdf$/);
   if (!paperMatch && !schemeMatch) {
     return null;
   }
 
-  if (!['admin', 'teacher'].includes(searchParams.get('requesterRole'))) {
-    return { type: 'json', status: 403, body: { error: 'Unauthorized' } };
-  }
+  // A download is a plain navigation, so the session cookie comes with it (SameSite=Lax). The
+  // query-string role is only the fallback for an internal call — see resolveActor.
+  const refusal = requireRole(resolveActor(actor, { requesterRole: searchParams.get('requesterRole') }), [
+    'admin',
+    'teacher',
+  ]);
+  if (refusal) return { type: 'json', status: 403, body: refusal };
 
   const markingScheme = Boolean(schemeMatch);
   const paperId = decodeURIComponent((schemeMatch || paperMatch)[1]);
@@ -3011,7 +3142,7 @@ const handleExamPaperRequest = async (database, pathname, searchParams) => {
  * carries no body — the same trust-the-client model as every other role check here, but it does
  * stop a support-staff browser from pulling a student's full fee history.
  */
-const handleFeeDocumentRequest = async (database, pathname, searchParams) => {
+const handleFeeDocumentRequest = async (database, pathname, searchParams, { actor } = {}) => {
   const receiptMatch = pathname.match(/^\/api\/fees\/receipts\/([^/]+)\.pdf$/);
   const statementMatch = pathname.match(/^\/api\/fees\/statements\/([^/]+)\.pdf$/);
   const reportMatch = pathname === '/api/fees/report.pdf';
@@ -3022,11 +3153,9 @@ const handleFeeDocumentRequest = async (database, pathname, searchParams) => {
   // Receipts and the school-wide financial report stay admin-only. A single student's statement is
   // open to teaching staff too: a teacher fielding "has this family paid?" needs the history, and it
   // is a read of one student rather than a view of the school's finances.
-  const requesterRole = searchParams.get('requesterRole');
   const allowedRoles = statementMatch ? ['admin', 'teacher'] : ['admin'];
-  if (!allowedRoles.includes(requesterRole)) {
-    return { type: 'json', status: 403, body: { error: 'Unauthorized' } };
-  }
+  const refusal = requireRole(resolveActor(actor, { requesterRole: searchParams.get('requesterRole') }), allowedRoles);
+  if (refusal) return { type: 'json', status: 403, body: refusal };
 
   const settings = await loadSchoolSettings(database);
   const school = searchParams.get('schoolName') || settings.school_name;
@@ -3135,7 +3264,11 @@ const handleFeeDocumentRequest = async (database, pathname, searchParams) => {
  * signup, callback, status) power the sign-up + pay flow; list and sweep are admin/cron only.
  * Inert (returns an error) unless a control database is configured.
  */
-const handleProvisionFunction = async (provisioning, body = {}, httpClient) => {
+// Actions that act on the platform, not on one school. Gated by the owner token, never by a role.
+const OWNER_ACTIONS = ['list', 'sweep', 'create', 'set_status'];
+const TENANT_STATUSES = ['pending', 'active', 'past_due', 'suspended'];
+
+const handleProvisionFunction = async (provisioning, body = {}, httpClient, headers = {}) => {
   if (!provisioning) return { error: 'Self-service provisioning is not enabled on this deployment' };
   const { control } = provisioning;
   const action = body?.action;
@@ -3169,7 +3302,9 @@ const handleProvisionFunction = async (provisioning, body = {}, httpClient) => {
       provisioning.onProvisioned(result.subdomain);
       await provisioning.notifyActivated(result.tenant, httpClient);
     }
-    return result;
+    // The tenant row carries its database URL; the caller of a payment callback gets neither that
+    // nor the database name.
+    return result.tenant ? { ...result, tenant: publicTenant(result.tenant) } : result;
   }
 
   if (action === 'status') {
@@ -3181,14 +3316,43 @@ const handleProvisionFunction = async (provisioning, body = {}, httpClient) => {
     };
   }
 
-  if (action === 'list') {
-    if (body.requesterRole !== 'admin') return { error: 'Unauthorized' };
-    return { tenants: await listTenants(control) };
-  }
+  // Everything below acts on the platform rather than inside one school, so it needs the operator's
+  // token. These were gated on body.requesterRole === 'admin' — a string the browser supplies —
+  // which let any school's administrator enumerate every school on the platform.
+  if (OWNER_ACTIONS.includes(action)) {
+    if (!isPlatformOwner(headers)) return platformOwnerRefusal();
 
-  if (action === 'sweep') {
-    if (body.requesterRole !== 'admin') return { error: 'Unauthorized' };
-    return sweepSubscriptions(control);
+    if (action === 'list') {
+      return { tenants: await listTenants(control) };
+    }
+
+    if (action === 'sweep') {
+      return sweepSubscriptions(control);
+    }
+
+    if (action === 'create') {
+      // Provision without a payment: the operator onboarding a school directly, or reviving one
+      // whose database was lost. provisionTenant is idempotent, so a repeat just extends the period.
+      const tenant = await provisionTenant(
+        control,
+        { subdomain: body.subdomain, schoolName: body.schoolName, contactEmail: body.contactEmail },
+        provisioning.provisionOptions,
+      );
+      provisioning.onProvisioned(tenant?.subdomain || normalizeSubdomain(body.subdomain));
+      return { tenant: publicTenant(tenant), created: true };
+    }
+
+    if (action === 'set_status') {
+      const status = String(body.status || '');
+      if (!TENANT_STATUSES.includes(status)) {
+        return { error: `Unsupported tenant status: ${status}. Use one of ${TENANT_STATUSES.join(', ')}.` };
+      }
+      const tenant = await setTenantStatus(control, normalizeSubdomain(body.subdomain), status);
+      if (!tenant) return { error: 'Unknown school' };
+      // Drop the cached pool so the next request re-reads the new status rather than serving on.
+      provisioning.onProvisioned(tenant.subdomain);
+      return { tenant: publicTenant(tenant) };
+    }
   }
 
   return { error: `Unsupported provision action: ${action}` };
@@ -3265,33 +3429,48 @@ export const createAppRuntime = async ({
       await tenants.close();
       if (control) await control.close();
     },
-    async dispatch({ method = 'GET', pathname = '/', searchParams = new URLSearchParams(), body = {}, headers = {}, database = defaultDatabase }) {
-      const reportCardResponse = await handleReportCardRequest(database, pathname, searchParams, { method, body });
+    async dispatch({
+      method = 'GET',
+      pathname = '/',
+      searchParams = new URLSearchParams(),
+      body = {},
+      headers = {},
+      database = defaultDatabase,
+      // Which school this request belongs to, decided from its Host before any handler runs. Tests
+      // and single-tenant deployments omit it and get the default, whose indexes keep the bare
+      // names they have always had.
+      tenantId = DEFAULT_TENANT,
+      // The signed-in user, or null when a real request carried no valid session. Left undefined by
+      // callers that are not a request at all — a test, or the server calling its own handler — and
+      // those fall back to the role in the body. See resolveActor.
+      actor,
+    }) {
+      const reportCardResponse = await handleReportCardRequest(database, pathname, searchParams, { method, body, actor });
       if (reportCardResponse) {
         return reportCardResponse;
       }
 
-      const idCardResponse = await handleIdCardRequest(database, pathname, searchParams);
+      const idCardResponse = await handleIdCardRequest(database, pathname, searchParams, { actor });
       if (idCardResponse) {
         return idCardResponse;
       }
 
-      const feeDocumentResponse = await handleFeeDocumentRequest(database, pathname, searchParams);
+      const feeDocumentResponse = await handleFeeDocumentRequest(database, pathname, searchParams, { actor });
       if (feeDocumentResponse) {
         return feeDocumentResponse;
       }
 
-      const examPaperResponse = await handleExamPaperRequest(database, pathname, searchParams);
+      const examPaperResponse = await handleExamPaperRequest(database, pathname, searchParams, { actor });
       if (examPaperResponse) {
         return examPaperResponse;
       }
 
-      const lessonPlanResponse = await handleLessonPlanRequest(database, pathname, searchParams);
+      const lessonPlanResponse = await handleLessonPlanRequest(database, pathname, searchParams, { actor });
       if (lessonPlanResponse) {
         return lessonPlanResponse;
       }
 
-      const chatReportResponse = await handleChatReportRequest(database, pathname, searchParams);
+      const chatReportResponse = await handleChatReportRequest(database, pathname, searchParams, { actor });
       if (chatReportResponse) {
         return chatReportResponse;
       }
@@ -3320,19 +3499,37 @@ export const createAppRuntime = async ({
       }
 
       if (method === 'POST' && pathname === '/api/db') {
-        const data = await handleDbQuery(database, body, httpClient);
-        return { type: 'json', status: 200, body: { data } };
+        try {
+          const data = await handleDbQuery(database, body, httpClient, { tenantId, actor });
+          return { type: 'json', status: 200, body: { data } };
+        } catch (error) {
+          if (error instanceof UnauthorizedError) {
+            return { type: 'json', status: 403, body: { error: 'Unauthorized', data: null } };
+          }
+          throw error;
+        }
       }
 
       if (method === 'POST' && pathname === '/api/functions/auth') {
-        const data = await handleAuthFunction(database, body);
-        return data?.error
-          ? { type: 'json', status: 400, body: { error: data.error, data: null } }
-          : { type: 'json', status: 200, body: { data } };
+        const data = await handleAuthFunction(database, body, { tenantId, headers, actor });
+        if (data?.error) {
+          return { type: 'json', status: 400, body: { error: data.error, data: null } };
+        }
+
+        // Signing in and out are the only places a cookie changes. It is lifted off the handler's
+        // result here so the handler stays a plain function of its inputs and remains testable
+        // without a socket, like every other one.
+        const { setCookie, ...payload } = data;
+        return {
+          type: 'json',
+          status: 200,
+          body: { data: payload },
+          ...(setCookie ? { headers: { 'Set-Cookie': setCookie } } : {}),
+        };
       }
 
       if (method === 'POST' && pathname === '/api/functions/fee-status') {
-        const data = await handleFeeStatusFunction(database, body);
+        const data = await handleFeeStatusFunction(database, body, { actor });
         return { type: 'json', status: 200, body: { data } };
       }
 
@@ -3344,7 +3541,7 @@ export const createAppRuntime = async ({
       }
 
       if (method === 'POST' && pathname === '/api/functions/messages') {
-        const data = await handleMessagesFunction(database, body);
+        const data = await handleMessagesFunction(database, body, { actor });
         return data?.error
           ? { type: 'json', status: 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
@@ -3396,28 +3593,28 @@ export const createAppRuntime = async ({
       }
 
       if (method === 'POST' && pathname === '/api/functions/settings') {
-        const data = await handleSettingsFunction(database, body);
+        const data = await handleSettingsFunction(database, body, { actor, tenantId });
         return data?.error
           ? { type: 'json', status: 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/provision') {
-        const data = await handleProvisionFunction(provisioning, body, httpClient);
+        const data = await handleProvisionFunction(provisioning, body, httpClient, headers);
         return data?.error
           ? { type: 'json', status: 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/fees') {
-        const data = await handleFeesFunction(database, body);
+        const data = await handleFeesFunction(database, body, { actor, tenantId });
         return data?.error
           ? { type: 'json', status: 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/ai-chat') {
-        const data = await handleAiChatFunction(database, body, httpClient);
+        const data = await handleAiChatFunction(database, body, httpClient, { actor });
         return data?.error === 'Unauthorized'
           ? { type: 'json', status: 403, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
@@ -3446,28 +3643,28 @@ export const createAppRuntime = async ({
       }
 
       if (method === 'POST' && pathname === '/api/functions/search') {
-        const data = await handleSearchFunction(database, body, httpClient);
+        const data = await handleSearchFunction(database, body, httpClient, { tenantId, actor });
         return data?.error
           ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/chat-report') {
-        const data = await handleChatReportFunction(database, body, httpClient);
+        const data = await handleChatReportFunction(database, body, httpClient, { actor, tenantId });
         return data?.error
           ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/lesson-planner') {
-        const data = await handleLessonPlannerFunction(database, body, httpClient);
+        const data = await handleLessonPlannerFunction(database, body, httpClient, { actor, tenantId });
         return data?.error
           ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/digital-examiner') {
-        const data = await handleDigitalExaminerFunction(database, body, httpClient);
+        const data = await handleDigitalExaminerFunction(database, body, httpClient, { actor, tenantId });
         // The payload is kept alongside the error rather than nulled: a failed generation still
         // carries the model's reply, and discarding it is what left the teacher with an error
         // dialog and no way to recover the questions it had just written.
@@ -3477,7 +3674,7 @@ export const createAppRuntime = async ({
       }
 
       if (method === 'POST' && pathname === '/api/functions/curriculum') {
-        const data = await handleCurriculumFunction(database, body, httpClient);
+        const data = await handleCurriculumFunction(database, body, httpClient, { actor, tenantId });
         return data?.error
           ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
@@ -3487,7 +3684,7 @@ export const createAppRuntime = async ({
       // credentials, and /api/db has no role check — this endpoint is the only way in, and it masks
       // the token on every read.
       if (method === 'POST' && pathname === '/api/functions/mcp') {
-        const data = await handleMcpFunction(database, body, httpClient);
+        const data = await handleMcpFunction(database, body, httpClient, { actor, tenantId });
         return data?.error
           ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
@@ -3527,12 +3724,8 @@ export const createAppServer = async ({
       return;
     }
 
-    if (request.method === 'OPTIONS') {
-      response.writeHead(204, {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type, X-Tenant',
-        'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-      });
+  if (request.method === 'OPTIONS') {
+      response.writeHead(204, corsHeaders(response));
       response.end();
       return;
     }
@@ -3567,6 +3760,11 @@ export const createAppServer = async ({
           return;
         }
 
+        // Who is asking, according to their own cookie rather than according to the request body.
+        // Always passed — as null when there is no valid session — so a handler can tell a real
+        // unauthenticated request from an internal call that was never authenticated at all.
+        const actor = await authenticateRequest({ database, headers: request.headers, tenantId });
+
         const result = await runtime.dispatch({
           method: request.method || 'GET',
           pathname: url.pathname,
@@ -3574,14 +3772,29 @@ export const createAppServer = async ({
           body,
           headers: request.headers,
           database,
+          tenantId,
+          actor,
         });
 
+        // Slide the session forward for someone who is still working, so a long afternoon in the
+        // gradebook does not end in a sudden sign-out.
+        const extraHeaders = { ...(result.headers || {}) };
+        if (actor && !extraHeaders['Set-Cookie']) {
+          const session = verifySessionToken(readCookie(request.headers), { tenantId });
+          if (shouldRefresh(session)) {
+            extraHeaders['Set-Cookie'] = sessionCookie(
+              issueSessionToken({ userId: actor.id, tenantId }),
+              { secure: requestIsSecure(request) },
+            );
+          }
+        }
+
         if (result.type === 'binary') {
-          sendBinary(response, result.status, result.body, result.headers);
+          sendBinary(response, result.status, result.body, extraHeaders);
           return;
         }
 
-        sendJson(response, result.status, result.body);
+        sendJson(response, result.status, result.body, extraHeaders);
         return;
       }
 

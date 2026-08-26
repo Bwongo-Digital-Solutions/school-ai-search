@@ -24,6 +24,7 @@ import {
   toIsoDate,
 } from './fee-math.mjs';
 import { issueReceipt, nextInvoiceNumbers } from './fee-documents.mjs';
+import { requireRole, resolveActor } from '../auth/actor.mjs';
 
 const DEFAULT_CURRENCY = process.env.PAYMENT_CURRENCY || 'UGX';
 
@@ -1179,20 +1180,16 @@ export const FEES_ACTIONS = Object.keys(ACTIONS);
  * Single entry point for every fees action.
  *
  * The role check sits here, ahead of the action table, so no handler can be reached without
- * passing it. Note that requesterRole is supplied by the browser: this matches the existing
- * update_role convention and is a deployment-perimeter assumption, not an auth control.
+ * passing it. The role comes from the requester's session — resolveActor reads it from the users
+ * row the session cookie points at, not from anything the browser put in the request.
  */
-export const handleFeesFunction = async (database, body = {}) => {
-  if (body.requesterRole !== 'admin') return { error: 'Unauthorized' };
+export const handleFeesFunction = async (database, body = {}, { actor: authenticated, tenantId } = {}) => {
+  const actor = resolveActor(authenticated, body);
+  const refusal = requireRole(actor, ['admin']);
+  if (refusal) return refusal;
 
   const handler = ACTIONS[body.action];
   if (!handler) return { error: `Unsupported fees action: ${body.action}` };
 
-  const actor = {
-    email: String(body.actorEmail || ''),
-    name: String(body.actorName || ''),
-    role: body.requesterRole,
-  };
-
-  return handler({ database, body, actor });
+  return handler({ database, body, actor, tenantId });
 };

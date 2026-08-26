@@ -16,14 +16,9 @@ const callTeachingFunction = async <T>(
   payload: Record<string, unknown>,
   user: UserProfile | null,
 ): Promise<T> => {
+  void user;
   const { data, error } = await supabase.functions.invoke<T>(endpoint, {
-    body: {
-      action,
-      requesterRole: user?.role,
-      actorEmail: user?.auth_email,
-      actorName: user?.display_name,
-      ...payload,
-    },
+    body: { action, ...payload },
   });
 
   // These endpoints report refusals and validation failures as { error }; surface them as
@@ -70,10 +65,10 @@ export const callChatReport = <T>(
   user: UserProfile | null,
 ) => callTeachingFunction<T>('chat-report', action, payload, user);
 
-/** Teaching documents are GETs, so the role rides in the query string, as the fee documents do. */
+/** Teaching documents are GETs opened as links, so the session cookie authorises them. */
 export const teachingDocumentUrl = (path: string, user: UserProfile | null) => {
-  const search = new URLSearchParams({ requesterRole: user?.role || '' });
-  return buildApiUrl(`${path}?${search.toString()}`);
+  void user;
+  return buildApiUrl(path);
 };
 
 /**

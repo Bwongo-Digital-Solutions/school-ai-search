@@ -4,23 +4,18 @@ import type { UserProfile } from '@/types/auth';
 /**
  * The single way to reach POST /api/functions/fees.
  *
- * Every fees action is admin-gated on the identity supplied here, so routing all of them through
- * one helper means no screen can forget to send it. Note that the server trusts this value — it
- * matches the existing update_role convention and is not a security boundary.
+ * Every fees action is admin-only, and the server decides that from the session cookie rather than
+ * from anything sent here — the `user` argument is kept because callers pass it and it keeps the
+ * signature stable, but nothing about identity travels in the body any more.
  */
 export const callFees = async <T>(
   action: string,
   payload: Record<string, unknown>,
   user: UserProfile | null,
 ): Promise<T> => {
+  void user;
   const { data, error } = await supabase.functions.invoke<T>('fees', {
-    body: {
-      action,
-      requesterRole: user?.role,
-      actorEmail: user?.auth_email,
-      actorName: user?.display_name,
-      ...payload,
-    },
+    body: { action, ...payload },
   });
 
   // The fees endpoint reports refusals and validation failures as { error }, so surface them as
@@ -29,8 +24,13 @@ export const callFees = async <T>(
   return data as T;
 };
 
-/** Admin-only fee documents are GETs, so the role rides in the query string. */
+/**
+ * Admin-only fee documents are GETs opened as ordinary links, which carry the session cookie
+ * (SameSite=Lax), so the server gates them the same way it gates everything else.
+ */
 export const feeDocumentUrl = (path: string, user: UserProfile | null, params: Record<string, string> = {}) => {
-  const search = new URLSearchParams({ requesterRole: user?.role || '', ...params });
-  return buildApiUrl(`${path}?${search.toString()}`);
+  void user;
+  const search = new URLSearchParams(params);
+  const query = search.toString();
+  return buildApiUrl(query ? `${path}?${query}` : path);
 };

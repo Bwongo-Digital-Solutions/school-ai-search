@@ -37,11 +37,23 @@ export const parseTenantRegistry = (raw = process.env.TENANTS) => {
 };
 
 /**
+ * Is the X-Tenant header allowed to override the Host?
+ *
+ * Off unless ALLOW_TENANT_HEADER is set. It is a local-testing convenience — with it on, and CORS
+ * permitting the header, any page on the internet could name whichever school it wanted and read
+ * that school's data. The Host header is set by the browser from the address bar and cannot be
+ * forged cross-origin, which is why it is the one that decides in production.
+ *
+ * Read at call time, not import time, so tests and runtime config both take effect.
+ */
+const tenantHeaderAllowed = () => process.env.ALLOW_TENANT_HEADER === 'true';
+
+/**
  * Derive the tenant id from the Host header, with an X-Tenant header override for local testing.
  * Pure and side-effect free. Apex domains, www, localhost and bare IPs map to the default tenant.
  */
 export const resolveTenantId = (host, headerTenant) => {
-  const override = normalizeTenantId(headerTenant);
+  const override = tenantHeaderAllowed() ? normalizeTenantId(headerTenant) : '';
   if (override) return override;
 
   const hostname = String(host ?? '').split(':')[0].trim().toLowerCase();
@@ -50,7 +62,7 @@ export const resolveTenantId = (host, headerTenant) => {
   }
 
   const parts = hostname.split('.');
-  // A subdomain needs at least sub.domain.tld; an apex like `eschool.app` has no tenant subdomain.
+  // A subdomain needs at least sub.domain.tld; an apex like `eschool.ink` has no tenant subdomain.
   if (parts.length < 3) return DEFAULT_TENANT;
 
   const sub = parts[0];

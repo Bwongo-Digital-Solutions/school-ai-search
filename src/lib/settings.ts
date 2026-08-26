@@ -77,9 +77,6 @@ export const saveSchoolSettings = async (
   const { data, error } = await supabase.functions.invoke<{ settings: SchoolSettings }>('settings', {
     body: {
       action: 'update',
-      requesterRole: user?.role,
-      actorEmail: user?.auth_email,
-      actorName: user?.display_name,
       schoolName: settings.school_name,
       tagline: settings.tagline,
       address: settings.address,

@@ -31,7 +31,7 @@ export const sendEmail = async ({ to, subject, html, text, attachments = [] }, {
 
   const url = process.env.EMAIL_API_URL || 'https://api.resend.com/emails';
   const apiKey = process.env.EMAIL_API_KEY;
-  const from = process.env.EMAIL_FROM || 'e-School <no-reply@eschool.app>';
+  const from = process.env.EMAIL_FROM || 'e-School <no-reply@eschool.ink>';
   if (!apiKey) {
     return { sent: false, mode, error: 'EMAIL_API_KEY is not configured' };
   }
@@ -75,7 +75,7 @@ const escapeHtml = (value) =>
   String(value ?? '').replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
 
 /** Builds the "your school is ready" message for a freshly provisioned tenant. */
-export const renderActivationEmail = ({ schoolName, subdomain, rootDomain = process.env.TENANT_ROOT_DOMAIN || 'eschool.app' }) => {
+export const renderActivationEmail = ({ schoolName, subdomain, rootDomain = process.env.TENANT_ROOT_DOMAIN || 'eschool.ink' }) => {
   const name = schoolName || 'Your school';
   const url = `https://${subdomain}.${rootDomain}`;
   const subject = `${name} is ready on e-School`;

@@ -266,11 +266,6 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
           imageData,
           studentData: students,
           modelId: selectedModelId,
-          // The assistant is closed to non-teaching staff server-side, so identity travels with
-          // every message rather than being assumed from the UI having rendered the composer.
-          requesterRole: user?.role,
-          actorEmail: user?.auth_email,
-          actorName: user?.display_name,
           mode: chatOptions.agentMode ? 'agent' : 'direct',
           useRag: chatOptions.useRag,
           mcpServerIds: chatOptions.mcpServerIds,
@@ -311,7 +306,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } finally {
       setIsLoading(false);
     }
-  }, [currentConversationId, loadConversations, students, selectedModelId, isSupportStaff, user, chatOptions]);
+  }, [currentConversationId, loadConversations, students, selectedModelId, isSupportStaff, chatOptions]);
 
   const toggleSidebar = useCallback(() => {
     setSidebarOpen(prev => !prev);

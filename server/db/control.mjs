@@ -56,6 +56,18 @@ export const initializeControlSchema = async (control) => {
 const TENANT_COLUMNS =
   'id, subdomain, school_name, contact_email, db_name, db_url, status, plan, current_period_end, created_at, activated_at';
 
+// What may leave the control plane. db_url is a live connection string carrying the database
+// password, and db_name is most of the way to one — neither is any caller's business, including the
+// owner console, so they are dropped rather than trusted to be stripped further up.
+const PUBLIC_TENANT_COLUMNS =
+  'id, subdomain, school_name, contact_email, status, plan, current_period_end, created_at, activated_at';
+
+export const publicTenant = (tenant) => {
+  if (!tenant) return null;
+  const { db_url: _url, db_name: _name, ...rest } = tenant;
+  return rest;
+};
+
 export const getTenantBySubdomain = async (control, subdomain) => {
   const { rows } = await control.query(
     `SELECT ${TENANT_COLUMNS} FROM tenants WHERE subdomain = $1 LIMIT 1`,
@@ -74,7 +86,7 @@ export const lookupTenantRoute = async (control, subdomain) => {
 };
 
 export const listTenants = async (control) => {
-  const { rows } = await control.query(`SELECT ${TENANT_COLUMNS} FROM tenants ORDER BY created_at ASC`);
+  const { rows } = await control.query(`SELECT ${PUBLIC_TENANT_COLUMNS} FROM tenants ORDER BY created_at ASC`);
   return rows;
 };
 

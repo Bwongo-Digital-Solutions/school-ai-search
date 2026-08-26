@@ -2374,20 +2374,31 @@ test('tenant resolution maps subdomains to tenants and defaults safely', async (
   );
 
   // Subdomain routing.
-  assert.equal(resolveTenantId('kampala-high.eschool.app'), 'kampala-high');
-  assert.equal(resolveTenantId('Gulu-SS.eschool.app'), 'gulu-ss');
-  assert.equal(resolveTenantId('kampala-high.eschool.app:8787'), 'kampala-high');
+  assert.equal(resolveTenantId('kampala-high.eschool.ink'), 'kampala-high');
+  assert.equal(resolveTenantId('Gulu-SS.eschool.ink'), 'gulu-ss');
+  assert.equal(resolveTenantId('kampala-high.eschool.ink:8787'), 'kampala-high');
 
   // Apex, www, localhost and IPs fall back to the default tenant.
-  assert.equal(resolveTenantId('eschool.app'), DEFAULT_TENANT);
-  assert.equal(resolveTenantId('www.eschool.app'), DEFAULT_TENANT);
+  assert.equal(resolveTenantId('eschool.ink'), DEFAULT_TENANT);
+  assert.equal(resolveTenantId('www.eschool.ink'), DEFAULT_TENANT);
   assert.equal(resolveTenantId('localhost'), DEFAULT_TENANT);
   assert.equal(resolveTenantId('127.0.0.1:8787'), DEFAULT_TENANT);
   assert.equal(resolveTenantId(''), DEFAULT_TENANT);
   assert.equal(resolveTenantId(undefined), DEFAULT_TENANT);
 
-  // An explicit X-Tenant header wins over the host.
-  assert.equal(resolveTenantId('kampala-high.eschool.app', 'gulu-ss'), 'gulu-ss');
+  // The X-Tenant header is ignored unless it is explicitly enabled: it is a local-testing
+  // convenience, and honouring it in production would let any page on the internet name whichever
+  // school it wanted. The Host header cannot be forged cross-origin, so it is the one that decides.
+  assert.equal(resolveTenantId('kampala-high.eschool.ink', 'gulu-ss'), 'kampala-high');
+
+  const originalAllow = process.env.ALLOW_TENANT_HEADER;
+  process.env.ALLOW_TENANT_HEADER = 'true';
+  try {
+    assert.equal(resolveTenantId('kampala-high.eschool.ink', 'gulu-ss'), 'gulu-ss');
+  } finally {
+    if (originalAllow === undefined) delete process.env.ALLOW_TENANT_HEADER;
+    else process.env.ALLOW_TENANT_HEADER = originalAllow;
+  }
 
   // Registry parsing.
   assert.equal(parseTenantRegistry(undefined).size, 0);
@@ -2400,7 +2411,7 @@ test('tenant resolution maps subdomains to tenants and defaults safely', async (
   const singleTenant = createTenantRegistry({ registry: new Map() });
   assert.equal(singleTenant.enabled, false);
   const sentinel = { marker: 'default-db' };
-  assert.equal((await singleTenant.resolve('anything.eschool.app', undefined, sentinel)).database, sentinel);
+  assert.equal((await singleTenant.resolve('anything.eschool.ink', undefined, sentinel)).database, sentinel);
 });
 
 test('configured tenants get isolated databases', async () => {
@@ -2422,8 +2433,8 @@ test('configured tenants get isolated databases', async () => {
   try {
     assert.equal(tenants.enabled, true);
 
-    const a = await tenants.resolve('kampala-high.eschool.app', undefined, null);
-    const b = await tenants.resolve('gulu-ss.eschool.app', undefined, null);
+    const a = await tenants.resolve('kampala-high.eschool.ink', undefined, null);
+    const b = await tenants.resolve('gulu-ss.eschool.ink', undefined, null);
     assert.equal(a.tenantId, 'kampala-high');
     assert.equal(b.tenantId, 'gulu-ss');
     assert.notEqual(a.database, b.database);
@@ -2440,11 +2451,11 @@ test('configured tenants get isolated databases', async () => {
     assert.equal((await b.database.query('SELECT COUNT(*)::int AS n FROM students')).rows[0].n, 15);
 
     // The same tenant resolves to the same cached connection.
-    const aAgain = await tenants.resolve('kampala-high.eschool.app', undefined, null);
+    const aAgain = await tenants.resolve('kampala-high.eschool.ink', undefined, null);
     assert.equal(aAgain.database, a.database);
 
     // An unknown subdomain has no database, so the server would 404 it.
-    const unknown = await tenants.resolve('ghost-school.eschool.app', undefined, null);
+    const unknown = await tenants.resolve('ghost-school.eschool.ink', undefined, null);
     assert.equal(unknown.database, null);
     assert.equal(unknown.tenantId, 'ghost-school');
   } finally {
@@ -2486,7 +2497,12 @@ test('a school that pays is provisioned, served, and suspended when it lapses', 
   };
 
   const runtime = await createAppRuntime({ useInMemoryDatabase: true, useInMemoryControl: true, provisionOptions });
-  const P = (body) => runtime.dispatch({ method: 'POST', pathname: '/api/provision', body });
+  const P = (body, headers = {}) => runtime.dispatch({ method: 'POST', pathname: '/api/provision', body, headers });
+
+  // Platform actions carry the operator's own token rather than a role the browser claims.
+  const savedOwnerToken = process.env.PLATFORM_OWNER_TOKEN;
+  process.env.PLATFORM_OWNER_TOKEN = 'owner-token-for-tests-0123456789abcdef';
+  const owner = { authorization: `Bearer ${process.env.PLATFORM_OWNER_TOKEN}` };
 
   try {
     assert.equal(runtime.provisioningEnabled, true);
@@ -2513,7 +2529,7 @@ test('a school that pays is provisioned, served, and suspended when it lapses', 
     // Now taken; still pending (unpaid) so its subdomain is not yet served.
     assert.equal((await P({ action: 'availability', subdomain: 'kampala-high' })).body.data.available, false);
     assert.equal((await P({ action: 'status', subdomain: 'kampala-high' })).body.data.tenant.status, 'pending');
-    let route = await runtime.resolveDatabase('kampala-high.eschool.app', undefined);
+    let route = await runtime.resolveDatabase('kampala-high.eschool.ink', undefined);
     assert.equal(route.status, 'pending');
     assert.equal(route.database, null);
 
@@ -2529,7 +2545,7 @@ test('a school that pays is provisioned, served, and suspended when it lapses', 
     assert.ok(tenantRow.db_name.includes('kampala'), 'db_name is derived from the subdomain');
 
     // Its subdomain now routes to a real (isolated) database.
-    route = await runtime.resolveDatabase('kampala-high.eschool.app', undefined);
+    route = await runtime.resolveDatabase('kampala-high.eschool.ink', undefined);
     assert.equal(route.status, 'active');
     assert.ok(route.database);
     assert.equal((await route.database.query('SELECT COUNT(*)::int AS n FROM students')).rows[0].n, 15);
@@ -2538,22 +2554,38 @@ test('a school that pays is provisioned, served, and suspended when it lapses', 
     assert.equal((await P({ action: 'callback', externalReference: reference, status: 'successful' })).body.data.alreadyProcessed, true);
 
     // An unknown subdomain has no database (server 404s it).
-    const ghost = await runtime.resolveDatabase('ghost.eschool.app', undefined);
+    const ghost = await runtime.resolveDatabase('ghost.eschool.ink', undefined);
     assert.equal(ghost.database, null);
     assert.equal(ghost.status, 'unknown');
 
     // Lapse the subscription and sweep: the school is suspended and its subdomain stops serving.
     await runtime.control.query("UPDATE tenants SET current_period_end = NOW() - INTERVAL '400 days', status = 'past_due' WHERE subdomain = 'kampala-high'");
-    const swept = await P({ action: 'sweep', requesterRole: 'admin' });
+    const swept = await P({ action: 'sweep' }, owner);
     assert.equal(swept.body.data.suspended, 1);
-    const suspended = await runtime.resolveDatabase('kampala-high.eschool.app', undefined);
+    const suspended = await runtime.resolveDatabase('kampala-high.eschool.ink', undefined);
     assert.equal(suspended.status, 'suspended');
     assert.equal(suspended.database, null);
 
-    // list/sweep are admin-only.
-    assert.equal((await P({ action: 'list', requesterRole: 'teacher' })).body.error, 'Unauthorized');
-    assert.equal((await P({ action: 'sweep', requesterRole: 'teacher' })).body.error, 'Unauthorized');
-    assert.equal((await P({ action: 'list', requesterRole: 'admin' })).body.data.tenants.length, 1);
+    // Platform actions need the operator's token. A school's own administrator claiming the role in
+    // the request body used to be enough to enumerate every school on the platform.
+    assert.equal((await P({ action: 'list', requesterRole: 'admin' })).body.error, 'Unauthorized');
+    assert.equal((await P({ action: 'sweep', requesterRole: 'admin' })).body.error, 'Unauthorized');
+    assert.equal((await P({ action: 'list' }, { authorization: 'Bearer wrong-token-entirely-0123456789' })).body.error, 'Unauthorized');
+
+    const listed = await P({ action: 'list' }, owner);
+    assert.equal(listed.body.data.tenants.length, 1);
+    // A school's connection string is never handed out, not even to the operator's console.
+    assert.equal(listed.body.data.tenants[0].db_url, undefined, 'db_url must never leave the control plane');
+    assert.equal(listed.body.data.tenants[0].db_name, undefined);
+
+    // The operator can also provision directly and set a status by hand.
+    const created = await P({ action: 'create', subdomain: 'gulu-ss', schoolName: 'Gulu SS' }, owner);
+    assert.equal(created.body.data.tenant.subdomain, 'gulu-ss');
+    assert.equal(created.body.data.tenant.status, 'active');
+    assert.equal(created.body.data.tenant.db_url, undefined);
+    assert.equal((await P({ action: 'set_status', subdomain: 'gulu-ss', status: 'suspended' }, owner)).body.data.tenant.status, 'suspended');
+    assert.match((await P({ action: 'set_status', subdomain: 'gulu-ss', status: 'nonsense' }, owner)).body.error, /Unsupported tenant status/);
+    assert.equal((await P({ action: 'create', subdomain: 'gulu-ss' })).body.error, 'Unauthorized');
 
     // Renewal reactivates the suspended school.
     const renew = await P({ action: 'signup', subdomain: 'kampala-high', provider: 'mtn_momo', phoneNumber: '+256700000000' });
@@ -2561,6 +2593,8 @@ test('a school that pays is provisioned, served, and suspended when it lapses', 
     assert.equal((await P({ action: 'status', subdomain: 'kampala-high' })).body.data.tenant.status, 'active');
   } finally {
     await runtime.close();
+    if (savedOwnerToken === undefined) delete process.env.PLATFORM_OWNER_TOKEN;
+    else process.env.PLATFORM_OWNER_TOKEN = savedOwnerToken;
     process.env.SUBSCRIPTION_AMOUNT = saved.amount;
     process.env.TENANT_DB_URL_TEMPLATE = saved.template;
     process.env.PAYMENT_GATEWAY_MODE = saved.mode;
@@ -2619,10 +2653,10 @@ test('a "your school is ready" email is sent when a school is activated', async 
   const { initializeDatabase } = await import('../server/db/schema.mjs');
 
   // Pure render.
-  const message = email.renderActivationEmail({ schoolName: 'Kampala High', subdomain: 'kampala-high', rootDomain: 'eschool.app' });
+  const message = email.renderActivationEmail({ schoolName: 'Kampala High', subdomain: 'kampala-high', rootDomain: 'eschool.ink' });
   assert.match(message.subject, /Kampala High is ready/);
-  assert.equal(message.url, 'https://kampala-high.eschool.app');
-  assert.match(message.html, /kampala-high\.eschool\.app/);
+  assert.equal(message.url, 'https://kampala-high.eschool.ink');
+  assert.match(message.html, /kampala-high\.eschool\.ink/);
 
   const saved = { mode: process.env.EMAIL_MODE, key: process.env.EMAIL_API_KEY, amount: process.env.SUBSCRIPTION_AMOUNT, template: process.env.TENANT_DB_URL_TEMPLATE };
   process.env.EMAIL_MODE = 'http';
@@ -6555,6 +6589,457 @@ test('the monitoring view reports the day and who is still out', async () => {
     assert.equal(quiet.body.data.gate.counts.total, 0);
     assert.equal(quiet.body.data.attendance.marked, 0);
     assert.equal(quiet.body.data.off_premises.length, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('platform administration fails closed and refuses a guessable token', async () => {
+  const { isPlatformOwner, isPlatformOwnerEnabled, platformOwnerRefusal } = await import(
+    '../server/auth/platform-owner.mjs'
+  );
+
+  const saved = process.env.PLATFORM_OWNER_TOKEN;
+  try {
+    // Unset: nothing is a valid owner, and the refusal says why rather than implying a bad token.
+    delete process.env.PLATFORM_OWNER_TOKEN;
+    assert.equal(isPlatformOwnerEnabled(), false);
+    assert.equal(isPlatformOwner({ authorization: 'Bearer anything' }), false);
+    assert.match(platformOwnerRefusal().error, /not enabled/);
+
+    // A short token looks like protection without being any. It is ignored rather than honoured,
+    // so a deployment that sets PLATFORM_OWNER_TOKEN=admin is closed, not wide open.
+    process.env.PLATFORM_OWNER_TOKEN = 'admin';
+    assert.equal(isPlatformOwnerEnabled(), false);
+    assert.equal(isPlatformOwner({ authorization: 'Bearer admin' }), false);
+
+    process.env.PLATFORM_OWNER_TOKEN = 'a-properly-long-operator-token-0123456789';
+    assert.equal(isPlatformOwnerEnabled(), true);
+    assert.equal(isPlatformOwner({ authorization: `Bearer ${process.env.PLATFORM_OWNER_TOKEN}` }), true);
+    assert.equal(isPlatformOwner({ Authorization: `Bearer ${process.env.PLATFORM_OWNER_TOKEN}` }), true);
+
+    // Near misses, and the shapes a client gets wrong.
+    assert.equal(isPlatformOwner({ authorization: `Bearer ${process.env.PLATFORM_OWNER_TOKEN}x` }), false);
+    assert.equal(isPlatformOwner({ authorization: process.env.PLATFORM_OWNER_TOKEN }), false);
+    assert.equal(isPlatformOwner({}), false);
+    assert.equal(platformOwnerRefusal().error, 'Unauthorized');
+  } finally {
+    if (saved === undefined) delete process.env.PLATFORM_OWNER_TOKEN;
+    else process.env.PLATFORM_OWNER_TOKEN = saved;
+  }
+});
+
+test('cross-origin access is limited to the platform own domains', async () => {
+  const { isAllowedOrigin, corsHeaders } = await import('../server/http/cors.mjs');
+
+  const saved = { root: process.env.TENANT_ROOT_DOMAIN, extra: process.env.CORS_EXTRA_ORIGINS };
+  try {
+    process.env.TENANT_ROOT_DOMAIN = 'eschool.ink';
+    delete process.env.CORS_EXTRA_ORIGINS;
+
+    assert.equal(isAllowedOrigin('https://kampala-high.eschool.ink', 'kampala-high.eschool.ink'), true);
+    assert.equal(isAllowedOrigin('https://eschool.ink', 'eschool.ink'), true);
+
+    // The attack this closes: any page on the internet naming a school and reading its data.
+    assert.equal(isAllowedOrigin('https://evil.example', 'kampala-high.eschool.ink'), false);
+    // A look-alike domain that merely ends with the same letters must not pass.
+    assert.equal(isAllowedOrigin('https://noteschool.ink', 'kampala-high.eschool.ink'), false);
+    // Plain HTTP is not one of ours in production.
+    assert.equal(isAllowedOrigin('http://kampala-high.eschool.ink', 'kampala-high.eschool.ink'), false);
+    assert.equal(isAllowedOrigin('', 'kampala-high.eschool.ink'), false);
+    assert.equal(isAllowedOrigin('not a url', 'kampala-high.eschool.ink'), false);
+
+    // Loopback is a developer convenience, and only when the server itself was reached on loopback.
+    assert.equal(isAllowedOrigin('http://localhost:8080', 'localhost:8787'), true);
+    assert.equal(isAllowedOrigin('http://localhost:8080', 'kampala-high.eschool.ink'), false);
+
+    process.env.CORS_EXTRA_ORIGINS = 'https://console.example';
+    assert.equal(isAllowedOrigin('https://console.example', 'eschool.ink'), true);
+
+    // The headers themselves: never a wildcard, always Vary, and credentials only for our own.
+    const allowed = corsHeaders({ req: { headers: { origin: 'https://kampala-high.eschool.ink', host: 'kampala-high.eschool.ink' } } });
+    assert.equal(allowed['Access-Control-Allow-Origin'], 'https://kampala-high.eschool.ink');
+    assert.equal(allowed['Access-Control-Allow-Credentials'], 'true');
+    assert.equal(allowed.Vary, 'Origin');
+
+    const refused = corsHeaders({ req: { headers: { origin: 'https://evil.example', host: 'kampala-high.eschool.ink' } } });
+    assert.equal(refused['Access-Control-Allow-Origin'], undefined);
+    assert.equal(refused.Vary, 'Origin', 'Vary must be set either way so nothing caches one answer for another origin');
+
+    // X-Tenant is advertised only where it is honoured, so the preflight cannot promise what the
+    // server will ignore.
+    const savedAllow = process.env.ALLOW_TENANT_HEADER;
+    delete process.env.ALLOW_TENANT_HEADER;
+    assert.ok(!allowed['Access-Control-Allow-Headers'].includes('X-Tenant'));
+    process.env.ALLOW_TENANT_HEADER = 'true';
+    const withHeader = corsHeaders({ req: { headers: { origin: 'https://eschool.ink', host: 'eschool.ink' } } });
+    assert.ok(withHeader['Access-Control-Allow-Headers'].includes('X-Tenant'));
+    if (savedAllow === undefined) delete process.env.ALLOW_TENANT_HEADER;
+    else process.env.ALLOW_TENANT_HEADER = savedAllow;
+  } finally {
+    if (saved.root === undefined) delete process.env.TENANT_ROOT_DOMAIN;
+    else process.env.TENANT_ROOT_DOMAIN = saved.root;
+    if (saved.extra === undefined) delete process.env.CORS_EXTRA_ORIGINS;
+    else process.env.CORS_EXTRA_ORIGINS = saved.extra;
+  }
+});
+
+test('each school gets its own search indexes, so one cannot overwrite or read another', async () => {
+  const { indexUidFor, INDEX_NAMES } = await import('../server/search/indexer.mjs');
+  const { DEFAULT_TENANT } = await import('../server/db/tenants.mjs');
+
+  // The naming rule. `__` cannot appear in a tenant id (a DNS label), so a-b__c is unambiguous.
+  assert.equal(indexUidFor('kampala-high', 'students'), 'kampala-high__students');
+  assert.equal(indexUidFor('kampala-high', 'lesson_plans'), 'kampala-high__lesson_plans');
+  // A single-school deployment keeps the bare names it already has, so upgrading needs no reindex.
+  assert.equal(indexUidFor(DEFAULT_TENANT, 'students'), 'students');
+  assert.equal(indexUidFor(undefined, 'students'), 'students');
+
+  // No two (tenant, index) pairs can collide, whatever the hyphens in the subdomains.
+  const uids = new Set();
+  for (const tenant of ['a', 'a-b', 'a-b-c', 'kampala-high', DEFAULT_TENANT]) {
+    for (const name of INDEX_NAMES) {
+      const uid = indexUidFor(tenant, name);
+      assert.equal(uids.has(uid), false, `${uid} was produced twice`);
+      uids.add(uid);
+    }
+  }
+
+  await withMeili(async () => {
+    const { runtime, cleanup } = await startTestRuntime();
+
+    try {
+      // The stub has to be the client the service actually uses, so the service is driven directly
+      // with an explicit one rather than through the runtime.
+      const { handleSearchFunction } = await import('../server/services/search.mjs');
+
+      const meiliA = createMeiliStub({
+        hitsByIndex: { 'kampala-high__students': [{ id: 's1', kind: 'student', full_name: 'Emma Johnson' }] },
+      });
+      const a = await handleSearchFunction(
+        runtime.database,
+        { action: 'query', requesterRole: 'teacher', query: 'emma' },
+        meiliA.httpClient,
+        { tenantId: 'kampala-high' },
+      );
+
+      const queriesA = meiliA.requests.filter((request) => request.url.endsWith('/multi-search')).at(-1).body.queries;
+      // Every index this school searches is its own.
+      assert.ok(queriesA.length > 0);
+      for (const query of queriesA) {
+        assert.match(query.indexUid, /^kampala-high__/, 'a school must only ever query its own indexes');
+        // The role filter is unchanged: tenancy decides which index, role decides which documents.
+        assert.equal(query.filter, 'roles = teacher');
+      }
+      // The school's prefix is an implementation detail and does not leak into the response.
+      assert.deepEqual(a.groups.map((group) => group.index), ['students']);
+
+      // The other school's indexes are untouched by the first one's query.
+      const meiliB = createMeiliStub({ hitsByIndex: {} });
+      await handleSearchFunction(
+        runtime.database,
+        { action: 'query', requesterRole: 'teacher', query: 'emma' },
+        meiliB.httpClient,
+        { tenantId: 'gulu-ss' },
+      );
+      const queriesB = meiliB.requests.filter((request) => request.url.endsWith('/multi-search')).at(-1).body.queries;
+      for (const query of queriesB) {
+        assert.match(query.indexUid, /^gulu-ss__/);
+      }
+      assert.equal(
+        queriesA.some((query) => queriesB.some((other) => other.indexUid === query.indexUid)),
+        false,
+        'two schools must not share a single index uid',
+      );
+
+      // A rebuild is the dangerous one: it clears before refilling. Confirm it only ever clears
+      // and writes uids belonging to the school that asked.
+      const meiliRebuild = createMeiliStub();
+      const rebuilt = await handleSearchFunction(
+        runtime.database,
+        { action: 'reindex', requesterRole: 'admin' },
+        meiliRebuild.httpClient,
+        { tenantId: 'kampala-high' },
+      );
+      assert.ok(rebuilt.counts, 'the rebuild should report what it indexed');
+
+      const touched = meiliRebuild.requests
+        .map((request) => request.url.match(/\/indexes\/([^/?]+)/)?.[1])
+        .filter(Boolean);
+      assert.ok(touched.length > 0, 'the rebuild must touch some indexes');
+      for (const uid of touched) {
+        assert.match(uid, /^kampala-high__/, `rebuilding one school touched ${uid}`);
+      }
+
+      // Writes go the same way: an attendance mark in one school refreshes only its own index.
+      const meiliWrite = createMeiliStub();
+      const { syncTable } = await import('../server/search/indexer.mjs');
+      await syncTable(runtime.database, 'attendance_records', {
+        httpClient: meiliWrite.httpClient,
+        tenantId: 'gulu-ss',
+      });
+      const written = meiliWrite.requests
+        .map((request) => request.url.match(/\/indexes\/([^/?]+)/)?.[1])
+        .filter(Boolean);
+      assert.ok(written.length > 0);
+      for (const uid of written) {
+        assert.equal(uid, 'gulu-ss__attendance');
+      }
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+test('a session proves identity, and the role comes from the database rather than the request', async () => {
+  const { issueSessionToken, verifySessionToken, sessionCookie, readCookie, SESSION_COOKIE } = await import(
+    '../server/auth/session.mjs'
+  );
+
+  const savedSecret = process.env.SESSION_SECRET;
+  process.env.SESSION_SECRET = 'a-test-signing-secret-long-enough-to-be-used';
+
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    // The founding account, created the ordinary way.
+    const signup = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup',
+      email: 'head@kampala-high.test',
+      password: 'password123',
+      displayName: 'Head Teacher',
+    });
+    assert.equal(signup.body.data.user.role, 'admin');
+
+    const teacherSignup = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup',
+      email: 'teacher@kampala-high.test',
+      password: 'password123',
+      displayName: 'Grace Nakato',
+    });
+    const teacherId = teacherSignup.body.data.user.id;
+    const approved = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'approve_account',
+      requesterRole: 'admin',
+      userId: teacherId,
+    });
+    assert.equal(approved.body.data.user.approval_status, 'approved');
+
+    const cookieFor = (userId, tenantId = 'default') => ({
+      cookie: `${SESSION_COOKIE}=${encodeURIComponent(issueSessionToken({ userId, tenantId }))}`,
+    });
+
+    const { authenticateRequest } = await import('../server/auth/actor.mjs');
+    const teacherActor = await authenticateRequest({
+      database: runtime.database,
+      headers: cookieFor(teacherId),
+      tenantId: 'default',
+    });
+    assert.equal(teacherActor.role, 'teacher');
+    assert.equal(teacherActor.id, teacherId);
+
+    // The whole point: the request body says admin, the session says teacher, and the session wins.
+    const refused = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/functions/fees',
+      body: { action: 'summary', requesterRole: 'admin' },
+      actor: teacherActor,
+    });
+    assert.equal(refused.status, 400);
+    assert.equal(refused.body.error, 'Unauthorized');
+
+    // No session at all is nobody, whatever the body claims.
+    const anonymous = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/functions/fees',
+      body: { action: 'summary', requesterRole: 'admin' },
+      actor: null,
+    });
+    assert.equal(anonymous.body.error, 'Unauthorized');
+
+    // A demoted account loses its powers on the very next request, not at token expiry — which is
+    // why the role is read from the users row rather than carried in the token.
+    const adminActor = await authenticateRequest({
+      database: runtime.database,
+      headers: cookieFor(signup.body.data.user.id),
+      tenantId: 'default',
+    });
+    assert.equal(adminActor.role, 'admin');
+
+    await runtime.database.query("UPDATE users SET role = 'teacher' WHERE id = $1", [signup.body.data.user.id]);
+    const demoted = await authenticateRequest({
+      database: runtime.database,
+      headers: cookieFor(signup.body.data.user.id),
+      tenantId: 'default',
+    });
+    assert.equal(demoted.role, 'teacher', 'the same cookie must now resolve to the new role');
+
+    // An account that is deleted or un-approved stops authenticating entirely.
+    await runtime.database.query("UPDATE users SET approval_status = 'pending' WHERE id = $1", [teacherId]);
+    assert.equal(
+      await authenticateRequest({ database: runtime.database, headers: cookieFor(teacherId), tenantId: 'default' }),
+      null,
+    );
+
+    // A token minted for one school is refused at another, even before the cookie's host-only scope
+    // is taken into account.
+    const forOtherSchool = issueSessionToken({ userId: teacherId, tenantId: 'gulu-ss' });
+    assert.equal(verifySessionToken(forOtherSchool, { tenantId: 'gulu-ss' })?.userId, teacherId);
+    assert.equal(verifySessionToken(forOtherSchool, { tenantId: 'kampala-high' }), null);
+    assert.equal(
+      await authenticateRequest({
+        database: runtime.database,
+        headers: { cookie: `${SESSION_COOKIE}=${encodeURIComponent(forOtherSchool)}` },
+        tenantId: 'kampala-high',
+      }),
+      null,
+    );
+
+    // Tampering and expiry.
+    const token = issueSessionToken({ userId: teacherId, tenantId: 'default' });
+    const [payload, signature] = token.split('.');
+    assert.equal(verifySessionToken(`${payload}x.${signature}`, { tenantId: 'default' }), null);
+    assert.equal(verifySessionToken(`${payload}.${signature}x`, { tenantId: 'default' }), null);
+    assert.equal(verifySessionToken('nonsense', { tenantId: 'default' }), null);
+    assert.equal(verifySessionToken('', { tenantId: 'default' }), null);
+    assert.equal(
+      verifySessionToken(issueSessionToken({ userId: teacherId, tenantId: 'default', ttlMs: -1 }), {
+        tenantId: 'default',
+      }),
+      null,
+    );
+
+    // A token signed with a different secret is not ours.
+    process.env.SESSION_SECRET = 'a-completely-different-secret-of-sufficient-length';
+    assert.equal(verifySessionToken(token, { tenantId: 'default' }), null);
+    process.env.SESSION_SECRET = 'a-test-signing-secret-long-enough-to-be-used';
+
+    // The cookie is host-only (no Domain), so a browser never sends one school's cookie to another.
+    const cookie = sessionCookie('abc', { secure: true });
+    assert.ok(cookie.includes('HttpOnly'));
+    assert.ok(cookie.includes('SameSite=Lax'), 'downloads are navigations and need Lax, not Strict');
+    assert.ok(cookie.includes('Secure'));
+    assert.ok(!/Domain=/i.test(cookie), 'a Domain attribute would send this school cookie to every school');
+    assert.ok(!sessionCookie('abc', { secure: false }).includes('Secure'));
+
+    assert.equal(readCookie({ cookie: 'other=1; eschool_session=wanted; more=2' }), 'wanted');
+    assert.equal(readCookie({ cookie: 'other=1' }), '');
+    assert.equal(readCookie({}), '');
+  } finally {
+    if (savedSecret === undefined) delete process.env.SESSION_SECRET;
+    else process.env.SESSION_SECRET = savedSecret;
+    await cleanup();
+  }
+});
+
+test('signing in issues a session cookie, and signing out clears it', async () => {
+  const savedSecret = process.env.SESSION_SECRET;
+  process.env.SESSION_SECRET = 'a-test-signing-secret-long-enough-to-be-used';
+
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const signup = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup',
+      email: 'head@school.test',
+      password: 'password123',
+      displayName: 'Head Teacher',
+    });
+    // The founding account is approved on the spot, so it is signed in and gets a cookie.
+    assert.match(signup.headers['Set-Cookie'], /^eschool_session=/);
+    assert.ok(signup.headers['Set-Cookie'].includes('HttpOnly'));
+    // The token never reaches the response body, only the cookie.
+    assert.equal(signup.body.data.setCookie, undefined);
+
+    const signin = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signin',
+      email: 'head@school.test',
+      password: 'password123',
+    });
+    assert.match(signin.headers['Set-Cookie'], /^eschool_session=/);
+
+    // The cookie is the credential, so the server can answer "who am I?" for itself.
+    const { authenticateRequest } = await import('../server/auth/actor.mjs');
+    const cookie = signin.headers['Set-Cookie'].split(';')[0];
+    const actor = await authenticateRequest({ database: runtime.database, headers: { cookie }, tenantId: 'default' });
+    assert.equal(actor.email, 'head@school.test');
+
+    const session = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/functions/auth',
+      body: { action: 'session' },
+      actor,
+    });
+    assert.equal(session.body.data.user.auth_email, 'head@school.test');
+    assert.equal(session.body.data.user.password_hash, undefined);
+
+    // Anonymous: the server says nobody, rather than believing a stored profile.
+    const anonymous = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/functions/auth',
+      body: { action: 'session' },
+      actor: null,
+    });
+    assert.equal(anonymous.body.data.user, null);
+
+    const signout = await dispatch(runtime, 'POST', '/api/functions/auth', { action: 'signout' });
+    assert.match(signout.headers['Set-Cookie'], /Max-Age=0/);
+
+    // A pending account gets no session: it has no access until an administrator approves it.
+    const pending = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup',
+      email: 'new@school.test',
+      password: 'password123',
+      displayName: 'New Teacher',
+    });
+    assert.equal(pending.body.data.pending, true);
+    assert.equal(pending.headers?.['Set-Cookie'], undefined, 'an unapproved account must not be signed in');
+  } finally {
+    if (savedSecret === undefined) delete process.env.SESSION_SECRET;
+    else process.env.SESSION_SECRET = savedSecret;
+    await cleanup();
+  }
+});
+
+test('the generic data endpoint refuses tables a signed-in role may not touch', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const query = (table, actor) =>
+      runtime.dispatch({
+        method: 'POST',
+        pathname: '/api/db',
+        body: { table, operation: 'select', columns: '*', filters: [], limit: 1 },
+        actor,
+      });
+
+    const admin = { id: 'a', role: 'admin', email: 'admin@school.test', name: 'Admin' };
+    const teacher = { id: 't', role: 'teacher', email: 'teacher@school.test', name: 'Teacher' };
+    const support = { id: 's', role: 'support_staff', email: 'gate@school.test', name: 'Askari' };
+
+    // This endpoint had no role check at all: anyone who could reach it could read every invoice
+    // and payment in the school.
+    assert.equal((await query('invoices', admin)).status, 200);
+    assert.equal((await query('invoices', teacher)).status, 403);
+    assert.equal((await query('payments', teacher)).status, 403);
+    assert.equal((await query('receipts', teacher)).status, 403);
+    assert.equal((await query('portal_accounts', teacher)).status, 403);
+
+    // Teaching work is unaffected.
+    assert.equal((await query('students', teacher)).status, 200);
+    assert.equal((await query('attendance_records', teacher)).status, 200);
+    assert.equal((await query('gradebook_entries', teacher)).status, 200);
+
+    // Support staff reach the database through no table at all; they have the fee-status endpoint.
+    assert.equal((await query('students', support)).status, 403);
+    assert.equal((await query('invoices', support)).status, 403);
+
+    // No session is nobody.
+    assert.equal((await query('students', null)).status, 403);
+
+    // An internal caller — a test, or the server calling itself — is not a request and is not
+    // checked, which is what keeps the rest of this suite driving dispatch directly.
+    assert.equal((await query('students', undefined)).status, 200);
   } finally {
     await cleanup();
   }
