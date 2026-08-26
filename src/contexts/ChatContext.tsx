@@ -9,6 +9,8 @@ import type { JsonRecord } from '@/types/auth';
 // 'fees' is the read-only payment status view every signed-in role can reach.
 // 'finance' is the admin fee management workspace. 'settings' is the admin branding screen.
 // 'lessons' and 'examiner' are the teacher-facing planning and assessment workspaces.
+// 'monitoring' is the office view of what happened at the gate, the exam room door and the
+// registers — the same records the mobile app writes, read back in one place.
 type ActiveView =
   | 'chat'
   | 'students'
@@ -19,6 +21,7 @@ type ActiveView =
   | 'finance'
   | 'lessons'
   | 'examiner'
+  | 'monitoring'
   | 'settings';
 
 

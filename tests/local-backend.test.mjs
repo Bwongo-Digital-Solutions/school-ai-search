@@ -6479,3 +6479,83 @@ test('saving the edited draft updates the same questions instead of duplicating 
     await cleanup();
   }
 });
+
+test('the monitoring view reports the day and who is still out', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+
+  try {
+    // One student leaves and stays out; another leaves and returns; a third is turned back.
+    await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-001', reason: 'Clinic',
+      destination: 'Mulago', grantedBy: 'Matron',
+    });
+    await call('/api/functions/gate-pass', { code: 'STU-2026-001', direction: 'out', recordedBy: 'Askari' });
+
+    await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-002', reason: 'Home', destination: 'Jinja', grantedBy: 'Teacher',
+    });
+    await call('/api/functions/gate-pass', { code: 'STU-2026-002', direction: 'out', recordedBy: 'Askari' });
+    await call('/api/functions/gate-pass', { code: 'STU-2026-002', direction: 'in', recordedBy: 'Askari' });
+
+    await call('/api/functions/gate-pass', {
+      code: 'STU-2026-003', direction: 'out', decision: 'declined',
+      note: 'No slip', recordedBy: 'Askari',
+    });
+
+    // A slip nobody has presented yet must still read as outstanding.
+    await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-005', reason: 'Dentist',
+      destination: 'Clinic', grantedBy: 'Matron',
+    });
+
+    await call('/api/functions/exam-clearance', {
+      action: 'grant', code: 'STU-2026-004', grantedBy: 'Bursar',
+    });
+    await call('/api/functions/exam-clearance', {
+      action: 'admit', code: 'STU-2026-004', decision: 'approved', recordedBy: 'Invigilator',
+    });
+    await call('/api/functions/exam-clearance', {
+      action: 'admit', code: 'STU-2026-006', decision: 'rejected',
+      note: 'No clearance', recordedBy: 'Invigilator',
+    });
+
+    await call('/api/functions/roll-call', { action: 'mark', code: 'STU-2026-001', status: 'present', markedBy: 'T' });
+    await call('/api/functions/roll-call', { action: 'mark', code: 'STU-2026-002', status: 'absent', markedBy: 'T' });
+    await call('/api/functions/meal-record', { code: 'STU-2026-001', meal: 'lunch', servedBy: 'Cook' });
+
+    const res = await call('/api/functions/monitoring', {});
+    assert.equal(res.status, 200);
+    const data = res.body.data;
+
+    assert.deepEqual(data.gate.counts, { out: 2, in: 1, declined: 1, total: 4 });
+
+    // Presence follows approved movements only, so the student turned back is not "out".
+    assert.equal(data.off_premises.length, 1);
+    assert.equal(data.off_premises[0].student_number, 'STU-2026-001');
+    assert.equal(data.off_premises[0].destination, 'Mulago');
+
+    // A spent slip is no longer outstanding; an unused one still is.
+    assert.equal(data.gate.active_permissions.length, 1);
+    assert.equal(data.gate.active_permissions[0].student_number, 'STU-2026-005');
+
+    assert.equal(data.exams.admitted, 1);
+    assert.equal(data.exams.rejected, 1);
+    assert.equal(data.exams.active_clearances, 1);
+
+    assert.equal(data.attendance.present, 1);
+    assert.equal(data.attendance.absent, 1);
+    assert.ok(data.attendance.by_class.length > 0);
+    assert.equal(data.meals.lunch, 1);
+
+    // A day with no traffic reads as empty rather than failing — but a student who is still
+    // out is still out, whichever day is being looked at.
+    const quiet = await call('/api/functions/monitoring', { date: '1999-01-01' });
+    assert.equal(quiet.status, 200);
+    assert.equal(quiet.body.data.gate.counts.total, 0);
+    assert.equal(quiet.body.data.attendance.marked, 0);
+    assert.equal(quiet.body.data.off_premises.length, 1);
+  } finally {
+    await cleanup();
+  }
+});

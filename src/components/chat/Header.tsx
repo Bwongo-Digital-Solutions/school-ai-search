@@ -4,7 +4,7 @@ import {
   Moon, Sun, X, ChevronDown, LogOut, User, Shield, HardHat,
   MessageSquare, Users, Clock, ClipboardList, UserCog, Wallet, Landmark,
   ClipboardCheck, GraduationCap, NotebookPen, FileText, Loader2,
-  Mail, Printer
+  Mail, Printer, ArrowLeftRight
 } from 'lucide-react';
 import { downloadFromUrl, printFromUrl } from '@/lib/download';
 import { callChatReport, teachingDocumentUrl } from '@/lib/teaching';
@@ -298,6 +298,18 @@ const Header: React.FC = () => {
             )}
             {isAdmin && (
               <button
+                onClick={() => setActiveView('monitoring')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                  activeView === 'monitoring'
+                    ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <ArrowLeftRight className="w-3.5 h-3.5" /> Monitoring
+              </button>
+            )}
+            {isAdmin && (
+              <button
                 onClick={() => setActiveView('audit')}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
                   activeView === 'audit'
@@ -543,6 +555,14 @@ const Header: React.FC = () => {
                           className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
                         >
                           <UserCog className="w-3.5 h-3.5" /> Staff Access
+                        </button>
+                      )}
+                      {isAdmin && (
+                        <button
+                          onClick={() => { setActiveView('monitoring'); setShowUserMenu(false); }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                        >
+                          <ArrowLeftRight className="w-3.5 h-3.5" /> Monitoring
                         </button>
                       )}
                       {isAdmin && (
