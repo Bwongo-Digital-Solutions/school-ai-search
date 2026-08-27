@@ -3023,6 +3023,34 @@ const handleReportCardRequest = async (database, pathname, searchParams, { metho
 
 const notFound = (message) => ({ type: 'json', status: 404, body: { error: message } });
 
+/**
+ * The parent-facing report: one PDF covering whichever of performance, attendance, fees,
+ * payment history and student details were asked for. `sections` is a comma-separated
+ * list; omitting it returns all of them.
+ *
+ * Restricted to staff who already hold the roster. It carries a family's marks and their
+ * payment history, which is more than a gate keeper or a cook has any reason to see.
+ */
+const handleStudentReportRequest = async (database, pathname, searchParams, { actor } = {}) => {
+  const match = pathname.match(/^\/api\/students\/([^/]+)\/report\.pdf$/);
+  if (!match) return null;
+
+  const refusal = requireRole(
+    resolveActor(actor, { requesterRole: searchParams.get('requesterRole') }),
+    ['admin', 'teacher'],
+  );
+  if (refusal) return { type: 'json', status: 403, body: refusal };
+
+  const rendered = await renderReport(database, {
+    code: decodeURIComponent(match[1]),
+    sections: searchParams.get('sections'),
+    generatedBy: searchParams.get('actorName') || '',
+  });
+  if (rendered.error) return notFound(rendered.error);
+
+  return pdfResponse(rendered.pdf, rendered.filename);
+};
+
 const handleIdCardRequest = async (database, pathname, searchParams, { actor } = {}) => {
   const qrMatch = pathname.match(/^\/api\/id-cards\/([^/]+)\.png$/);
   if (qrMatch) {
@@ -3552,6 +3580,11 @@ export const createAppRuntime = async ({
       const reportCardResponse = await handleReportCardRequest(database, pathname, searchParams, { method, body, actor });
       if (reportCardResponse) {
         return reportCardResponse;
+      }
+
+      const studentReportResponse = await handleStudentReportRequest(database, pathname, searchParams, { actor });
+      if (studentReportResponse) {
+        return studentReportResponse;
       }
 
       const idCardResponse = await handleIdCardRequest(database, pathname, searchParams, { actor });
