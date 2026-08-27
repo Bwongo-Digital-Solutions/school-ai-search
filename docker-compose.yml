@@ -233,7 +233,12 @@ services:
       - school_ai_search_certbot_webroot:/var/www/certbot
 
   caddy:
-    image: caddy:2-alpine
+    # Built, not pulled: the stock image has no DNS provider plugins, and a wildcard certificate
+    # can only be issued over DNS-01. See deploy/caddy/Dockerfile.
+    build:
+      context: ./deploy/caddy
+      dockerfile: Dockerfile
+    image: school-ai-search-caddy
     container_name: school-ai-search-caddy
     profiles: ["proxy-caddy"]
     restart: unless-stopped

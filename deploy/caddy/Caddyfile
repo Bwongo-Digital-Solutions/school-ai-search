@@ -4,21 +4,24 @@
 #
 # Caddy obtains and renews a wildcard certificate for *.eschool.ink by itself. A wildcard can only
 # be issued over a DNS-01 challenge, which means Caddy needs an API token for the domain's DNS —
-# CLOUDFLARE_API_TOKEN below, with the Cloudflare DNS plugin. Other providers work the same way with
-# their own plugin; the stock caddy image includes none, so build it in:
-#
-#   FROM caddy:2-builder AS builder
-#   RUN xcaddy build --with github.com/caddy-dns/cloudflare
-#   FROM caddy:2-alpine
-#   COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+# CLOUDFLARE_API_TOKEN below. The stock caddy image contains no DNS providers, so the compose
+# service builds deploy/caddy/Dockerfile, which adds the Cloudflare one.
 #
 # If you would rather issue the certificate yourself with certbot, use the nginx profile instead.
-
-{
-	email {$ACME_EMAIL}
-}
+#
+# There is deliberately no global `email` option here. Caddy's Caddyfile has no conditionals, so
+# `email {$ACME_EMAIL}` with the variable unset expands to a bare `email` with no argument, and
+# Caddy refuses to start: "wrong argument count or unexpected line ending after 'email'". An email
+# address only buys expiry notices from the CA, so it is not worth a crash loop. To add one, put a
+# literal address here rather than a placeholder:
+#
+#   {
+#   	email you@example.com
+#   }
 
 {$TENANT_ROOT_DOMAIN:eschool.ink}, *.{$TENANT_ROOT_DOMAIN:eschool.ink} {
+	# A wildcard can only be issued over DNS-01, so Caddy needs a token that may edit this zone's
+	# DNS. The provider name here must match the plugin built into deploy/caddy/Dockerfile.
 	tls {
 		dns cloudflare {$CLOUDFLARE_API_TOKEN}
 	}

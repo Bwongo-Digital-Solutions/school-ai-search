@@ -90,9 +90,24 @@ cp -L /etc/letsencrypt/live/eschool.ink/{fullchain,privkey}.pem deploy/nginx/cer
 docker compose --profile proxy-nginx up -d
 
 # Caddy: Caddy obtains and renews it itself, given a DNS API token
-#   set ACME_EMAIL and CLOUDFLARE_API_TOKEN in .env.production
-docker compose --profile proxy-caddy up -d
+#   set CLOUDFLARE_API_TOKEN in .env.production
+docker compose --profile proxy-caddy up -d --build
 ```
+
+> **Run only one proxy.** Both bind 80 and 443, so starting the second leaves it in a crash loop.
+> `./containers.sh start` takes the other one down for you.
+>
+> **The Caddy profile is built, not pulled** (`--build`): the stock Caddy image contains no DNS
+> provider plugins, and a wildcard certificate can only be issued over DNS-01. `deploy/caddy/Dockerfile`
+> adds the Cloudflare one; for another provider, swap the module there and the provider name in the
+> Caddyfile.
+>
+> **nginx will not start at all if the certificate file is missing** — it fails its config check and
+> exits, so the site is unreachable rather than merely untrusted. `./containers.sh start` writes a
+> self-signed placeholder first when there is nothing there, so the stack always comes up; replace it
+> with the real one via `cert-issue` as soon as DNS points at the server. If the site is down after a
+> deploy, run `./scripts/diagnose-deployment.sh` on the server — it checks DNS, listeners, the app,
+> the proxy's own logs, the certificate files and the firewall in order.
 
 Both configurations are in [`deploy/`](deploy/) and both do the one thing that matters: **preserve
 the `Host` header**, since that is what selects the school. A proxy that rewrites it sends every

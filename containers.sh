@@ -33,6 +33,7 @@ Commands:
 
 TLS / reverse proxy (production only):
   cert-status   Show which certificate is in place and when it expires
+  cert-bootstrap Write a self-signed placeholder so nginx can start before the real one exists
   cert-issue    Obtain a wildcard certificate with certbot (DNS-01)
   cert-install  Copy the issued certificate in for nginx and reload it
   cert-renew    Renew, reinstall and reload in one step
@@ -91,7 +92,8 @@ Choose an action:
  12) Issue a wildcard certificate (nginx)
  13) Renew the certificate and reload
  14) Reload the proxy configuration
- 15) Change environment
+ 15) Write a self-signed placeholder so nginx can start
+ 16) Change environment
   0) Exit
 EOF
 }
@@ -403,6 +405,44 @@ cert_status() {
   esac
 }
 
+# nginx will not start at all when ssl_certificate points at a file that does not exist — it fails
+# the config check and exits. On a fresh deployment that is a chicken-and-egg: no certificate means
+# no nginx, and no nginx means the site is simply down rather than showing a warning.
+#
+# So a placeholder is written first. Browsers reject it loudly, which is correct — it exists only so
+# nginx can boot and serve the ACME/redirect paths until the real certificate replaces it.
+cert_bootstrap() {
+  domain="$(root_domain)"
+
+  if [ -f "$CERT_DIR/fullchain.pem" ]; then
+    printf 'A certificate is already in place at %s — leaving it alone.\n' "$CERT_DIR"
+    return 0
+  fi
+
+  if ! command -v openssl >/dev/null 2>&1; then
+    printf 'openssl is not installed, so a placeholder certificate cannot be generated.\n' >&2
+    return 1
+  fi
+
+  mkdir -p "$CERT_DIR"
+  openssl req -x509 -newkey rsa:2048 -nodes -days 30 \
+    -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
+    -subj "/CN=$domain" \
+    -addext "subjectAltName=DNS:$domain,DNS:*.$domain" >/dev/null 2>&1
+  chmod 600 "$CERT_DIR/privkey.pem"
+
+  cat <<EOF
+
+Wrote a SELF-SIGNED placeholder certificate to $CERT_DIR.
+
+nginx can now start, but every browser will warn that the certificate is not trusted — because it
+is not. Replace it with a real one as soon as DNS points here:
+
+  ./containers.sh cert-issue
+
+EOF
+}
+
 cert_issue() {
   require_nginx_proxy cert-issue || return 0
 
@@ -503,6 +543,34 @@ proxy_reload() {
   esac
 }
 
+# Called before starting under the nginx profile. Without a readable certificate nginx exits on
+# startup and the whole site is unreachable — including the plain-HTTP redirect — so this is the
+# difference between "browser warning" and "nothing answers at all".
+# Both proxies bind 80 and 443, so running them together leaves whichever lost the race in a crash
+# loop — and it is easy to end up there by running the compose commands by hand for one profile and
+# then the other. Starting one takes the other down.
+stop_other_proxy() {
+  detect_compose
+  case "$proxy" in
+    nginx) other="caddy" ;;
+    caddy) other="nginx" ;;
+    *)     return 0 ;;
+  esac
+
+  if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$APP_NAME-$other"; then
+    printf 'Stopping the %s proxy — both bind 80 and 443, so only one can run.\n' "$other"
+    docker rm -f "$APP_NAME-$other" >/dev/null 2>&1 || true
+  fi
+}
+
+ensure_startable_cert() {
+  [ "$proxy" = "nginx" ] || return 0
+  [ -f "$CERT_DIR/fullchain.pem" ] && [ -f "$CERT_DIR/privkey.pem" ] && return 0
+
+  printf '\nNo certificate in %s, and nginx will not start without one.\n' "$CERT_DIR" >&2
+  cert_bootstrap
+}
+
 run_command() {
   command="$1"
 
@@ -516,6 +584,8 @@ run_command() {
     show_endpoints
     ;;
   start)
+    stop_other_proxy
+    ensure_startable_cert
     compose up --build -d
     show_endpoints
     ;;
@@ -523,6 +593,8 @@ run_command() {
     compose stop
     ;;
   restart)
+    stop_other_proxy
+    ensure_startable_cert
     compose stop
     compose up --build -d
     show_endpoints
@@ -540,6 +612,9 @@ run_command() {
     ;;
   endpoints)
     show_endpoints
+    ;;
+  cert-bootstrap)
+    cert_bootstrap
     ;;
   cert-status)
     cert_status
@@ -642,13 +717,16 @@ interactive_menu() {
         run_command proxy-reload
         ;;
       15)
+        run_command cert-bootstrap
+        ;;
+      16)
         choose_environment
         ;;
       0)
         exit 0
         ;;
       *)
-        printf 'Please choose a number from 0 to 15.\n'
+        printf 'Please choose a number from 0 to 16.\n'
         ;;
     esac
   done
