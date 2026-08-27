@@ -2820,8 +2820,10 @@ test('a scan card carries only the sections the staff profile grants', async () 
     const bursar = await card('admin', 'bursar');
     assert.equal(bursar.status, 200);
     assert.equal(bursar.body.data.profile.label, 'Bursar');
+    // 'payments' is the ledger behind the balance — the bursar answering "has this family paid?"
+    // needs it, and it arrived with the payment-history work.
     assert.deepEqual(bursar.body.data.sections,
-      ['fees', 'bio', 'class', 'dormitory', 'parents', 'gate_permission', 'exam_clearance_grant']);
+      ['fees', 'payments', 'bio', 'class', 'dormitory', 'parents', 'gate_permission', 'exam_clearance_grant']);
 
     // The gate needs to know who the student is and whether they may leave — nothing else.
     const askari = await card('support_staff', 'askari');

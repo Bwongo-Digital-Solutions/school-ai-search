@@ -43,6 +43,23 @@ sign in** until an administrator approves them. As an admin:
 If someone tries to sign in before approval, they see *"Your account is awaiting administrator
 approval."*
 
+### Staying signed in
+
+Signing in gives you a session that lasts about **12 hours**, and it extends itself while you are
+working, so a long day in the gradebook does not end in a sudden sign-out. Closing the browser does
+not sign you out; **Sign Out** does, on the server as well as on your screen.
+
+What you are allowed to do is decided by the server from your account each time you ask it for
+something — not by the screen you happen to be looking at. Two things follow, and both are
+deliberate:
+
+- If an administrator changes your role, it takes effect on your **very next click**, not whenever
+  you next sign in.
+- Nothing you can change in your own browser will grant you access you have not been given.
+
+Each school's sign-in is its own. A session at `kampala-high.eschool.ink` means nothing at any other
+school on the platform, even for the same person — they sign in separately at each.
+
 ### Editing and removing accounts
 
 Under **Staff → Active Users**, each person has two buttons beside their role:
@@ -427,12 +444,23 @@ overrides, account approvals, exam publishing, settings changes — each with wh
 e-School can run many schools from one deployment, each with its **own isolated database**, reached
 at its **own subdomain** (`your-school.eschool.ink`).
 
+### The operator's console
+
+If you run the platform, **`/owner`** is your screen. It asks for the operator token set on the
+server, then lists every school with its status and paid-to date, and lets you:
+
+- **add a school directly**, with no payment — its subdomain is live immediately, and the first
+  account created there becomes its administrator;
+- **change a school's status** (active, past due, suspended, pending);
+- **run the renewal sweep** by hand.
+
+Nothing in a school's own screens can reach any of this. A school's administrator is an
+administrator *of that school*: they cannot see that any other school exists.
+
+> The token lives only in that browser tab — close it and it is gone. It is never saved to the
+> browser, so there is nothing on your machine for anything else to read.
+
 ### Self-service sign-up
-**If you run the platform**, there is also an operator's console at **`/owner`**. It asks for the
-token set on the server, then lists every school with its status and paid-to date, and lets you add
-a school directly (no payment), change a school's status, or run the renewal sweep. It is the only
-place schools can be created without going through payment, and nothing in a school's own screens
-can reach it.
 
 A school signs itself up at the public page **`/signup`** (e.g. `apply.eschool.ink/signup`):
 
@@ -450,9 +478,39 @@ then, if unpaid, is **suspended** — its subdomain shows a renewal notice until
 Renewing (sign up again with the same subdomain → pay) reactivates it.
 
 ### What operators configure (once)
-Wildcard DNS/TLS for the root domain, a control database, subscription pricing, live payment-provider
-keys, and (optionally) an email provider for the activation email. See
-[TECHNICAL_OVERVIEW.md](TECHNICAL_OVERVIEW.md) → *Multi-Tenancy and Self-Service Provisioning*.
+
+Wildcard DNS and a wildcard TLS certificate for the root domain, a control database, subscription
+pricing, live payment-provider keys, and (optionally) an email provider for the activation email.
+Two secrets matter more than the rest:
+
+- **`SESSION_SECRET`** — without it, everyone is signed out every time the server restarts.
+- **`PLATFORM_OWNER_TOKEN`** — without it, `/owner` refuses everything and no school can be created.
+
+Generate each with `openssl rand -hex 32`. The full runbook is in
+[DEPLOYMENT.md](DEPLOYMENT.md); the design is in [TECHNICAL_OVERVIEW.md](TECHNICAL_OVERVIEW.md) →
+*Multi-Tenancy and Self-Service Provisioning*.
+
+### Running the servers
+
+`./containers.sh` is the helper for all of it — an interactive menu, or direct commands:
+
+```bash
+PROXY=nginx ./containers.sh start        # start everything behind nginx, with TLS
+PROXY=caddy ./containers.sh start        # or behind Caddy, which manages its own certificate
+./containers.sh cert-status              # what certificate is installed and when it expires
+./containers.sh cert-issue               # get a wildcard certificate (nginx)
+./containers.sh cert-renew               # renew it and reload — safe to run from cron
+./containers.sh status                   # what is running
+./containers.sh logs                     # follow the logs
+```
+
+Every school is a subdomain, so the certificate has to be a **wildcard** (`*.eschool.ink`), and a
+wildcard certificate can only be issued if the certificate authority can check a **DNS record** —
+so `cert-issue` needs an API token for your domain's DNS. Caddy does the same thing by itself if you
+would rather not think about renewals at all.
+
+Once the wildcard is in place, **a new school needs no DNS work**: it is reachable the moment it is
+created, at 10pm on a Sunday if that is when someone pays.
 
 ---
 
@@ -461,6 +519,15 @@ keys, and (optionally) an email provider for the activation email. See
 | Symptom | Likely cause / fix |
 | --- | --- |
 | *"Your account is awaiting administrator approval."* | Ask an admin to approve you under **Staff → Pending Approval**. |
+| Everyone is signed out whenever the server restarts | `SESSION_SECRET` is not set on the server, so it invents a new signing key each time it starts. Set it (`openssl rand -hex 32`) and restart once more. |
+| You are signed out after about half a day | Expected — a session lasts 12 hours and is extended while you are working. Sign in again. |
+| A screen says *Unauthorized* even though you are signed in | Your role does not allow it. The server decides this from your account, not from the screen, so changing anything in the browser will not help — ask an administrator. |
+| An admin was demoted but still had admin screens | No longer possible: the role is re-read from their account on every request, so a change takes effect on their very next click. |
+| The operator console at `/owner` refuses the token | Either `PLATFORM_OWNER_TOKEN` is not set on the server (it fails closed), or the token is wrong. It is also refused if it is shorter than 24 characters. |
+| A browser warns the certificate is invalid for `school.eschool.ink` | The certificate is not a wildcard. Run `./containers.sh cert-status` — *Covers* must list `*.eschool.ink`, not just the bare domain. Re-issue with `./containers.sh cert-issue`. |
+| Every school shows the same school's data | The reverse proxy is rewriting the `Host` header, so every request looks like the apex. In nginx it must be `proxy_set_header Host $host;` — see `deploy/nginx/`. |
+| Uploading a photo or logo fails with a 413 | The proxy's upload limit. `client_max_body_size 25m;` is already in the shipped nginx configs — check yours matches if you wrote your own. |
+| A long AI generation ends in a 504 | The proxy's read timeout. The shipped configs use 300s; a 60s default will cut off a local model mid-paper. |
 | No Delete button on a staff row | That is your own account — you cannot delete the account you are signed in with. Ask another administrator. |
 | *"This is the only administrator account…"* | Promote a second person to Administrator under **Staff**, then delete the first. |
 | A staff member cannot sign in after you edited them | Their sign-in email changed. Check it under **Staff → Edit**; that address is what they must use. |

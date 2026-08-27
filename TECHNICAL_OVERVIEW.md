@@ -464,7 +464,8 @@ Use the root helper script:
 ```
 
 The script opens an interactive menu where you choose the environment and then select numbered actions for build, start, stop, restart, delete, status, and logs.
-It also includes an endpoints option that shows where to find the frontend, backend API, backend health check, and database connection after containers are running.
+It also includes an endpoints option that shows where to find the frontend, backend API, backend health check, and database connection after containers are running — and, when a reverse proxy is selected, the HTTPS addresses schools actually use.
+Options 10–14 cover the reverse proxy and its TLS certificate.
 
 You can also run commands directly:
 
@@ -474,6 +475,7 @@ You can also run commands directly:
 ./containers.sh stop
 ./containers.sh delete
 ./containers.sh endpoints
+./containers.sh cert-status
 ```
 
 By default the script targets the production stack in `docker-compose.yml`. Pass `dev` as the second argument to use `docker-compose.dev.yml`:
@@ -486,7 +488,8 @@ By default the script targets the production stack in `docker-compose.yml`. Pass
 
 Production defaults:
 
-- App: `http://127.0.0.1:8787`
+- App: `http://127.0.0.1:8787` — **loopback only**, because a reverse proxy is meant to be the way
+  in. Set `APP_BIND=0.0.0.0` to publish it directly.
 - Database: internal `db` service
 
 Development defaults:
@@ -494,6 +497,51 @@ Development defaults:
 - Frontend: `http://127.0.0.1:8080`
 - Backend API: `http://127.0.0.1:8787`
 - PostgreSQL: `127.0.0.1:5432`
+
+### Which Compose the script uses
+
+`containers.sh` detects it on first use: `docker compose` (the v2 CLI plugin) if present, otherwise
+the `docker-compose` standalone, and a clear install message if neither is. Both take the same flags
+for everything the script does. This matters because a missing plugin fails obscurely — the Docker
+CLI stops recognising `compose` as a command and reads the next argument as one of its own, which is
+where `unknown shorthand flag: 'p' in -p` comes from.
+
+### The reverse proxy
+
+nginx and Caddy are each a compose profile, selected by `PROXY` (or menu option 10, or a third
+argument). The script sets `COMPOSE_PROFILES` rather than passing `--profile`, because the v1
+standalone reads the variable but does not accept the flag.
+
+```bash
+PROXY=nginx ./containers.sh start        # TLS with a certificate you issue
+PROXY=caddy ./containers.sh start        # TLS with a certificate Caddy issues and renews itself
+./containers.sh start prod nginx         # the same, for a deploy script or a cron line
+```
+
+Selecting a proxy in development is refused and reset to `none`: `docker-compose.dev.yml` has no
+proxy services, and Vite serves the frontend directly.
+
+### Certificates
+
+Every school is a subdomain, so the certificate must be a **wildcard** — and a wildcard cannot be
+issued over the HTTP-01 challenge, because there is no single host for the ACME server to fetch a
+file from. It has to be **DNS-01**, which means certbot needs an API token for the domain's DNS.
+
+```bash
+./containers.sh cert-status              # what is installed, when it expires, what it covers
+PROXY=nginx ./containers.sh cert-issue   # certbot certonly --dns-<plugin>, then install + reload
+PROXY=nginx ./containers.sh cert-renew   # certbot renew, then install + reload — safe on a cron
+PROXY=nginx ./containers.sh proxy-reload # nginx -t, then reload only if it passes
+```
+
+`cert-install` copies with `cp -L`, because certbot's `live/` entries are symlinks into `archive/`
+and the container mounts only `deploy/nginx/certs` — a copied symlink would dangle inside it. The
+plugin and credentials path default to Cloudflare and are overridable with `CERTBOT_DNS_PLUGIN` and
+`CERTBOT_DNS_CREDENTIALS`; the domain comes from `TENANT_ROOT_DOMAIN`, read from `.env.production`,
+then `.env`, then the environment.
+
+Under the Caddy profile these commands do nothing except explain that Caddy manages its own
+certificate, given `ACME_EMAIL` and a DNS API token.
 
 ## Environment Variables
 
