@@ -38,6 +38,7 @@ import { generateAssistantReply } from './services/student-chat.mjs';
 import { answerChatMessage } from './agent/chat.mjs';
 import { handleMcpServerRequest } from './mcp/server.mjs';
 import { handleFeesFunction } from './services/fees.mjs';
+import { handleStudentReportFunction, renderReport } from './services/student-report.mjs';
 import { handleCurriculumFunction } from './services/curriculum.mjs';
 import { handleDigitalExaminerFunction, loadPaper } from './services/digital-examiner.mjs';
 import { handleLessonPlannerFunction } from './services/lesson-planner.mjs';
@@ -1363,7 +1364,7 @@ const handleStudentCardFunction = async (database, body = {}) => {
   // Fees back the exam-clearance rule, so they are fetched for either section.
   const needsInvoices = wants('fees') || wants('exam_clearance');
 
-  const [invoices, dormitory, grades, attendance, passes, meals] = await Promise.all([
+  const [invoices, dormitory, grades, attendance, passes, meals, ledger] = await Promise.all([
     needsInvoices
       ? database.query(
           'SELECT id, invoice_number, status, total_amount, balance_due, currency, due_date FROM invoices WHERE student_id = $1',
@@ -1404,6 +1405,22 @@ const handleStudentCardFunction = async (database, body = {}) => {
       ? database.query(
           'SELECT meal, served_by, served_at FROM meal_records WHERE student_id = $1 AND meal_date = $2',
           [student.id, todayIso()],
+        )
+      : null,
+    // The receipt is joined in because a payment without its number cannot be shared with
+    // the parent who made it.
+    wants('payments')
+      ? database.query(
+          `
+            SELECT p.id, p.amount, p.currency, p.payment_method, p.reference, p.paid_at,
+                   p.received_by, r.id AS receipt_id, r.receipt_number
+            FROM payments p
+            LEFT JOIN receipts r ON r.payment_id = p.id
+            WHERE p.student_id = $1
+            ORDER BY p.paid_at DESC
+            LIMIT 40
+          `,
+          [student.id],
         )
       : null,
   ]);
@@ -1449,6 +1466,26 @@ const handleStudentCardFunction = async (database, body = {}) => {
       total_invoiced: invoiced,
       balance_due: balance,
       status: invoiceRows.length === 0 ? 'no_invoices' : balance > 0 ? 'outstanding' : 'cleared',
+    };
+  }
+
+  if (wants('payments')) {
+    const paid = (ledger?.rows || []).map((row) => ({
+      id: row.id,
+      amount: Number(row.amount || 0),
+      currency: row.currency || 'UGX',
+      method: row.payment_method || '',
+      reference: row.reference || '',
+      paid_at: row.paid_at,
+      received_by: row.received_by || '',
+      receipt_id: row.receipt_id || null,
+      receipt_number: row.receipt_number || '',
+    }));
+    card.payments = {
+      currency: paid[0]?.currency || invoiceRows[0]?.currency || 'UGX',
+      count: paid.length,
+      total_paid: paid.reduce((sum, row) => sum + row.amount, 0),
+      entries: paid,
     };
   }
 
@@ -2800,6 +2837,32 @@ const handleReportCardRequest = async (database, pathname, searchParams, { metho
 
 const notFound = (message) => ({ type: 'json', status: 404, body: { error: message } });
 
+/**
+ * The parent-facing report: one PDF covering whichever of performance, attendance, fees,
+ * payment history and student details were asked for. `sections` is a comma-separated
+ * list; omitting it returns all of them.
+ *
+ * Restricted to staff who already hold the roster. It carries a family's marks and their
+ * payment history, which is more than a gate keeper or a cook has any reason to see.
+ */
+const handleStudentReportRequest = async (database, pathname, searchParams) => {
+  const match = pathname.match(/^\/api\/students\/([^/]+)\/report\.pdf$/);
+  if (!match) return null;
+
+  if (!['admin', 'teacher'].includes(searchParams.get('requesterRole'))) {
+    return { type: 'json', status: 403, body: { error: 'Unauthorized' } };
+  }
+
+  const rendered = await renderReport(database, {
+    code: decodeURIComponent(match[1]),
+    sections: searchParams.get('sections'),
+    generatedBy: searchParams.get('actorName') || '',
+  });
+  if (rendered.error) return notFound(rendered.error);
+
+  return pdfResponse(rendered.pdf, rendered.filename);
+};
+
 const handleIdCardRequest = async (database, pathname, searchParams) => {
   const qrMatch = pathname.match(/^\/api\/id-cards\/([^/]+)\.png$/);
   if (qrMatch) {
@@ -3271,6 +3334,11 @@ export const createAppRuntime = async ({
         return reportCardResponse;
       }
 
+      const studentReportResponse = await handleStudentReportRequest(database, pathname, searchParams);
+      if (studentReportResponse) {
+        return studentReportResponse;
+      }
+
       const idCardResponse = await handleIdCardRequest(database, pathname, searchParams);
       if (idCardResponse) {
         return idCardResponse;
@@ -3390,6 +3458,13 @@ export const createAppRuntime = async ({
 
       if (method === 'POST' && pathname === '/api/functions/meal-record') {
         const data = await handleMealRecordFunction(database, body);
+        return data?.error
+          ? { type: 'json', status: 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/student-report') {
+        const data = await handleStudentReportFunction(database, body);
         return data?.error
           ? { type: 'json', status: 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
