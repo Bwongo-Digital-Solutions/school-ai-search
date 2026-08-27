@@ -19,6 +19,7 @@ export const SCAN_SECTIONS = [
   'dormitory',
   'parents',
   'fees',
+  'payments',
   'academics',
   'attendance',
   'exam_clearance',
@@ -29,8 +30,12 @@ export const SCAN_SECTIONS = [
   'meal_card',
 ];
 
+/* 'payments' is the ledger behind the 'fees' balance — who paid what, and when. It is the
+   bursar's working record, so it goes no further than the profiles that keep the books: a
+   teacher sees whether fees are cleared, not the family's payment history. */
 const ADMIN_SECTIONS = [
-  'fees', 'bio', 'class', 'dormitory', 'parents', 'gate_permission', 'exam_clearance_grant',
+  'fees', 'payments', 'bio', 'class', 'dormitory', 'parents', 'gate_permission',
+  'exam_clearance_grant',
 ];
 
 /* Designations are only meaningful inside their own role; a cook is support staff and an
