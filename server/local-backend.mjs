@@ -66,6 +66,7 @@ import { generateAssistantReply } from './services/student-chat.mjs';
 import { answerChatMessage } from './agent/chat.mjs';
 import { handleMcpServerRequest } from './mcp/server.mjs';
 import { handleFeesFunction } from './services/fees.mjs';
+import { handleStudentReportFunction, renderReport } from './services/student-report.mjs';
 import { handleCurriculumFunction } from './services/curriculum.mjs';
 import { handleDigitalExaminerFunction, loadPaper } from './services/digital-examiner.mjs';
 import { handleLessonPlannerFunction } from './services/lesson-planner.mjs';
@@ -1500,7 +1501,7 @@ const handleStudentCardFunction = async (database, body = {}, { actor } = {}) =>
   // Fees back the exam-clearance rule, so they are fetched for either section.
   const needsInvoices = wants('fees') || wants('exam_clearance');
 
-  const [invoices, dormitory, grades, attendance, passes, meals] = await Promise.all([
+  const [invoices, dormitory, grades, attendance, passes, meals, ledger] = await Promise.all([
     needsInvoices
       ? database.query(
           'SELECT id, invoice_number, status, total_amount, balance_due, currency, due_date FROM invoices WHERE student_id = $1',
@@ -1541,6 +1542,22 @@ const handleStudentCardFunction = async (database, body = {}, { actor } = {}) =>
       ? database.query(
           'SELECT meal, served_by, served_at FROM meal_records WHERE student_id = $1 AND meal_date = $2',
           [student.id, todayIso()],
+        )
+      : null,
+    // The receipt is joined in because a payment without its number cannot be shared with
+    // the parent who made it.
+    wants('payments')
+      ? database.query(
+          `
+            SELECT p.id, p.amount, p.currency, p.payment_method, p.reference, p.paid_at,
+                   p.received_by, r.id AS receipt_id, r.receipt_number
+            FROM payments p
+            LEFT JOIN receipts r ON r.payment_id = p.id
+            WHERE p.student_id = $1
+            ORDER BY p.paid_at DESC
+            LIMIT 40
+          `,
+          [student.id],
         )
       : null,
   ]);
@@ -1586,6 +1603,26 @@ const handleStudentCardFunction = async (database, body = {}, { actor } = {}) =>
       total_invoiced: invoiced,
       balance_due: balance,
       status: invoiceRows.length === 0 ? 'no_invoices' : balance > 0 ? 'outstanding' : 'cleared',
+    };
+  }
+
+  if (wants('payments')) {
+    const paid = (ledger?.rows || []).map((row) => ({
+      id: row.id,
+      amount: Number(row.amount || 0),
+      currency: row.currency || 'UGX',
+      method: row.payment_method || '',
+      reference: row.reference || '',
+      paid_at: row.paid_at,
+      received_by: row.received_by || '',
+      receipt_id: row.receipt_id || null,
+      receipt_number: row.receipt_number || '',
+    }));
+    card.payments = {
+      currency: paid[0]?.currency || invoiceRows[0]?.currency || 'UGX',
+      count: paid.length,
+      total_paid: paid.reduce((sum, row) => sum + row.amount, 0),
+      entries: paid,
     };
   }
 
@@ -3663,6 +3700,13 @@ export const createAppRuntime = async ({
 
       if (method === 'POST' && pathname === '/api/functions/meal-record') {
         const data = await handleMealRecordFunction(database, body);
+        return data?.error
+          ? { type: 'json', status: 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/student-report') {
+        const data = await handleStudentReportFunction(database, body);
         return data?.error
           ? { type: 'json', status: 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
