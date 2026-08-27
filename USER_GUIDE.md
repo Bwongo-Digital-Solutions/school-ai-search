@@ -168,7 +168,7 @@ From **Student Management**, open a student and choose **Build PDF Report Card**
 
 ## 7. Settings (admin)
 
-Open **Settings** from the user menu. Administrators only. It has two tabs.
+Open **Settings** from the user menu. Administrators only.
 
 ### Branding
 
@@ -315,6 +315,21 @@ you can:
 
 ---
 
+### AI Providers
+
+By default your school uses the platform's AI accounts, and there is nothing to set up. If your
+school has its own account — an OpenAI or Anthropic key you pay for, or an Ollama machine on your
+own network — enter it here and this school will use it instead. Only this school; no other school
+on the platform is affected.
+
+- A key you enter is **stored encrypted and never shown again** — the screen only ever shows the last
+  four characters, so there is no way for anyone, including you, to read it back out of the app.
+- **Use the platform's** removes your key and hands the school back to the shared account.
+- Ollama needs only an address, not a key — point it at your own machine.
+
+> If the screen says the server has no encryption key configured, provider keys cannot be stored at
+> all. That is a platform-level setting; ask whoever runs it. You can still set a self-hosted address.
+
 ## 9. Finding things — global search
 
 Press **⌘K** (or **Ctrl+K**) anywhere in the app, or click **Search…** in the top bar. One box
@@ -413,6 +428,12 @@ e-School can run many schools from one deployment, each with its **own isolated 
 at its **own subdomain** (`your-school.eschool.ink`).
 
 ### Self-service sign-up
+**If you run the platform**, there is also an operator's console at **`/owner`**. It asks for the
+token set on the server, then lists every school with its status and paid-to date, and lets you add
+a school directly (no payment), change a school's status, or run the renewal sweep. It is the only
+place schools can be created without going through payment, and nothing in a school's own screens
+can reach it.
+
 A school signs itself up at the public page **`/signup`** (e.g. `apply.eschool.ink/signup`):
 
 1. Enter the school name, pick a web address (subdomain — availability is checked live), and an admin

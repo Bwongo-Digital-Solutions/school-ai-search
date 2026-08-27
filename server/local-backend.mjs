@@ -20,6 +20,13 @@ import {
   setTenantStatus,
 } from './db/control.mjs';
 import { isPlatformOwner, platformOwnerRefusal } from './auth/platform-owner.mjs';
+import { withCredentials } from './services/credential-store.mjs';
+import {
+  deleteProviderCredential,
+  listProviderCredentials,
+  loadCredentialOverrides,
+  saveProviderCredential,
+} from './services/provider-credentials.mjs';
 import { authenticateRequest, requireRole, resolveActor } from './auth/actor.mjs';
 import {
   clearedSessionCookie,
@@ -83,6 +90,19 @@ const DEFAULT_HOST = process.env.LOCAL_BACKEND_HOST || '0.0.0.0';
 const DEFAULT_PORT = Number(process.env.LOCAL_BACKEND_PORT || process.env.PORT || 8787);
 
 // Keep in sync with the users.role CHECK constraint in server/db/schema.mjs and src/lib/roles.ts.
+// Paths that can reach an AI model, and therefore need this school's provider keys resolved first.
+// Kept as a list rather than resolving on every request because it is a query, and most requests —
+// every /api/db read the app makes to render a screen — never touch a model.
+const MODEL_PATHS = new Set([
+  '/api/functions/ai-chat',
+  '/api/functions/lesson-planner',
+  '/api/functions/digital-examiner',
+  '/api/functions/curriculum',
+  '/api/functions/search',
+  '/api/functions/settings',
+  '/api/models',
+]);
+
 // 'support_staff' covers non-teaching staff such as security, gatekeepers, cooks, cleaners and drivers.
 const USER_ROLES = ['admin', 'teacher', 'support_staff'];
 
@@ -1441,13 +1461,25 @@ const findStudentByCode = async (database, rawCode) => {
  * grants. Every section is fetched independently so an empty table (no invoices yet, no
  * dormitory assignment) reads as "nothing recorded" rather than failing the whole scan.
  */
-const handleStudentCardFunction = async (database, body = {}) => {
+const handleStudentCardFunction = async (database, body = {}, { actor } = {}) => {
+  // Scanning is staff work, and which sections come back is decided by the scanner's own profile.
+  // The role and designation used to be read from the request body, which made the whole policy
+  // advisory: a client could ask for the bursar's view and be given it. They now come from the
+  // session for any real request; the body is honoured only for an internal call.
+  if (actor !== undefined) {
+    const refusal = requireRole(actor, ['admin', 'teacher', 'support_staff']);
+    if (refusal) return refusal;
+  }
+
   const student = await findStudentByCode(database, body.code);
   if (!student) {
     return { error: 'No student matches that ID' };
   }
 
-  const profile = normaliseProfile(body.role, body.designation);
+  const profile =
+    actor === undefined
+      ? normaliseProfile(body.role, body.designation)
+      : normaliseProfile(actor.role, actor.designation);
   const sections = sectionsFor(profile.role, profile.designation);
   const wants = (section) => sections.includes(section);
 
@@ -2863,6 +2895,17 @@ const handleReportCardRequest = async (database, pathname, searchParams, { metho
     return null;
   }
 
+  // A report card is a student's academic record. This route had no gate of any kind: the id in the
+  // URL was the only thing standing between anyone and any child's marks.
+  //
+  // Unlike the other document routes it never took a `requesterRole` query parameter, so there is
+  // nothing to fall back to: an internal caller is not checked, and every real request is. The HTTP
+  // layer always supplies an actor — null when there is no session — so this is enforced in full.
+  if (actor !== undefined) {
+    const refusal = requireRole(actor, ['admin', 'teacher']);
+    if (refusal) return { type: 'json', status: 403, body: refusal };
+  }
+
   const student = await fetchStudentById(database, decodeURIComponent(match[1]));
   if (!student) {
     return {
@@ -2921,6 +2964,20 @@ const notFound = (message) => ({ type: 'json', status: 404, body: { error: messa
 
 const handleIdCardRequest = async (database, pathname, searchParams, { actor } = {}) => {
   const qrMatch = pathname.match(/^\/api\/id-cards\/([^/]+)\.png$/);
+  const singleCard = pathname.match(/^\/api\/id-cards\/([^/]+)\.pdf$/);
+  const batchCards = pathname === '/api/id-cards.pdf';
+  if (!qrMatch && !singleCard && !batchCards) {
+    return null;
+  }
+
+  // Printing ID cards is office work, and the card carries the student's name, class and photo.
+  // Like the report card above, this route previously had no gate at all, and takes no role
+  // parameter — so the same rule applies: internal callers unchecked, every real request checked.
+  if (actor !== undefined) {
+    const refusal = requireRole(actor, ['admin', 'teacher']);
+    if (refusal) return { type: 'json', status: 403, body: refusal };
+  }
+
   if (qrMatch) {
     const student = await fetchStudentById(database, decodeURIComponent(qrMatch[1]));
     if (!student) {
@@ -3429,7 +3486,26 @@ export const createAppRuntime = async ({
       await tenants.close();
       if (control) await control.close();
     },
-    async dispatch({
+    /**
+     * The entry point for every request, whatever the transport.
+     *
+     * Its one job beyond routing is to put this school's own AI provider keys in scope, so that the
+     * model layer — which reads them synchronously, deep inside the agent loop — picks them up
+     * without every function in between having to carry them. Only the paths that can reach a model
+     * pay for the lookup; everything else routes straight through.
+     */
+    async dispatch(request = {}) {
+      const overrides = MODEL_PATHS.has(request.pathname)
+        ? await loadCredentialOverrides(request.database || defaultDatabase)
+        : null;
+
+      return withCredentials(overrides, () => this.routeRequest(request));
+    },
+
+    /**
+     * Routes one request. Called through `dispatch` above, never directly.
+     */
+    async routeRequest({
       method = 'GET',
       pathname = '/',
       searchParams = new URLSearchParams(),
@@ -3534,7 +3610,7 @@ export const createAppRuntime = async ({
       }
 
       if (method === 'POST' && pathname === '/api/functions/student-card') {
-        const data = await handleStudentCardFunction(database, body);
+        const data = await handleStudentCardFunction(database, body, { actor });
         return data?.error
           ? { type: 'json', status: 404, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };

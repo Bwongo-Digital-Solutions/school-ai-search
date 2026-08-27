@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Plug, Search } from 'lucide-react';
+import { KeyRound, Plug, Search } from 'lucide-react';
 import McpServersPanel from './McpServersPanel';
+import AiKeysPanel from './AiKeysPanel';
 import LibreChatPanel from './LibreChatPanel';
 import { GraduationCap, ImagePlus, Loader2, Palette, Save, Settings as SettingsIcon, Shield } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
@@ -35,7 +36,7 @@ const SettingsPanel: React.FC = () => {
   const [form, setForm] = useState<SchoolSettings>(settings);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [tab, setTab] = useState<'branding' | 'mcp' | 'integrations'>('branding');
+  const [tab, setTab] = useState<'branding' | 'mcp' | 'integrations' | 'ai-keys'>('branding');
 
   // Keep the form in sync when the global settings load/refresh.
   useEffect(() => {
@@ -95,7 +96,9 @@ const SettingsPanel: React.FC = () => {
             ? 'Set the school identity used across report cards, receipts, statements, ID cards and the app header.'
             : tab === 'mcp'
               ? 'Connect external MCP servers so the assistant can use their tools.'
-              : 'Global search across the school, and connecting LibreChat to this data.'}
+              : tab === 'ai-keys'
+                ? "Use your school's own AI accounts instead of the platform's."
+                : 'Global search across the school, and connecting LibreChat to this data.'}
         </p>
 
         <div className="flex flex-wrap gap-1.5 mt-4">
@@ -103,6 +106,7 @@ const SettingsPanel: React.FC = () => {
             { key: 'branding', label: 'Branding', icon: SettingsIcon },
             { key: 'mcp', label: 'MCP Servers', icon: Plug },
             { key: 'integrations', label: 'Search & LibreChat', icon: Search },
+            { key: 'ai-keys', label: 'AI Providers', icon: KeyRound },
           ] as const).map(({ key, label, icon: Icon }) => (
             <button
               key={key}
@@ -128,6 +132,10 @@ const SettingsPanel: React.FC = () => {
         ) : tab === 'mcp' ? (
           <div className="max-w-3xl">
             <McpServersPanel />
+          </div>
+        ) : tab === 'ai-keys' ? (
+          <div className="max-w-3xl">
+            <AiKeysPanel />
           </div>
         ) : (
         <div className="max-w-2xl space-y-4">

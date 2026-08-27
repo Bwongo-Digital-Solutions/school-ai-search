@@ -173,6 +173,23 @@ CREATE TABLE IF NOT EXISTS curriculum_chunks (
 -- browser: the settings handler masks it on every read and only overwrites it when a new value is
 -- supplied. discovered_tools caches the last successful tools/list so the chat can render the tool
 -- menu without a round trip to the server on every page load.
+-- A school's own AI provider credentials, overriding the platform's for that school only.
+--
+-- One deployment now serves many schools, and the provider keys were process-global: every school
+-- spent the operator's Anthropic budget and could not bring its own. A row here overrides the
+-- environment for one school; no row means it inherits the platform's.
+--
+-- api_key is stored encrypted (AES-256-GCM under SECRETS_KEY), not merely masked on read: a tenant
+-- database dump is a normal operational artefact — backups, a support copy — and it must not hand
+-- over the school's key. base_url is not secret and is stored plainly.
+CREATE TABLE IF NOT EXISTS provider_credentials (
+  provider TEXT PRIMARY KEY,
+  api_key TEXT NOT NULL DEFAULT '',
+  base_url TEXT NOT NULL DEFAULT '',
+  updated_by TEXT NOT NULL DEFAULT '',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS mcp_servers (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,

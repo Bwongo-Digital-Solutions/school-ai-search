@@ -7044,3 +7044,237 @@ test('the generic data endpoint refuses tables a signed-in role may not touch', 
     await cleanup();
   }
 });
+
+test('the deployment carries every setting a production tenant needs', async () => {
+  // The gap this guards: the server grew sessions, a platform-owner token and multi-tenancy, and
+  // docker-compose.yml passed none of it through. Nothing failed loudly — the app just generated a
+  // session key at boot (signing everyone out on each restart), refused every platform action, and
+  // stayed single-tenant no matter what .env.production said.
+  const { readFile } = await import('node:fs/promises');
+  const compose = await readFile(new URL('../docker-compose.yml', import.meta.url), 'utf8');
+  const example = await readFile(new URL('../.env.production.example', import.meta.url), 'utf8');
+
+  // Settings whose absence breaks or silently weakens a real deployment. Tuning knobs with working
+  // defaults are deliberately not listed — this is the set that has to be handed in.
+  const REQUIRED = [
+    // Without these two the app is either amnesiac or unadministrable.
+    'SESSION_SECRET',
+    'PLATFORM_OWNER_TOKEN',
+    // Decides which origins may call the API, and the link in a school's activation email.
+    'TENANT_ROOT_DOMAIN',
+    // Multi-tenancy itself.
+    'TENANTS',
+    'CONTROL_DATABASE_URL',
+    'PROVISION_ADMIN_DATABASE_URL',
+    'TENANT_DB_URL_TEMPLATE',
+    // Money: unset SUBSCRIPTION_AMOUNT refuses signup, unset webhook secret accepts forged payments.
+    'SUBSCRIPTION_AMOUNT',
+    'PAYMENT_WEBHOOK_SECRET',
+    // A provisioned school is told where it lives by email, or not at all.
+    'EMAIL_MODE',
+    'EMAIL_FROM',
+  ];
+
+  const missingFromCompose = REQUIRED.filter((name) => !compose.includes(`${name}:`));
+  assert.deepEqual(missingFromCompose, [], 'docker-compose.yml must pass these to the app container');
+
+  const missingFromExample = REQUIRED.filter((name) => !example.includes(name));
+  assert.deepEqual(missingFromExample, [], '.env.production.example must document these');
+
+  // The app is reached through the reverse proxy, so its own port stays on loopback by default.
+  assert.match(compose, /\$\{APP_BIND:-127\.0\.0\.1\}/, 'the app port must not default to 0.0.0.0');
+  // Meilisearch holds a copy of every student and invoice and is never talked to by a browser.
+  assert.ok(
+    /127\.0\.0\.1:\$\{MEILI_PORT/.test(compose),
+    'Meilisearch must not be published on every interface',
+  );
+
+  // Both proxies must preserve the Host header, because that is what chooses the school. Rewriting
+  // it sends every school to the default tenant, which serves the wrong data rather than erroring.
+  const nginxHost = await readFile(new URL('../deploy/nginx/docker.conf', import.meta.url), 'utf8');
+  assert.match(nginxHost, /proxy_set_header Host\s+\$host;/);
+  assert.match(nginxHost, /proxy_set_header X-Forwarded-Proto \$scheme;/);
+  assert.match(nginxHost, /proxy_set_header X-Tenant "";/, 'a client must not be able to name a school');
+
+  const site = await readFile(new URL('../deploy/nginx/eschool.ink.conf', import.meta.url), 'utf8');
+  assert.match(site, /proxy_set_header Host\s+\$host;/);
+  assert.match(site, /client_max_body_size/, 'base64 photos and logos exceed the 1MB default');
+
+  const caddyfile = await readFile(new URL('../deploy/caddy/Caddyfile', import.meta.url), 'utf8');
+  assert.match(caddyfile, /reverse_proxy app:8787/);
+  assert.match(caddyfile, /header_up -X-Tenant/);
+});
+
+test('student records are not readable without a session, whatever the URL says', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const students = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students',
+      operation: 'select',
+      columns: '*',
+      filters: [],
+      limit: 1,
+    });
+    const studentId = students.body.data[0].id;
+
+    const get = (pathname, actor, params = {}) =>
+      runtime.dispatch({ method: 'GET', pathname, searchParams: new URLSearchParams(params), actor });
+
+    const teacher = { id: 't', role: 'teacher', email: 'teacher@school.test', name: 'Teacher' };
+    const support = { id: 's', role: 'support_staff', designation: 'askari', email: 'gate@school.test', name: 'Askari' };
+
+    // These two routes had no gate of any kind: the id in the URL was the whole of the security.
+    for (const pathname of [`/api/report-cards/${studentId}.pdf`, `/api/id-cards/${studentId}.pdf`, '/api/id-cards.pdf']) {
+      assert.equal((await get(pathname, null)).status, 403, `${pathname} must refuse an anonymous request`);
+      assert.equal((await get(pathname, support)).status, 403, `${pathname} must refuse support staff`);
+      assert.equal((await get(pathname, teacher)).status, 200, `${pathname} must still work for a teacher`);
+    }
+
+    // The QR image on an ID card leaks the student number, so it is gated with the card itself.
+    assert.equal((await get(`/api/id-cards/${studentId}.png`, null)).status, 403);
+    assert.equal((await get(`/api/id-cards/${studentId}.png`, teacher)).status, 200);
+
+    // Passing a role in the query string is no longer a way in.
+    assert.equal((await get(`/api/report-cards/${studentId}.pdf`, null, { requesterRole: 'admin' })).status, 403);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a scan shows the sections the scanner actually holds, not the ones they ask for', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const students = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students',
+      operation: 'select',
+      columns: '*',
+      filters: [],
+      limit: 1,
+    });
+    const code = students.body.data[0].student_id;
+
+    const scan = (body, actor) =>
+      runtime.dispatch({ method: 'POST', pathname: '/api/functions/student-card', body, actor });
+
+    const askari = { id: 's', role: 'support_staff', designation: 'askari', email: 'gate@school.test', name: 'Askari' };
+    const bursar = { id: 'b', role: 'admin', designation: 'bursar', email: 'bursar@school.test', name: 'Bursar' };
+
+    // The gate keeper asks for the bursar's view. The profile comes from their session, so what
+    // comes back is the gate keeper's — this used to be decided by two fields in the request body.
+    const overreach = await scan({ code, role: 'admin', designation: 'bursar' }, askari);
+    assert.equal(overreach.body.data.profile.role, 'support_staff');
+    assert.equal(overreach.body.data.profile.designation, 'askari');
+    assert.ok(!overreach.body.data.sections.includes('fees'), 'an askari must not be handed fee data');
+
+    // The bursar, signed in as themselves, does see fees.
+    const real = await scan({ code }, bursar);
+    assert.equal(real.body.data.profile.role, 'admin');
+    assert.ok(real.body.data.sections.includes('fees'));
+
+    // No session, no scan.
+    assert.equal((await scan({ code }, null)).body.error, 'Unauthorized');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a school can bring its own AI key, and it never leaves the server in the clear', async () => {
+  const savedSecret = process.env.SECRETS_KEY;
+  const savedPlatformKey = process.env.ANTHROPIC_API_KEY;
+  process.env.SECRETS_KEY = 'a-test-encryption-key-of-sufficient-length';
+  process.env.ANTHROPIC_API_KEY = 'platform-key';
+
+  const { runtime, cleanup } = await startTestRuntime();
+  const { credentialFor, withCredentials } = await import('../server/services/credential-store.mjs');
+  const { loadCredentialOverrides, encryptSecret, decryptSecret } = await import(
+    '../server/services/provider-credentials.mjs'
+  );
+
+  try {
+    const settings = (body, actor) =>
+      runtime.dispatch({ method: 'POST', pathname: '/api/functions/settings', body, actor });
+
+    const admin = { id: 'a', role: 'admin', email: 'head@school.test', name: 'Head' };
+    const teacher = { id: 't', role: 'teacher', email: 'teacher@school.test', name: 'Teacher' };
+
+    // Provider keys are an administrator's business, and a teacher cannot read or set them.
+    assert.equal((await settings({ action: 'list_provider_keys' }, teacher)).body.error, 'Unauthorized');
+    assert.equal((await settings({ action: 'save_provider_key', provider: 'anthropic', apiKey: 'x' }, teacher)).body.error, 'Unauthorized');
+
+    // Before the school sets anything, every provider is inherited from the platform.
+    const before = await settings({ action: 'list_provider_keys' }, admin);
+    const anthropicBefore = before.body.data.providers.find((entry) => entry.provider === 'anthropic');
+    assert.equal(anthropicBefore.source, 'platform');
+    assert.equal(anthropicBefore.platformHasKey, true);
+    assert.equal(anthropicBefore.keyPreview, '');
+
+    const saved = await settings(
+      { action: 'save_provider_key', provider: 'anthropic', apiKey: 'sk-school-secret-key-1234' },
+      admin,
+    );
+    const anthropicAfter = saved.body.data.providers.find((entry) => entry.provider === 'anthropic');
+    assert.equal(anthropicAfter.source, 'school');
+    // Masked, never returned: enough to recognise, not enough to use.
+    assert.equal(anthropicAfter.keyPreview, '••••••••1234');
+    assert.ok(!JSON.stringify(saved.body).includes('sk-school-secret-key-1234'), 'the key must not be echoed back');
+
+    // Encrypted at rest, not merely hidden by the API — a database dump is a normal artefact.
+    const stored = (await runtime.database.query("SELECT api_key FROM provider_credentials WHERE provider = 'anthropic'")).rows[0];
+    assert.ok(stored.api_key.startsWith('v1:'));
+    assert.ok(!stored.api_key.includes('sk-school-secret-key-1234'));
+    assert.equal(decryptSecret(stored.api_key), 'sk-school-secret-key-1234');
+
+    // The override is what the model layer actually reads.
+    const overrides = await loadCredentialOverrides(runtime.database);
+    assert.equal(overrides.ANTHROPIC_API_KEY, 'sk-school-secret-key-1234');
+    assert.equal(credentialFor('ANTHROPIC_API_KEY'), 'platform-key', 'outside a request, the platform key applies');
+    await withCredentials(overrides, async () => {
+      assert.equal(credentialFor('ANTHROPIC_API_KEY'), 'sk-school-secret-key-1234');
+      // A provider the school has not overridden still falls through to the platform.
+      assert.equal(credentialFor('OPENAI_API_KEY'), process.env.OPENAI_API_KEY);
+    });
+    // The scope really is a scope.
+    assert.equal(credentialFor('ANTHROPIC_API_KEY'), 'platform-key');
+
+    // An address-only provider (Ollama has no key) is set by base URL.
+    await settings({ action: 'save_provider_key', provider: 'ollama', baseUrl: 'http://school-box:11434' }, admin);
+    assert.equal((await loadCredentialOverrides(runtime.database)).OLLAMA_BASE_URL, 'http://school-box:11434');
+    assert.match(
+      (await settings({ action: 'save_provider_key', provider: 'ollama', apiKey: 'nope' }, admin)).body.error,
+      /does not use an API key/,
+    );
+    assert.match(
+      (await settings({ action: 'save_provider_key', provider: 'nonsense', apiKey: 'x' }, admin)).body.error,
+      /Unknown AI provider/,
+    );
+
+    // Removing the override hands the school back to the platform.
+    const removed = await settings({ action: 'delete_provider_key', provider: 'anthropic' }, admin);
+    assert.equal(removed.body.data.providers.find((entry) => entry.provider === 'anthropic').source, 'platform');
+    assert.equal((await loadCredentialOverrides(runtime.database)).ANTHROPIC_API_KEY, undefined);
+
+    // A key written under a SECRETS_KEY that has since been rotated away is unreadable. The school
+    // falls back to the platform rather than its chat window throwing, and the row stays visible so
+    // an administrator can re-enter it.
+    await settings({ action: 'save_provider_key', provider: 'openai', apiKey: 'sk-openai-school-key' }, admin);
+    process.env.SECRETS_KEY = 'a-completely-different-encryption-key-value';
+    const rotated = await settings({ action: 'list_provider_keys' }, admin);
+    const openai = rotated.body.data.providers.find((entry) => entry.provider === 'openai');
+    assert.equal(openai.keyUnreadable, true);
+    assert.equal((await loadCredentialOverrides(runtime.database)).OPENAI_API_KEY, undefined);
+
+    // With no SECRETS_KEY at all, storing a key is refused rather than silently written in clear.
+    delete process.env.SECRETS_KEY;
+    const refused = await settings({ action: 'save_provider_key', provider: 'groq', apiKey: 'sk-groq' }, admin);
+    assert.match(refused.body.error, /SECRETS_KEY is not configured/);
+    assert.throws(() => encryptSecret('anything'), /SECRETS_KEY/);
+  } finally {
+    if (savedSecret === undefined) delete process.env.SECRETS_KEY;
+    else process.env.SECRETS_KEY = savedSecret;
+    if (savedPlatformKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = savedPlatformKey;
+    await cleanup();
+  }
+});

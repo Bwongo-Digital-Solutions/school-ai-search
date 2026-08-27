@@ -1,0 +1,44 @@
+# Caddy in front of eschool.ink, for people who would rather not manage a certificate.
+#
+#   docker compose --profile proxy-caddy up -d
+#
+# Caddy obtains and renews a wildcard certificate for *.eschool.ink by itself. A wildcard can only
+# be issued over a DNS-01 challenge, which means Caddy needs an API token for the domain's DNS —
+# CLOUDFLARE_API_TOKEN below, with the Cloudflare DNS plugin. Other providers work the same way with
+# their own plugin; the stock caddy image includes none, so build it in:
+#
+#   FROM caddy:2-builder AS builder
+#   RUN xcaddy build --with github.com/caddy-dns/cloudflare
+#   FROM caddy:2-alpine
+#   COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+#
+# If you would rather issue the certificate yourself with certbot, use the nginx profile instead.
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$TENANT_ROOT_DOMAIN:eschool.ink}, *.{$TENANT_ROOT_DOMAIN:eschool.ink} {
+	tls {
+		dns cloudflare {$CLOUDFLARE_API_TOKEN}
+	}
+
+	encode gzip
+
+	# Caddy preserves the Host header by default, which is what chooses the school, and sets
+	# X-Forwarded-Proto and X-Forwarded-For — so the app knows it was reached over TLS and marks
+	# the session cookie Secure. Nothing extra is needed for either.
+	reverse_proxy app:8787 {
+		# A local model writing a paper can take minutes; the default would cut it off.
+		transport http {
+			read_timeout 300s
+			write_timeout 300s
+		}
+		# Never forwarded from a client: the app honours X-Tenant only when ALLOW_TENANT_HEADER is
+		# on, and stripping it here means a misconfiguration cannot become a data leak.
+		header_up -X-Tenant
+	}
+
+	# Security headers (HSTS, nosniff, X-Frame-Options, Referrer-Policy) come from the app on every
+	# response, so they are deliberately not repeated here.
+}

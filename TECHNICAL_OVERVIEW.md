@@ -499,6 +499,13 @@ Development defaults:
 
 | Variable | Purpose |
 | --- | --- |
+| `SESSION_SECRET` | **Set this in production.** Signs every session cookie. Unset, a key is generated at startup: everyone is signed out on each restart and sessions break across replicas. `openssl rand -hex 32`. |
+| `SESSION_TTL_HOURS` | Session lifetime. Default `12`, re-issued past the halfway mark so an active user is never signed out mid-task. |
+| `PLATFORM_OWNER_TOKEN` | **Set this to host more than one school.** The operator's credential for `/owner` and the platform actions on `/api/provision`, sent as `Authorization: Bearer …`. Fails closed when unset, and refuses a token under 24 characters. |
+| `TENANT_ROOT_DOMAIN` | The root domain (`eschool.ink`). Decides which origins may call the API cross-origin, and builds a school's link in its activation email. |
+| `CORS_EXTRA_ORIGINS` | Comma-separated origins allowed cross-origin beyond `https://*.<root>`. For a separately hosted frontend. |
+| `ALLOW_TENANT_HEADER` | Local testing only. `true` lets an `X-Tenant` header override the `Host` and choose the school. Never set it in production. |
+| `HSTS_MAX_AGE` | `Strict-Transport-Security` max-age, sent only over HTTPS. Default 180 days. |
 | `DATABASE_URL` | PostgreSQL connection string. |
 | `DATABASE_SSL` | Enables PostgreSQL SSL when set to `true`. |
 | `DATABASE_SSL_REJECT_UNAUTHORIZED` | Controls SSL certificate verification. |
@@ -659,7 +666,7 @@ The system can serve many schools from one deployment, each with an **isolated d
 
 `server/db/tenants.mjs` resolves each request to a tenant:
 
-1. `resolveTenantId(host, xTenant)` extracts the first subdomain label of the `Host` header (`kampala-high.eschool.ink` → `kampala-high`). Apex, `www`, `localhost` and IPs map to the `default` tenant. An `X-Tenant` header overrides (used for local testing; allowed via CORS).
+1. `resolveTenantId(host, xTenant)` extracts the first subdomain label of the `Host` header (`kampala-high.eschool.ink` → `kampala-high`). Apex, `www`, `localhost` and IPs map to the `default` tenant. An `X-Tenant` header can override it, but **only when `ALLOW_TENANT_HEADER=true`** — it is a local-testing convenience, and honouring it in production would let any page on the internet name whichever school it liked. The `Host` header is set by the browser from the address bar and cannot be forged cross-origin, which is why it is the one that decides.
 2. The registry returns that tenant's database URL and subscription `status` — from the static `TENANTS` env, or dynamically from the control database. Each tenant's connection pool is created and cached lazily on first use, and its schema self-builds via `initializeDatabase`.
 3. The HTTP layer (`server/local-backend.mjs`) passes the resolved database into `dispatch`. An unknown subdomain returns `404`; a **suspended** school (lapsed subscription) returns `402` with a renewal notice.
 
@@ -685,12 +692,67 @@ Implemented in `server/services/provisioning.mjs`, driven by `POST /api/provisio
 
 `sweep` (run by cron or the admin endpoint) moves schools whose paid period has ended from `active` → `past_due`, then `→ suspended` after `SUBSCRIPTION_GRACE_DAYS`. A suspended school's subdomain is blocked with `402` until it renews (`signup` again → pay → reactivated).
 
+### The platform boundary
+
+Listing, creating and suspending schools are the *operator's* actions, not a school administrator's. They authenticate with `PLATFORM_OWNER_TOKEN` (`server/auth/platform-owner.mjs`), sent as `Authorization: Bearer …`, and fail closed when it is unset — including refusing a token under 24 characters, so `PLATFORM_OWNER_TOKEN=admin` leaves the door shut rather than ajar. The token lives only in the environment and never touches a tenant database.
+
+They were previously gated on `body.requesterRole === 'admin'`, which meant **any school's administrator could enumerate every school on the platform**, and the listing included each one's `db_url`. Connection details no longer leave the control plane at all (`publicTenant` in `server/db/control.mjs`).
+
+The console is `/owner` in the React app. The token is held in React state for the life of the tab — never `localStorage`, never a cookie.
+
+### Search is namespaced per school
+
+Meilisearch index uids are `<tenant>__<index>` (`indexUidFor`, `server/search/indexer.mjs`); the `default` tenant keeps the bare names, so a single-school deployment needs no reindex. This is not cosmetic: both the incremental sync and the full rebuild *clear* an index before refilling it from one database, so while every school shared six indexes, an ordinary attendance mark in one school wiped another's documents and replaced them with its own — and those then passed the `roles` filter cleanly. Tenancy decides *which index*; the role filter decides *which documents in it*.
+
 ### Cloud deployment
 
-- **Wildcard DNS** `*.your-domain` → the server; **wildcard TLS** cert for `*.your-domain`; a reverse proxy that preserves the `Host` header.
+- **Wildcard DNS** `*.eschool.ink` → the server; a **wildcard TLS** certificate, which can only be issued over a DNS-01 challenge; and a reverse proxy that preserves the `Host` header. Ready-made configurations for both nginx and Caddy are in [`deploy/`](deploy/), each behind a compose profile.
 - One control database, and a Postgres role with **CREATEDB** for `PROVISION_ADMIN_DATABASE_URL`.
-- Configure `CONTROL_DATABASE_URL`, `TENANT_DB_URL_TEMPLATE`, `SUBSCRIPTION_*`, and live `PAYMENT_GATEWAY_MODE` + provider keys. Schedule a daily `POST /api/provision {"action":"sweep","requesterRole":"admin"}`.
-- The public sign-up page is served at `/signup` (e.g. `apply.your-domain/signup`).
+- Configure `SESSION_SECRET`, `PLATFORM_OWNER_TOKEN`, `CONTROL_DATABASE_URL`, `TENANT_DB_URL_TEMPLATE`, `SUBSCRIPTION_*`, and live `PAYMENT_GATEWAY_MODE` + provider keys. Schedule a daily `POST /api/provision {"action":"sweep"}` with the owner token.
+- The public sign-up page is served at `/signup`, and the operator's console at `/owner`.
+
+## Per-School AI Keys
+
+Provider credentials were process-global environment variables — correct when one deployment meant one school, wrong now: every school spent the operator's budget, and a school with its own Anthropic account or its own Ollama box could not use it.
+
+The platform's environment is the default; a row in the tenant's `provider_credentials` table overrides it for that school. `api_key` is **encrypted at rest** with AES-256-GCM under `SECRETS_KEY`, not merely masked on read, because a tenant database dump is a normal operational artefact. Without `SECRETS_KEY` the school is told it cannot store a key, rather than having one written in clear. A key encrypted under a `SECRETS_KEY` that has since been rotated decrypts to nothing, and the school quietly falls back to the platform's credentials instead of its chat window throwing.
+
+How the override reaches the model layer is the interesting part. The reads are synchronous and deep inside it (`providerHasCredentials`, `baseUrlFor`, `requireKey`), while loading a school's row is a query — so threading a credentials object through `runAgent`, the chat pipeline, every provider adapter and the embedding batcher would change dozens of signatures for a value none of them care about. `server/services/credential-store.mjs` uses an `AsyncLocalStorage` instead: `dispatch` puts the school's overrides in scope for the paths that can reach a model, and `credentialFor(name)` reads them there or falls back to `process.env`. Async context follows awaits, so it survives a whole agent run. The store lives in its own import-free module because the service that populates it imports `PROVIDER_ENV` from the model layer, and putting the reader there too would make a load-order cycle.
+
+Administered from **Settings → AI Providers**, admin-only. The key is write-only from the browser's point of view: the API returns a masked preview and nothing else.
+
+## Authentication and Sessions
+
+Identity used to be self-declared: the signed-in user was a JSON blob in `localStorage` and every request carried its own `requesterRole` in the body, so editing one word in devtools made a teacher an administrator. Two files replace that — `server/auth/session.mjs` (the token and cookie) and `server/auth/actor.mjs` (who a handler is acting for).
+
+**The token proves identity, not privilege.** It is an HMAC-SHA256 signature over `{user id, tenant, expiry}` — no role. The role is read from the `users` row on *every* request, one primary-key lookup beside handlers that already issue dozens of queries. That buys what a role-in-the-token design cannot: a demoted, deleted or un-approved account loses its powers on the very next request rather than whenever the token happens to expire. It also means no session table and no revocation list.
+
+**The cookie is host-only** — `HttpOnly; Secure; SameSite=Lax; Path=/`, and deliberately **no `Domain` attribute**. A cookie set by `kampala-high.eschool.ink` is therefore never *sent* to `gulu-ss.eschool.ink`: the browser enforces the boundary before the request is made, rather than the server checking after it arrives. The tenant claim inside the token is a second lock on the same door. `SameSite=Lax` rather than `Strict` because report cards and exam papers are downloaded by navigating to a URL, and `Strict` would strip the cookie from exactly those requests.
+
+`SESSION_SECRET` signs the token. Unset, a random key is generated at startup — so sessions die on restart and break across replicas, which is survivable in development and not in production. A fixed fallback would have been worse: every unconfigured deployment would be forgeable.
+
+### The three-state actor
+
+`dispatch` carries an `actor`, and the three states are distinguished rather than collapsed into a mode flag:
+
+| `actor` | Means | Behaviour |
+| --- | --- | --- |
+| `undefined` | Not a request at all — a test, or the server calling its own handler | Falls back to `body.requesterRole`, exactly as before |
+| `null` | A real HTTP request carrying no valid session | Nobody. The body is ignored, so claiming a role in it achieves nothing |
+| an object | An authenticated user | Used; the body is ignored for the same reason |
+
+`requireRole(actor, roles)` in `server/auth/actor.mjs` is now the single gate. It replaced the same five lines copy-pasted into eight services.
+
+Two endpoints had no gate at all and now do:
+
+- **`POST /api/db`** — a generic CRUD endpoint over 48 tables with *no role check*, so anything that could reach it could read every invoice and payment in the school. It now requires a session, and each table carries a minimum role (finance and credentials are admin-only; support staff reach no table at all). A table-level rule cannot express "a teacher may edit their own class" — this is the floor, not the ceiling.
+- **`POST /api/functions/fee-status`** — with no student code it listed every student and balance in the school to anyone. The by-code lookup stays open, because that is the gate scanner and parent path and the code *is* the credential; the listing form now needs a session.
+
+### Cross-origin
+
+`server/http/cors.mjs` echoes the request origin only when it is `https://<something>.<TENANT_ROOT_DOMAIN>` (or a `CORS_EXTRA_ORIGINS` entry, or loopback when the server itself was reached on loopback), and always sets `Vary: Origin`. The previous `Access-Control-Allow-Origin: *` — with `X-Tenant` in the allowed headers — let any page on the internet address any school. A wildcard is also simply illegal alongside `Access-Control-Allow-Credentials: true`, which the session cookie requires.
+
+`server/http/security-headers.mjs` adds HSTS, `X-Content-Type-Options`, `X-Frame-Options` and `Referrer-Policy` to every response; none of them existed before. `requestIsSecure` reads `X-Forwarded-Proto` to learn the external scheme behind the proxy — trusted without an allow-list because forging it can only make the answer *stricter* (a Secure cookie, an HSTS header) and is never used to skip a check.
 
 ## Quality Checks
 

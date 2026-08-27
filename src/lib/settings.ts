@@ -94,3 +94,48 @@ export const saveSchoolSettings = async (
   }
   return { ...EMPTY_SETTINGS, ...(data?.settings || settings) };
 };
+
+/* -------------------------------------------------- the school's own AI provider keys --------- */
+
+export interface ProviderCredential {
+  provider: string;
+  /** False for Ollama, which has an address but no key. */
+  needsKey: boolean;
+  /** Whose credentials this provider currently uses. */
+  source: 'school' | 'platform';
+  /** Masked — the key itself never leaves the server. */
+  keyPreview: string;
+  /** A key stored under a SECRETS_KEY that has since changed, so it can no longer be read. */
+  keyUnreadable: boolean;
+  baseUrl: string;
+  platformHasKey: boolean;
+  platformBaseUrl: string;
+  updatedBy: string;
+  updatedAt: string | null;
+}
+
+export interface ProviderCredentials {
+  /** False when the server has no SECRETS_KEY, so a school cannot store a key at all. */
+  secretsConfigured: boolean;
+  providers: ProviderCredential[];
+}
+
+const callSettings = async <T>(body: Record<string, unknown>): Promise<T> => {
+  const { data, error } = await supabase.functions.invoke<T>('settings', { body });
+  if (error) throw error;
+  if (data && 'error' in (data as Record<string, unknown>)) {
+    throw new Error(String((data as Record<string, unknown>).error));
+  }
+  return data as T;
+};
+
+/** Admin-only. Which providers this school has overridden, and which it inherits. */
+export const loadProviderCredentials = () =>
+  callSettings<ProviderCredentials>({ action: 'list_provider_keys' });
+
+/** Admin-only. Saving returns the refreshed list, so the screen never guesses at the new state. */
+export const saveProviderCredential = (provider: string, apiKey: string, baseUrl: string) =>
+  callSettings<ProviderCredentials>({ action: 'save_provider_key', provider, apiKey, baseUrl });
+
+export const deleteProviderCredential = (provider: string) =>
+  callSettings<ProviderCredentials>({ action: 'delete_provider_key', provider });

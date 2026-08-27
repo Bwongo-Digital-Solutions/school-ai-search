@@ -9,6 +9,11 @@ import { randomUUID } from 'node:crypto';
 
 import { SCHOOL_LEVEL_VALUES } from '../reports/grading-config.mjs';
 import { requireRole, resolveActor } from '../auth/actor.mjs';
+import {
+  deleteProviderCredential,
+  listProviderCredentials,
+  saveProviderCredential,
+} from './provider-credentials.mjs';
 
 const DEFAULT_THEME = '#2952a3';
 
@@ -158,10 +163,33 @@ const updateSettings = async ({ database, body, actor }) => {
   return { settings: rows[0] };
 };
 
+/* ------------------------------------------------------- the school's own AI keys ------------- */
+
+const listProviderKeys = async ({ database }) => listProviderCredentials(database);
+
+const saveProviderKey = async ({ database, body, actor }) =>
+  saveProviderCredential({
+    database,
+    provider: body.provider,
+    apiKey: body.apiKey,
+    baseUrl: body.baseUrl,
+    actor,
+  });
+
+const deleteProviderKey = async ({ database, body }) =>
+  deleteProviderCredential({ database, provider: body.provider });
+
 const ACTIONS = {
   get: getSettings,
   update: updateSettings,
+  list_provider_keys: listProviderKeys,
+  save_provider_key: saveProviderKey,
+  delete_provider_key: deleteProviderKey,
 };
+
+// Reading the school's name and logo is open to every role, because the app cannot render without
+// it. Everything else here — changing the school, and its AI provider keys — is an administrator's.
+const ADMIN_ACTIONS = ['update', 'list_provider_keys', 'save_provider_key', 'delete_provider_key'];
 
 /**
  * Reads are open to any signed-in role (the header and documents need branding); writes are
@@ -173,7 +201,7 @@ export const handleSettingsFunction = async (database, body = {}, { actor: authe
 
   // Unlike the other services the gate is per action, because every role needs to read the school's
   // name and logo to render the app at all — only changing them is an administrator's business.
-  if (action === 'update') {
+  if (ADMIN_ACTIONS.includes(action)) {
     const refusal = requireRole(actor, ['admin']);
     if (refusal) return refusal;
   }

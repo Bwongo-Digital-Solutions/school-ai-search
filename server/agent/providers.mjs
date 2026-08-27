@@ -15,6 +15,7 @@
  * reconstructing them from the normalised fields would corrupt them.
  */
 import { PROVIDER_ENV, anthropicSamplingParams, postJson } from '../services/llm-models.mjs';
+import { credentialFor } from '../services/credential-store.mjs';
 
 const OPENAI_COMPATIBLE = ['openai', 'groq', 'mistral', 'openrouter'];
 
@@ -30,14 +31,16 @@ export const supportsTools = (provider) =>
 
 const agentMaxTokens = () => Number(process.env.AI_AGENT_MAX_TOKENS || 16000);
 
+// credentialFor, not process.env: a school may have supplied its own key and address, and these
+// two helpers are where every adapter below picks them up.
 const baseUrlFor = (provider) => {
   const env = PROVIDER_ENV[provider];
-  return (process.env[env.baseUrl] || env.defaultBaseUrl).replace(/\/$/, '');
+  return (credentialFor(env.baseUrl) || env.defaultBaseUrl).replace(/\/$/, '');
 };
 
 const requireKey = (provider, label) => {
   const env = PROVIDER_ENV[provider];
-  const apiKey = process.env[env.apiKey];
+  const apiKey = credentialFor(env.apiKey);
   if (!apiKey) throw new Error(`${env.apiKey} is required for ${label}`);
   return apiKey;
 };
@@ -381,7 +384,7 @@ const recoverToolCallFromText = (text, toolNames) => {
 };
 
 const callOllama = async ({ model, system, messages, tools, httpClient }) => {
-  const baseUrl = (process.env.OLLAMA_BASE_URL || PROVIDER_ENV.ollama.defaultBaseUrl).replace(/\/$/, '');
+  const baseUrl = (credentialFor('OLLAMA_BASE_URL') || PROVIDER_ENV.ollama.defaultBaseUrl).replace(/\/$/, '');
 
   const body = {
     model: model.model,

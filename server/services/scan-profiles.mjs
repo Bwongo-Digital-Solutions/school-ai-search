@@ -7,9 +7,10 @@
  * them needs the whole record — so the sections below are the contract, and the card handler
  * fetches only the tables the granted sections require.
  *
- * NOTE: this is a data-shaping policy, not access control. Nothing here authenticates the
- * caller, so a client can ask for any profile it likes. Enforcing it requires the request to
- * carry a verified identity, which the backend does not yet issue.
+ * NOTE: this is a data-shaping policy, not access control on its own. It decides what a card
+ * *contains*, and the route that builds one is what decides who may ask — that route now reads the
+ * role from the caller's session (server/auth/actor.mjs) rather than from a field they supplied,
+ * so the profile a client requests can be checked against the profile it actually holds.
  */
 
 /** Every section a card can carry. The student's identity is always present and is not listed. */
