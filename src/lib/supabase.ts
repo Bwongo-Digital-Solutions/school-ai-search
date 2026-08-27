@@ -141,6 +141,9 @@ class ApiQueryBuilder<T = unknown> implements PromiseLike<QueryResult<T>> {
     try {
       const response = await fetch(buildApiUrl('/api/db'), {
         method: 'POST',
+        // The session cookie is HttpOnly, so it travels only if the request asks for credentials.
+        // Same-origin would send it anyway; this keeps working when the API is on another host.
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
         },
@@ -193,6 +196,7 @@ export const supabase = {
       try {
         const response = await fetch(buildApiUrl(`/api/functions/${name}`), {
           method: 'POST',
+          credentials: 'include',
           headers: {
             'Content-Type': 'application/json',
           },

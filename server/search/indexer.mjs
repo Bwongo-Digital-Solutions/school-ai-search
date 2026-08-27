@@ -20,6 +20,7 @@ import {
   updateSettings,
   waitForTask,
 } from './meili.mjs';
+import { DEFAULT_TENANT } from '../db/tenants.mjs';
 
 const TEACHING = ['admin', 'teacher'];
 const ADMIN_ONLY = ['admin'];
@@ -243,6 +244,22 @@ export const INDEXES = {
 export const INDEX_NAMES = Object.keys(INDEXES);
 
 /**
+ * The Meilisearch index a school's documents live in.
+ *
+ * One deployment now serves many schools, and index uids used to be the bare names below — so every
+ * school wrote into the same six indexes. Because both the incremental sync and the full rebuild
+ * clear an index before refilling it from *one* database, an ordinary attendance mark in one school
+ * replaced another school's documents wholesale, and those documents then passed the `roles` filter
+ * cleanly. Namespacing the uid is what keeps two schools apart.
+ *
+ * `__` separates the two parts because a tenant id is a DNS label and can never contain one, so
+ * `a-b__c` can only ever mean tenant `a-b`, index `c`. The default tenant keeps the bare names, so
+ * a single-school deployment upgrading to this needs no reindex and sees no change.
+ */
+export const indexUidFor = (tenantId, name) =>
+  !tenantId || tenantId === DEFAULT_TENANT ? name : `${tenantId}__${name}`;
+
+/**
  * Meilisearch accepts only alphanumerics, hyphens and underscores in a document id, and rejects the
  * whole batch when one is malformed. Database ids are UUIDs so they pass, but any index that
  * synthesises a composite id has to keep to the same charset — this is what catches one that does
@@ -262,13 +279,14 @@ const BATCH = Number(process.env.MEILISEARCH_BATCH || 500);
  * Clears each index first so rows deleted while search was unconfigured do not linger — the whole
  * point of a reindex is that the result matches the database exactly.
  */
-export const reindexAll = async (database, { httpClient = fetch } = {}) => {
+export const reindexAll = async (database, { httpClient = fetch, tenantId = DEFAULT_TENANT } = {}) => {
   const counts = {};
 
   for (const [name, definition] of Object.entries(INDEXES)) {
-    await createIndex(name, { httpClient });
+    const uid = indexUidFor(tenantId, name);
+    await createIndex(uid, { httpClient });
     await updateSettings(
-      name,
+      uid,
       {
         searchableAttributes: definition.searchableAttributes,
         filterableAttributes: definition.filterableAttributes,
@@ -277,7 +295,7 @@ export const reindexAll = async (database, { httpClient = fetch } = {}) => {
       { httpClient },
     );
 
-    const cleared = await deleteAllDocuments(name, { httpClient });
+    const cleared = await deleteAllDocuments(uid, { httpClient });
     await waitForTask(cleared.taskUid, { httpClient });
 
     let documents = [];
@@ -291,7 +309,7 @@ export const reindexAll = async (database, { httpClient = fetch } = {}) => {
     }
 
     for (let start = 0; start < documents.length; start += BATCH) {
-      const task = await addDocuments(name, documents.slice(start, start + BATCH), { httpClient });
+      const task = await addDocuments(uid, documents.slice(start, start + BATCH), { httpClient });
       await waitForTask(task.taskUid, { httpClient });
     }
 
@@ -319,15 +337,17 @@ const TABLE_TO_INDEX = {
  * attendance mark that triggered it. Postgres remains the source of truth, and a reindex repairs
  * anything missed.
  */
-export const syncTable = async (database, table, { httpClient = fetch } = {}) => {
+export const syncTable = async (database, table, { httpClient = fetch, tenantId = DEFAULT_TENANT } = {}) => {
   const name = TABLE_TO_INDEX[table];
   if (!name) return;
 
+  const uid = indexUidFor(tenantId, name);
+
   try {
     const documents = await INDEXES[name].build(database);
-    await deleteAllDocuments(name, { httpClient });
+    await deleteAllDocuments(uid, { httpClient });
     for (let start = 0; start < documents.length; start += BATCH) {
-      await addDocuments(name, documents.slice(start, start + BATCH), { httpClient });
+      await addDocuments(uid, documents.slice(start, start + BATCH), { httpClient });
     }
   } catch (error) {
     console.warn(`Search index ${name} not updated:`, error instanceof Error ? error.message : error);
@@ -335,13 +355,15 @@ export const syncTable = async (database, table, { httpClient = fetch } = {}) =>
 };
 
 /** Removes specific documents, mirroring a delete so retention holds. */
-export const removeFromIndex = async (table, ids, { httpClient = fetch } = {}) => {
+export const removeFromIndex = async (table, ids, { httpClient = fetch, tenantId = DEFAULT_TENANT } = {}) => {
   const name = TABLE_TO_INDEX[table];
   if (!name || ids.length === 0) return;
 
+  const uid = indexUidFor(tenantId, name);
+
   try {
-    await deleteDocuments(name, ids, { httpClient });
+    await deleteDocuments(uid, ids, { httpClient });
   } catch (error) {
-    console.warn(`Search index ${name} delete failed:`, error instanceof Error ? error.message : error);
+    console.warn(`Search index ${uid} delete failed:`, error instanceof Error ? error.message : error);
   }
 };

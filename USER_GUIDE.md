@@ -410,10 +410,10 @@ overrides, account approvals, exam publishing, settings changes — each with wh
 ## 12. For platform operators — onboarding schools
 
 e-School can run many schools from one deployment, each with its **own isolated database**, reached
-at its **own subdomain** (`your-school.eschool.app`).
+at its **own subdomain** (`your-school.eschool.ink`).
 
 ### Self-service sign-up
-A school signs itself up at the public page **`/signup`** (e.g. `apply.eschool.app/signup`):
+A school signs itself up at the public page **`/signup`** (e.g. `apply.eschool.ink/signup`):
 
 1. Enter the school name, pick a web address (subdomain — availability is checked live), and an admin
    email.

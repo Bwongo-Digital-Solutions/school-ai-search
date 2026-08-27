@@ -4,8 +4,27 @@ import { callProvision, type AvailabilityResult, type SignupResult, type TenantS
 
 const APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0';
 
-// The root domain schools get a subdomain under. Set VITE_TENANT_ROOT_DOMAIN in production.
-const ROOT_DOMAIN = (import.meta.env.VITE_TENANT_ROOT_DOMAIN as string) || 'eschool.app';
+/**
+ * The root domain schools get a subdomain under.
+ *
+ * VITE_TENANT_ROOT_DOMAIN is a build-time substitution, so a value baked into an old bundle would
+ * go on advertising the wrong domain long after the deployment moved. The browser's own hostname is
+ * the more trustworthy source, so it is used whenever the page is served from a real domain, and
+ * the build-time value only fills in for localhost.
+ */
+const rootDomainFromHost = () => {
+  if (typeof window === 'undefined') return '';
+
+  const hostname = window.location.hostname;
+  if (!hostname || hostname === 'localhost' || /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname)) return '';
+
+  const parts = hostname.split('.');
+  // apply.eschool.ink -> eschool.ink; eschool.ink -> eschool.ink.
+  return parts.length > 2 ? parts.slice(1).join('.') : hostname;
+};
+
+const ROOT_DOMAIN =
+  rootDomainFromHost() || (import.meta.env.VITE_TENANT_ROOT_DOMAIN as string) || 'eschool.ink';
 
 const PROVIDERS = [
   { value: 'mtn_momo', label: 'MTN MoMo', icon: Phone },

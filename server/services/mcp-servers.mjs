@@ -11,6 +11,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { connectMcpServer } from '../agent/mcp-client.mjs';
+import { requireRole, resolveActor } from '../auth/actor.mjs';
 
 const trimmed = (value) => String(value ?? '').trim();
 
@@ -171,17 +172,15 @@ export const loadEnabledMcpServers = async (database, { ids = null } = {}) => {
   }
 };
 
-export const handleMcpFunction = async (database, body = {}, httpClient = fetch) => {
-  if (body.requesterRole !== 'admin') return { error: 'Unauthorized' };
+export const handleMcpFunction = async (database, body = {}, httpClient = fetch, { actor: authenticated, tenantId } = {}) => {
+  // The actor comes from the request's session when there was a request to authenticate, and from
+  // the body only for an internal call that never had one. See resolveActor.
+  const actor = resolveActor(authenticated, body);
+  const refusal = requireRole(actor, ['admin']);
+  if (refusal) return refusal;
 
   const handler = ACTIONS[body.action];
   if (!handler) return { error: `Unsupported MCP action: ${body.action}` };
 
-  const actor = {
-    email: trimmed(body.actorEmail),
-    name: trimmed(body.actorName),
-    role: body.requesterRole,
-  };
-
-  return handler({ database, body, actor, httpClient });
+  return handler({ database, body, actor, httpClient, tenantId });
 };
