@@ -57,20 +57,48 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<UserProfile | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Restore session from localStorage
+  /**
+   * Who is signed in, according to the server.
+   *
+   * The stored profile is painted first so a reload does not flash the sign-in screen, but it is
+   * only a hint: the session itself is an HttpOnly cookie this code cannot read or forge, and the
+   * server's answer replaces whatever localStorage said. Editing the stored role to "admin" now
+   * changes nothing — the server reads the role from the users row the cookie points at.
+   */
   useEffect(() => {
     const stored = localStorage.getItem(SESSION_KEY);
     if (stored) {
       try {
         const parsed = JSON.parse(stored);
-        if (parsed && parsed.id && parsed.auth_email) {
-          setUser(parsed);
-        }
+        if (parsed && parsed.id && parsed.auth_email) setUser(parsed);
       } catch {
         localStorage.removeItem(SESSION_KEY);
       }
     }
-    setIsLoading(false);
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await supabase.functions.invoke<AuthFunctionResponse>('auth', {
+          body: { action: 'session' },
+        });
+        if (cancelled) return;
+
+        const current = data?.user ?? null;
+        setUser(current);
+        if (current) localStorage.setItem(SESSION_KEY, JSON.stringify(current));
+        else localStorage.removeItem(SESSION_KEY);
+      } catch {
+        // The server is unreachable. Keep the stored profile on screen rather than signing someone
+        // out over a dropped connection; every request they make will be refused until it is back.
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const signIn = useCallback(async (email: string, password: string) => {
@@ -129,6 +157,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const signOut = useCallback(() => {
     setUser(null);
     localStorage.removeItem(SESSION_KEY);
+    // The cookie is the credential, and only the server can clear it — dropping the local copy
+    // would otherwise leave the session usable by anything that could reach the API.
+    void supabase.functions.invoke('auth', { body: { action: 'signout' } });
   }, []);
 
   const logAudit = useCallback(async (
@@ -188,7 +219,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     try {
       const { data, error } = await supabase.functions.invoke<AuthFunctionResponse>('auth', {
-        body: { action: 'update_role', userId, newRole, requesterRole: user.role },
+        body: { action: 'update_role', userId, newRole },
       });
       if (error || data?.error) {
         return { success: false, error: data?.error || 'Failed to update role' };
@@ -213,14 +244,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     try {
       const { data, error } = await supabase.functions.invoke<AuthFunctionResponse>('auth', {
-        body: {
-          action,
-          userId,
-          ...extra,
-          requesterRole: user.role,
-          requesterEmail: user.auth_email,
-          requesterName: user.display_name,
-        },
+        // Who is asking is settled by the session cookie; the local check above is only there to
+        // keep the UI honest about which buttons it offers.
+        body: { action, userId, ...extra },
       });
       if (error || data?.error) {
         return { success: false, error: data?.error || 'Failed to update account' };

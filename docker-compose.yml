@@ -101,7 +101,7 @@ services:
     restart: unless-stopped
     environment:
       MEILI_MASTER_KEY: ${MEILISEARCH_API_KEY:-masterKey}
-      MEILI_ENV: ${MEILI_ENV:-development}
+      MEILI_ENV: ${MEILI_ENV:-production}
       MEILI_NO_ANALYTICS: "true"
     ports:
       - "${MEILI_PORT:-7700}:7700"
@@ -152,3 +152,4 @@ volumes:
   school_ai_search_postgres_data:
   school_ai_search_meili_data:
   school_ai_search_librechat_mongo:
+  

@@ -19,6 +19,7 @@ import { createAgentContext, runAgent } from '../agent/loop.mjs';
 import { resolveModelSelection } from './llm-models.mjs';
 import { retrieveCurriculum, toStoredCitations } from '../rag/retriever.mjs';
 import { describeFramework, resolveFramework, yearLabelFor } from './curriculum-frameworks.mjs';
+import { requireRole, resolveActor } from '../auth/actor.mjs';
 
 const TEACHING_ROLES = ['admin', 'teacher'];
 
@@ -625,19 +626,15 @@ const ACTIONS = {
 
 export const LESSON_PLANNER_ACTIONS = Object.keys(ACTIONS);
 
-export const handleLessonPlannerFunction = async (database, body = {}, httpClient = fetch) => {
-  if (!TEACHING_ROLES.includes(body.requesterRole)) {
-    return { error: 'Unauthorized' };
-  }
+export const handleLessonPlannerFunction = async (database, body = {}, httpClient = fetch, { actor: authenticated, tenantId } = {}) => {
+  // The actor comes from the request's session when there was a request to authenticate, and from
+  // the body only for an internal call that never had one. See resolveActor.
+  const actor = resolveActor(authenticated, body);
+  const refusal = requireRole(actor, TEACHING_ROLES);
+  if (refusal) return refusal;
 
   const handler = ACTIONS[body.action];
   if (!handler) return { error: `Unsupported lesson planner action: ${body.action}` };
 
-  const actor = {
-    email: trimmed(body.actorEmail),
-    name: trimmed(body.actorName),
-    role: body.requesterRole,
-  };
-
-  return handler({ database, body, actor, httpClient });
+  return handler({ database, body, actor, httpClient, tenantId });
 };

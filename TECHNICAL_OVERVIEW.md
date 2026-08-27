@@ -521,7 +521,7 @@ Development defaults:
 | `SUBSCRIPTION_CURRENCY` | Subscription currency. Default `UGX`. |
 | `SUBSCRIPTION_PERIOD_DAYS` | Length of a paid period. Default `120` (a term). |
 | `SUBSCRIPTION_GRACE_DAYS` | Grace window after a period lapses before a school is suspended. Default `14`. |
-| `TENANT_ROOT_DOMAIN` | Root domain used to build a school's link in the activation email. Default `eschool.app`. |
+| `TENANT_ROOT_DOMAIN` | Root domain used to build a school's link in the activation email. Default `eschool.ink`. |
 | `VITE_TENANT_ROOT_DOMAIN` | Frontend build-time root domain for the public sign-up page. |
 | `PAYMENT_WEBHOOK_SECRET` | If set, payment/subscription `callback` requests must carry `x-webhook-signature` = HMAC-SHA256(rawBody). Unset disables verification (mock/dev). |
 | `EMAIL_MODE` | `mock` (default, no send) or `http` for the activation email. |
@@ -659,7 +659,7 @@ The system can serve many schools from one deployment, each with an **isolated d
 
 `server/db/tenants.mjs` resolves each request to a tenant:
 
-1. `resolveTenantId(host, xTenant)` extracts the first subdomain label of the `Host` header (`kampala-high.eschool.app` → `kampala-high`). Apex, `www`, `localhost` and IPs map to the `default` tenant. An `X-Tenant` header overrides (used for local testing; allowed via CORS).
+1. `resolveTenantId(host, xTenant)` extracts the first subdomain label of the `Host` header (`kampala-high.eschool.ink` → `kampala-high`). Apex, `www`, `localhost` and IPs map to the `default` tenant. An `X-Tenant` header overrides (used for local testing; allowed via CORS).
 2. The registry returns that tenant's database URL and subscription `status` — from the static `TENANTS` env, or dynamically from the control database. Each tenant's connection pool is created and cached lazily on first use, and its schema self-builds via `initializeDatabase`.
 3. The HTTP layer (`server/local-backend.mjs`) passes the resolved database into `dispatch`. An unknown subdomain returns `404`; a **suspended** school (lapsed subscription) returns `402` with a renewal notice.
 

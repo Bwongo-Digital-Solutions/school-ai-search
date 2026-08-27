@@ -11,6 +11,9 @@
 // deploy the Node server + PostgreSQL on a host that runs a process (Render, Railway, Fly.io, a
 // Docker VPS) — see USER_GUIDE.md / TECHNICAL_OVERVIEW.md.
 import { createAppRuntime } from '../server/local-backend.mjs';
+import { authenticateRequest } from '../server/auth/actor.mjs';
+import { corsHeaders } from '../server/http/cors.mjs';
+import { securityHeaders } from '../server/http/security-headers.mjs';
 
 // Cache the runtime on the module scope so a warm instance reuses one seeded in-memory database
 // across requests (a cold start builds a fresh one).
@@ -23,9 +26,13 @@ const getRuntime = () => {
 };
 
 export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Tenant');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  // Vercel does not attach the request to the response the way Node's http server does, so the
+  // shared helpers are given a stand-in carrying just the headers they read.
+  const carrier = { req };
+  for (const [key, value] of Object.entries({ ...corsHeaders(carrier), ...securityHeaders(carrier) })) {
+    res.setHeader(key, value);
+  }
+
   if (req.method === 'OPTIONS') {
     res.status(204).end();
     return;
@@ -42,12 +49,17 @@ export default async function handler(req, res) {
       try { body = JSON.parse(req.body); } catch { body = {}; }
     }
 
+    // Authenticated the same way the long-lived server does, so the demo enforces exactly what a
+    // real deployment enforces rather than quietly being the permissive one.
+    const actor = await authenticateRequest({ database: runtime.database, headers: req.headers });
+
     const result = await runtime.dispatch({
       method: req.method || 'GET',
       pathname: url.pathname,
       searchParams: url.searchParams,
       body,
       headers: req.headers,
+      actor,
     });
 
     if (result.type === 'binary') {
