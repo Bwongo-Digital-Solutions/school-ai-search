@@ -7280,3 +7280,421 @@ test('a school can bring its own AI key, and it never leaves the server in the c
     await cleanup();
   }
 });
+
+test('money paid before an invoice exists comes off that invoice when it is raised', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const fees = (body) =>
+    dispatch(runtime, 'POST', '/api/functions/fees', { requesterRole: 'admin', actorName: 'Bursar', ...body });
+
+  try {
+    const students = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students', operation: 'select', columns: '*', filters: [], limit: 2,
+    });
+    const [alice, bob] = students.body.data;
+
+    const structure = await fees({
+      action: 'save_fee_structure',
+      name: 'Term 1 Tuition',
+      amount: 500000,
+      gradeLevel: alice.grade_level,
+      term: 'Term 1',
+      academicYear: '2026',
+      dueDate: '2026-02-01',
+    });
+    const structureId = structure.body.data.structure.id;
+
+    // A family pays a deposit at admission, before anyone has billed them. There is no invoice for
+    // this money to settle, so it sits as credit.
+    const deposit = await fees({
+      action: 'record_payment',
+      studentId: alice.id,
+      amount: 200000,
+      paymentMethod: 'cash',
+    });
+    assert.equal(deposit.body.data.allocations.length, 0, 'there is nothing to allocate against yet');
+    assert.equal(deposit.body.data.creditAmount, 200000);
+
+    // Now the bill goes out. It must arrive already reduced by the deposit.
+    const billed = await fees({ action: 'bill_student', studentId: alice.id, feeStructureId: structureId });
+    assert.equal(billed.body.data.amount, 500000, 'the invoice is still for the full fee');
+    assert.equal(billed.body.data.credit_applied, 200000);
+    assert.equal(billed.body.data.balance_due, 300000, 'the family owes the difference, not the whole fee');
+    assert.equal(billed.body.data.invoice.status, 'partial');
+
+    // A student who paid nothing is billed in full — the credit is per student, not pooled.
+    const bobBilled = await fees({ action: 'bill_student', studentId: bob.id, feeStructureId: structureId });
+    assert.equal(bobBilled.body.data.credit_applied, 0);
+    assert.equal(bobBilled.body.data.balance_due, 500000);
+
+    // The ledger agrees: paid 200000, owing 300000, and no double-counting.
+    const ledger = await fees({ action: 'student_ledger', studentId: alice.id });
+    assert.equal(ledger.body.data.summary.total_paid, 200000);
+    assert.equal(ledger.body.data.summary.balance_due, 300000);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a prepayment larger than the bill settles it and the rest stays as credit', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const fees = (body) =>
+    dispatch(runtime, 'POST', '/api/functions/fees', { requesterRole: 'admin', actorName: 'Bursar', ...body });
+
+  try {
+    const students = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students', operation: 'select', columns: '*', filters: [], limit: 1,
+    });
+    const [student] = students.body.data;
+
+    const first = await fees({
+      action: 'save_fee_structure',
+      name: 'Term 1',
+      amount: 100000,
+      gradeLevel: student.grade_level,
+      term: 'Term 1',
+      academicYear: '2026',
+      dueDate: '2026-02-01',
+    });
+    const second = await fees({
+      action: 'save_fee_structure',
+      name: 'Term 2',
+      amount: 100000,
+      gradeLevel: student.grade_level,
+      term: 'Term 2',
+      academicYear: '2026',
+      dueDate: '2026-06-01',
+    });
+
+    // A parent pays a whole year up front.
+    await fees({ action: 'record_payment', studentId: student.id, amount: 250000, paymentMethod: 'bank' });
+
+    const term1 = await fees({
+      action: 'bill_student', studentId: student.id, feeStructureId: first.body.data.structure.id,
+    });
+    assert.equal(term1.body.data.credit_applied, 100000);
+    assert.equal(term1.body.data.balance_due, 0);
+    assert.equal(term1.body.data.invoice.status, 'paid', 'a fully prepaid invoice is not left open');
+
+    // The remaining 150,000 is still theirs, and settles the next term too.
+    const term2 = await fees({
+      action: 'bill_student', studentId: student.id, feeStructureId: second.body.data.structure.id,
+    });
+    assert.equal(term2.body.data.credit_applied, 100000);
+    assert.equal(term2.body.data.balance_due, 0);
+
+    // 50,000 left over, and it is not conjured twice: a third bill takes only what remains.
+    const third = await fees({
+      action: 'save_fee_structure',
+      name: 'Term 3', amount: 100000, gradeLevel: student.grade_level,
+      term: 'Term 3', academicYear: '2026', dueDate: '2026-09-01',
+    });
+    const term3 = await fees({
+      action: 'bill_student', studentId: student.id, feeStructureId: third.body.data.structure.id,
+    });
+    assert.equal(term3.body.data.credit_applied, 50000, 'only the credit that is actually left');
+    assert.equal(term3.body.data.balance_due, 50000);
+
+    const ledger = await fees({ action: 'student_ledger', studentId: student.id });
+    assert.equal(ledger.body.data.summary.total_paid, 250000, 'still exactly what was paid, once');
+    assert.equal(ledger.body.data.summary.balance_due, 50000);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a billing run credits each student only what that student paid', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const fees = (body) =>
+    dispatch(runtime, 'POST', '/api/functions/fees', { requesterRole: 'admin', actorName: 'Bursar', ...body });
+
+  try {
+    const students = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students', operation: 'select', columns: '*', filters: [], limit: 50,
+    });
+    const grade = students.body.data[0].grade_level;
+    const cohort = students.body.data.filter((s) => s.grade_level === grade);
+    assert.ok(cohort.length >= 2, 'need at least two students in one grade for this to mean anything');
+
+    const structure = await fees({
+      action: 'save_fee_structure',
+      name: 'Bulk term', amount: 400000, gradeLevel: grade,
+      term: 'Term 1', academicYear: '2026', dueDate: '2026-02-01',
+    });
+
+    // One student in the cohort paid early; the others did not.
+    await fees({ action: 'record_payment', studentId: cohort[0].id, amount: 150000, paymentMethod: 'momo' });
+
+    const run = await fees({ action: 'run_billing', confirm: true, feeStructureId: structure.body.data.structure.id });
+    assert.equal(run.body.data.credit_applied, 150000, 'the run reports what it absorbed');
+
+    const byStudent = new Map(run.body.data.invoices.map((invoice) => [invoice.student_id, invoice]));
+    assert.equal(Number(byStudent.get(cohort[0].id).balance_due), 250000);
+    assert.equal(Number(byStudent.get(cohort[1].id).balance_due), 400000, 'nobody else is credited');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('live events reach only the people in the school they were sent to', async () => {
+  const { publish, subscribe, presence, reset, subscribers } = await import('../server/events/bus.mjs');
+  const { messageEvent, reaches } = await import('../server/events/audience.mjs');
+
+  try {
+    const seen = [];
+    const add = (tenant, user) =>
+      subscribe(tenant, { user, deliver: (event) => seen.push({ tenant, user: user.id, event }) });
+
+    const teacherA = { id: 'a-teacher', role: 'teacher', designation: null, name: 'A' };
+    const askariA = { id: 'a-askari', role: 'support_staff', designation: 'askari', name: 'Gate' };
+    const teacherB = { id: 'b-teacher', role: 'teacher', designation: null, name: 'B' };
+
+    add('kampala-high', teacherA);
+    add('kampala-high', askariA);
+    const dropB = add('gulu-ss', teacherB);
+
+    const row = (over) => ({
+      id: `m-${seen.length}-${Math.random()}`,
+      subject: 's', body: 'b', category: 'message', priority: 'normal', sender_name: 'Head',
+      student_id: null, created_at: new Date().toISOString(),
+      audience_kind: 'all', audience_value: '', recipient_user_id: null, sender_user_id: 'head',
+      ...over,
+    });
+
+    // The test that matters: one process serves every school, so a broadcast must not cross.
+    publish('kampala-high', messageEvent(row({ audience_kind: 'all' })));
+    assert.equal(seen.length, 2, 'both people in that school');
+    assert.ok(seen.every((entry) => entry.tenant === 'kampala-high'), 'and nobody in the other');
+
+    seen.length = 0;
+    publish('kampala-high', messageEvent(row({ audience_kind: 'role', audience_value: 'teacher' })));
+    assert.deepEqual(seen.map((e) => e.user), ['a-teacher']);
+
+    seen.length = 0;
+    publish('kampala-high', messageEvent(row({ audience_kind: 'designation', audience_value: 'askari' })));
+    assert.deepEqual(seen.map((e) => e.user), ['a-askari'], 'a teacher has no designation to match');
+
+    seen.length = 0;
+    publish('kampala-high', messageEvent(row({ audience_kind: 'user', recipient_user_id: 'a-teacher' })));
+    assert.deepEqual(seen.map((e) => e.user), ['a-teacher']);
+
+    // A broadcast is invisible to its own author, exactly as the SQL clause has it.
+    seen.length = 0;
+    publish('kampala-high', messageEvent(row({ audience_kind: 'all', sender_user_id: 'a-teacher' })));
+    assert.deepEqual(seen.map((e) => e.user), ['a-askari']);
+
+    // The system is nobody, so a system event reaches everyone including whoever triggered it.
+    seen.length = 0;
+    publish('kampala-high', messageEvent(row({ audience_kind: 'all', sender_user_id: null })));
+    assert.equal(seen.length, 2);
+
+    // Presence is per school and counts people, not connections.
+    add('kampala-high', teacherA);
+    assert.equal(presence('kampala-high').length, 2, 'two people, three connections');
+    assert.equal(presence('kampala-high').find((p) => p.id === 'a-teacher').connections, 2);
+    assert.equal(presence('gulu-ss').length, 1);
+
+    // Unsubscribing removes exactly one, and an empty school leaves nothing behind.
+    dropB();
+    assert.equal(subscribers('gulu-ss').length, 0);
+
+    // A subscriber whose transport has died does not stop the others being served.
+    seen.length = 0;
+    subscribe('kampala-high', { user: { id: 'broken', role: 'teacher' }, deliver: () => { throw new Error('socket gone'); } });
+    const delivered = publish('kampala-high', messageEvent(row({ audience_kind: 'all' })));
+    assert.equal(delivered, 3, 'the three healthy connections still received it');
+
+    // The pure rule, checked directly.
+    assert.equal(reaches(messageEvent(row({ audience_kind: 'all' })), { id: 'x', role: 'teacher' }), true);
+    assert.equal(reaches(messageEvent(row({ audience_kind: 'designation', audience_value: 'cook' })), { id: 'x', role: 'support_staff', designation: null }), false);
+    assert.equal(reaches(null, { id: 'x' }), false);
+    assert.equal(reaches(messageEvent(row({})), null), false);
+  } finally {
+    reset();
+  }
+});
+
+test('a reconnecting client replays exactly what it missed, and nothing from another school', async () => {
+  const { replayMessages, encodeCursor, decodeCursor } = await import('../server/events/replay.mjs');
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const send = (body) =>
+    dispatch(runtime, 'POST', '/api/functions/messages', { actorEmail: 'head@school.test', ...body });
+
+  try {
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email: 'head@school.test', password: 'password123', displayName: 'Head',
+    });
+    const teacher = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email: 'teach@school.test', password: 'password123', displayName: 'Grace',
+    });
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'approve_account', requesterRole: 'admin', userId: teacher.body.data.user.id,
+    });
+
+    for (const subject of ['First', 'Second', 'Third']) {
+      await send({ action: 'send', audienceKind: 'all', subject, body: subject });
+    }
+
+    const inbox = await dispatch(runtime, 'POST', '/api/functions/messages', {
+      action: 'inbox', actorEmail: 'teach@school.test',
+    });
+    const all = inbox.body.data.messages;
+    assert.equal(all.length, 3);
+
+    // The reader is the same shape authenticateRequest returns.
+    const me = { id: teacher.body.data.user.id, role: 'teacher', designation: null };
+    const { audienceClause } = await import('../server/local-backend.mjs').then((m) => ({
+      // Not exported; rebuild the same predicate the inbox uses.
+      audienceClause: (user, i) => ({
+        sql: `((m.audience_kind = 'all')
+               OR (m.audience_kind = 'role' AND m.audience_value = $${i})
+               OR (m.audience_kind = 'designation' AND m.audience_value = $${i + 1})
+               OR (m.audience_kind = 'user' AND m.recipient_user_id = $${i + 2}))
+              AND (m.sender_user_id IS NULL OR m.sender_user_id <> $${i + 2})`,
+        values: [user.role, user.designation || null, user.id],
+      }),
+    }));
+
+    // Oldest first in the inbox listing is newest-first, so the last entry is the first sent.
+    const oldest = all[all.length - 1];
+    const cursor = encodeCursor(oldest.created_at, oldest.id);
+
+    const replayed = await replayMessages(runtime.database, me, { cursor, audienceClause });
+    assert.deepEqual(
+      replayed.events.map((event) => event.message.subject),
+      ['Second', 'Third'],
+      'everything after the cursor, in order, and not the one already seen',
+    );
+    assert.equal(replayed.truncated, false);
+
+    // A cursor at the newest message replays nothing.
+    const newest = all[0];
+    const none = await replayMessages(runtime.database, me, {
+      cursor: encodeCursor(newest.created_at, newest.id),
+      audienceClause,
+    });
+    assert.equal(none.events.length, 0);
+
+    // No cursor is not an invitation to replay the entire history.
+    assert.deepEqual(await replayMessages(runtime.database, me, { audienceClause }), { events: [], truncated: false });
+    assert.deepEqual(await replayMessages(runtime.database, me, { cursor: 'rubbish', audienceClause }), { events: [], truncated: false });
+
+    // Being told there is more to come is what lets a long-absent client reload instead of guessing.
+    const capped = await replayMessages(runtime.database, me, { cursor, audienceClause, limit: 1 });
+    assert.equal(capped.events.length, 1);
+    assert.equal(capped.truncated, true);
+
+    // The cursor round-trips.
+    assert.equal(decodeCursor(encodeCursor(oldest.created_at, oldest.id)).id, oldest.id);
+    assert.equal(decodeCursor('no-pipe'), null);
+    assert.equal(decodeCursor(''), null);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a mobile client authenticates with a bearer token instead of a cookie', async () => {
+  const saved = process.env.SESSION_SECRET;
+  process.env.SESSION_SECRET = 'a-test-signing-secret-long-enough-to-be-used';
+
+  const { runtime, cleanup } = await startTestRuntime();
+  const { authenticateRequest } = await import('../server/auth/actor.mjs');
+  const { issueSessionToken } = await import('../server/auth/session.mjs');
+
+  try {
+    const signup = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email: 'head@school.test', password: 'password123', displayName: 'Head',
+    });
+    const userId = signup.body.data.user.id;
+
+    // Signing in only hands back the token when the client asks — a browser never does, so the
+    // token stays out of reach of anything running on the page.
+    const browser = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signin', email: 'head@school.test', password: 'password123',
+    });
+    assert.equal(browser.body.data.token, undefined);
+    assert.match(browser.headers['Set-Cookie'], /^eschool_session=/);
+
+    const mobile = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signin', email: 'head@school.test', password: 'password123', issueToken: true,
+    });
+    assert.ok(mobile.body.data.token, 'a client that asks is given one');
+    assert.equal(typeof mobile.body.data.expiresIn, 'number');
+    // The cookie is still set, so the same call serves a hybrid client.
+    assert.match(mobile.headers['Set-Cookie'], /^eschool_session=/);
+
+    const bearer = { authorization: `Bearer ${mobile.body.data.token}` };
+    const actor = await authenticateRequest({ database: runtime.database, headers: bearer, tenantId: 'default' });
+    assert.equal(actor.id, userId);
+    assert.equal(actor.role, 'admin');
+
+    // Everything a cookie is refused for, a bearer token is refused for too.
+    const wrongTenant = { authorization: `Bearer ${issueSessionToken({ userId, tenantId: 'gulu-ss' })}` };
+    assert.equal(await authenticateRequest({ database: runtime.database, headers: wrongTenant, tenantId: 'default' }), null);
+    assert.equal(await authenticateRequest({ database: runtime.database, headers: { authorization: 'Bearer nonsense' }, tenantId: 'default' }), null);
+    assert.equal(await authenticateRequest({ database: runtime.database, headers: { authorization: mobile.body.data.token }, tenantId: 'default' }), null, 'the Bearer prefix is required');
+    assert.equal(await authenticateRequest({ database: runtime.database, headers: {}, tenantId: 'default' }), null);
+
+    // A cookie wins over a header, so nothing on a page can override a real browser session.
+    const both = {
+      cookie: browser.headers['Set-Cookie'].split(';')[0],
+      authorization: `Bearer ${issueSessionToken({ userId: 'someone-else', tenantId: 'default' })}`,
+    };
+    assert.equal((await authenticateRequest({ database: runtime.database, headers: both, tenantId: 'default' })).id, userId);
+  } finally {
+    if (saved === undefined) delete process.env.SESSION_SECRET;
+    else process.env.SESSION_SECRET = saved;
+    await cleanup();
+  }
+});
+
+test('the unread badge is right past the inbox page limit, and re-reading is idempotent', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const asHead = (body) =>
+    dispatch(runtime, 'POST', '/api/functions/messages', { actorEmail: 'head@school.test', ...body });
+  const asTeacher = (body) =>
+    dispatch(runtime, 'POST', '/api/functions/messages', { actorEmail: 'teach@school.test', ...body });
+
+  try {
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email: 'head@school.test', password: 'password123', displayName: 'Head',
+    });
+    const teacher = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email: 'teach@school.test', password: 'password123', displayName: 'Grace',
+    });
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'approve_account', requesterRole: 'admin', userId: teacher.body.data.user.id,
+    });
+
+    // More than the inbox's 50-row page, which is where the JS count silently under-reported.
+    for (let index = 0; index < 60; index += 1) {
+      await asHead({ action: 'send', audienceKind: 'all', subject: `Notice ${index}`, body: 'x' });
+    }
+
+    const inbox = await asTeacher({ action: 'inbox' });
+    assert.equal(inbox.body.data.messages.length, 50, 'the page is still capped');
+    assert.equal(inbox.body.data.unread, 50, 'and its own count is capped with it');
+
+    const count = await asTeacher({ action: 'unread_count' });
+    assert.equal(count.body.data.unread, 60, 'the badge counts everything, not just the page');
+
+    // Reading the same message twice must not raise a unique violation, which the old
+    // SELECT-then-INSERT did under two devices at once.
+    const first = inbox.body.data.messages[0].id;
+    const once = await asTeacher({ action: 'read', messageId: first });
+    assert.equal(once.status, 200);
+    const twice = await asTeacher({ action: 'read', messageId: first });
+    assert.equal(twice.status, 200, 're-reading is a no-op, not an error');
+
+    assert.equal((await asTeacher({ action: 'unread_count' })).body.data.unread, 59);
+
+    await asTeacher({ action: 'read_all' });
+    assert.equal((await asTeacher({ action: 'unread_count' })).body.data.unread, 10, 'read_all clears the page it can see');
+  } finally {
+    await cleanup();
+  }
+});

@@ -956,6 +956,7 @@ export const initializeDatabase = async (database, { httpClient = fetch } = {}) 
   await ensureSchoolSettingsSeeded(database);
   await ensureAttendanceUniqueness(database);
   await ensureMessageReadUniqueness(database);
+  await ensureMessageIndexes(database);
   await seedCurriculumCorpus(database, httpClient);
 };
 
@@ -993,6 +994,30 @@ const ensureMessageReadUniqueness = async (database) => {
       'Could not create the unique index on internal_message_reads:',
       error instanceof Error ? error.message : error,
     );
+  }
+};
+
+/**
+ * `internal_messages` had no index at all, which was survivable while the only reader was a rare
+ * inbox query. It is not survivable now: a reconnecting client replays by `created_at`, and a phone
+ * on a bad network reconnects often enough to make a sequential scan of every message a school has
+ * ever sent into the hottest query in the app.
+ */
+const ensureMessageIndexes = async (database) => {
+  for (const statement of [
+    // Replay, and the inbox's own ORDER BY created_at DESC.
+    'CREATE INDEX IF NOT EXISTS idx_internal_messages_created_at ON internal_messages(created_at)',
+    // The `audience_kind = 'user'` arm of the audience predicate.
+    'CREATE INDEX IF NOT EXISTS idx_internal_messages_recipient ON internal_messages(recipient_user_id)',
+  ]) {
+    try {
+      await database.query(statement);
+    } catch (error) {
+      console.warn(
+        'Could not create a message index:',
+        error instanceof Error ? error.message : error,
+      );
+    }
   }
 };
 

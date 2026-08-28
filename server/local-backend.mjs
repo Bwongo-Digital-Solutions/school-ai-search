@@ -28,6 +28,9 @@ import {
   saveProviderCredential,
 } from './services/provider-credentials.mjs';
 import { authenticateRequest, requireRole, resolveActor } from './auth/actor.mjs';
+import { publish, presence as busPresence } from './events/bus.mjs';
+import { handleEventsRequest, isEventsRequest, useAudienceClause } from './events/sse.mjs';
+import { messageEvent, presenceEvent, readEvent } from './events/audience.mjs';
 import {
   clearedSessionCookie,
   issueSessionToken,
@@ -35,6 +38,7 @@ import {
   shouldRefresh,
   verifySessionToken,
   readCookie,
+  SESSION_TTL_SECONDS,
 } from './auth/session.mjs';
 import { createSubscriptionCharge } from './services/payment-gateway.mjs';
 import { isPaymentWebhook, isWebhookSignatureValid } from './security/webhooks.mjs';
@@ -1084,11 +1088,22 @@ const handleAuthFunction = async (database, body, { tenantId, headers = {}, acto
   // otherwise refuse to store it at all and nobody could sign in during development.
   const secure = requestIsSecure({ headers });
 
-  /** Signing a user in is the one place a session is minted. */
-  const withSession = (user) => ({
-    user,
-    setCookie: sessionCookie(issueSessionToken({ userId: user.id, tenantId: tenantId || DEFAULT_TENANT }), { secure }),
-  });
+  /**
+   * Signing a user in is the one place a session is minted.
+   *
+   * The cookie is always set, for browsers. The token itself is returned in the body only when the
+   * caller explicitly asks — a mobile app that cannot keep a cookie jar and will send it back as
+   * `Authorization: Bearer`. Browsers never ask, so the token stays out of reach of anything running
+   * on the page, which is why it was kept out of the body to begin with.
+   */
+  const withSession = (user) => {
+    const token = issueSessionToken({ userId: user.id, tenantId: tenantId || DEFAULT_TENANT });
+    return {
+      user,
+      setCookie: sessionCookie(token, { secure }),
+      ...(body?.issueToken === true ? { token, expiresIn: SESSION_TTL_SECONDS } : {}),
+    };
+  };
 
   // Who the caller is, according to their cookie. The browser used to keep the signed-in user in
   // localStorage and be believed; this is the server's own answer to the same question.
@@ -1795,6 +1810,14 @@ const findUserByEmail = async (database, email) => {
  * when it names them, names a group they belong to, or names everybody — and never when they
  * sent it themselves, because a broadcast should not ring its author's bell.
  */
+/**
+ * Who a message is addressed to, as a SQL predicate.
+ *
+ * Exported to the events layer through useAudienceClause below rather than by import: sse.mjs is
+ * imported *by* this file, so importing it back would be a cycle. Replay uses the same clause as the
+ * inbox, which is what guarantees a reconnecting client can never be replayed something it could not
+ * have seen by simply asking.
+ */
 const audienceClause = (user, startIndex) => ({
   sql: `(
       (m.audience_kind = 'all')
@@ -1809,6 +1832,8 @@ const audienceClause = (user, startIndex) => ({
   // whole inbox failed against a real database while every test passed.
   values: [user.role, user.designation || null, user.id],
 });
+
+useAudienceClause(audienceClause);
 
 const listInbox = async (database, user, { limit = 50 } = {}) => {
   const where = audienceClause(user, 1);
@@ -1849,6 +1874,10 @@ const postStaffMessage = async (database, {
   senderUserId = null, senderName = '', recipientUserId = null,
   audienceKind = 'all', audienceValue = '', subject, body,
   priority = 'normal', category = 'message', studentId = null,
+  // Which school this belongs to, so the live event reaches that school's subscribers and no
+  // other's. Absent for an internal caller with no request behind it, which simply publishes
+  // nothing — the row is still written, and the inbox still shows it.
+  tenantId = null,
 }) => {
   const inserted = await database.query(
     `
@@ -1863,6 +1892,18 @@ const postStaffMessage = async (database, {
       subject, body, audienceKind, audienceValue, priority, category,
     ],
   );
+
+  // After the write, never before: a subscriber told about a message must be able to find it. And
+  // fire-and-forget — a failed publish must not fail the send, because the message is already
+  // durable and the reader will see it on their next inbox load regardless.
+  if (tenantId && inserted.rows[0]) {
+    try {
+      publish(tenantId, messageEvent(inserted.rows[0]));
+    } catch (error) {
+      console.warn('Could not publish a message event:', error instanceof Error ? error.message : error);
+    }
+  }
+
   return inserted.rows[0];
 };
 
@@ -1875,7 +1916,7 @@ const notifyStaff = async (database, payload) => {
   }
 };
 
-const handleMessagesFunction = async (database, body = {}, { actor } = {}) => {
+const handleMessagesFunction = async (database, body = {}, { actor, tenantId } = {}) => {
   const action = body.action || 'inbox';
 
   // Whose inbox this is comes from the session. It used to come from an email in the request body,
@@ -1885,6 +1926,28 @@ const handleMessagesFunction = async (database, body = {}, { actor } = {}) => {
 
   if (action === 'inbox') {
     return listInbox(database, me, { limit: body.limit });
+  }
+
+  // Just the number, for the unread badge. listInbox counts in JavaScript over a page capped at 50
+  // rows, so past that the badge was simply wrong — and asking for it cost a whole inbox.
+  if (action === 'unread_count') {
+    const where = audienceClause(me, 1);
+    const { rows } = await database.query(
+      `
+        SELECT COUNT(*)::int AS unread
+        FROM internal_messages m
+        LEFT JOIN internal_message_reads r ON r.message_id = m.id AND r.user_id = $4
+        WHERE ${where.sql} AND r.read_at IS NULL
+      `,
+      [...where.values, me.id],
+    );
+    return { unread: rows[0]?.unread || 0 };
+  }
+
+  // Who is connected right now, in this school. Derived from live subscribers rather than stored,
+  // so it cannot go stale.
+  if (action === 'presence') {
+    return { people: tenantId ? busPresence(tenantId) : [] };
   }
 
   if (action === 'staff') {
@@ -1936,6 +1999,7 @@ const handleMessagesFunction = async (database, body = {}, { actor } = {}) => {
     }
 
     const message = await postStaffMessage(database, {
+      tenantId,
       senderUserId: me.id,
       senderName: me.display_name,
       recipientUserId,
@@ -1956,15 +2020,39 @@ const handleMessagesFunction = async (database, body = {}, { actor } = {}) => {
     if (action === 'read' && ids.length === 0) return { error: 'A message id is required' };
 
     for (const id of ids) {
-      const existing = await database.query(
-        'SELECT id FROM internal_message_reads WHERE message_id = $1 AND user_id = $2 LIMIT 1',
-        [id, me.id],
+      // An upsert against idx_message_read_unique rather than SELECT-then-INSERT: two devices
+      // marking the same message read at the same moment both passed the SELECT and the second
+      // INSERT raised a unique violation.
+      const { rows } = await database.query(
+        `
+          INSERT INTO internal_message_reads (id, message_id, user_id)
+          VALUES ($1, $2, $3)
+          ON CONFLICT (message_id, user_id) DO NOTHING
+          RETURNING read_at
+        `,
+        [randomUUID(), id, me.id],
       );
-      if (!existing.rows[0]) {
-        await database.query(
-          'INSERT INTO internal_message_reads (id, message_id, user_id) VALUES ($1, $2, $3)',
-          [randomUUID(), id, me.id],
+
+      // Only on a genuine first read — re-reading must not spam the author with receipts.
+      if (rows[0] && tenantId) {
+        const author = await database.query(
+          'SELECT sender_user_id FROM internal_messages WHERE id = $1 LIMIT 1',
+          [id],
         );
+        const authorUserId = author.rows[0]?.sender_user_id;
+        if (authorUserId && authorUserId !== me.id) {
+          try {
+            publish(tenantId, readEvent({
+              messageId: id,
+              readerUserId: me.id,
+              readerName: me.display_name,
+              authorUserId,
+              readAt: rows[0].read_at,
+            }));
+          } catch (error) {
+            console.warn('Could not publish a read receipt:', error instanceof Error ? error.message : error);
+          }
+        }
       }
     }
     return listInbox(database, me);
@@ -3667,7 +3755,7 @@ export const createAppRuntime = async ({
       }
 
       if (method === 'POST' && pathname === '/api/functions/messages') {
-        const data = await handleMessagesFunction(database, body, { actor });
+        const data = await handleMessagesFunction(database, body, { actor, tenantId });
         return data?.error
           ? { type: 'json', status: 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
@@ -3890,6 +3978,20 @@ export const createAppServer = async ({
             return;
           }
           sendJson(response, 404, { error: `Unknown school: ${tenantId}` });
+          return;
+        }
+
+        // The live channel takes over the socket and never returns through dispatch, which can only
+        // express a single writeHead-and-end. Handled here, ahead of everything else, the way the
+        // OPTIONS preflight is — and only after resolveDatabase, so it is bound to one school.
+        if (isEventsRequest(request.method, url.pathname)) {
+          await handleEventsRequest({
+            request,
+            response,
+            database,
+            tenantId,
+            searchParams: url.searchParams,
+          });
           return;
         }
 

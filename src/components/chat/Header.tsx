@@ -4,12 +4,13 @@ import {
   Moon, Sun, X, ChevronDown, LogOut, User, Shield, HardHat,
   MessageSquare, Users, Clock, ClipboardList, UserCog, Wallet, Landmark,
   ClipboardCheck, GraduationCap, NotebookPen, FileText, Loader2,
-  Mail, Printer, ArrowLeftRight
+  Mail, Printer, ArrowLeftRight, Inbox
 } from 'lucide-react';
 import { downloadFromUrl, printFromUrl } from '@/lib/download';
 import { callChatReport, teachingDocumentUrl } from '@/lib/teaching';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useAuth } from '@/contexts/AuthContext';
+import { useLive } from '@/contexts/LiveContext';
 import { getRoleLabel, getRoleShortLabel } from '@/lib/roles';
 import AuthModal from './AuthModal';
 import GlobalSearch from './GlobalSearch';
@@ -17,6 +18,9 @@ import GlobalSearch from './GlobalSearch';
 const Header: React.FC = () => {
   const { toggleSidebar, messages, activeView, setActiveView, currentConversationId } = useChatContext();
   const { user, isAuthenticated, isAdmin, isSupportStaff, signOut } = useAuth();
+  // The badge is driven by the live channel, so it moves the moment a message arrives rather than
+  // on the next page load.
+  const { unread } = useLive();
   const [buildingReport, setBuildingReport] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showSendDialog, setShowSendDialog] = useState(false);
@@ -262,6 +266,21 @@ const Header: React.FC = () => {
                 )}
               </div>
             )}
+            <button
+              onClick={() => setActiveView('messages')}
+              className={`relative flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                activeView === 'messages'
+                  ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              <Inbox className="w-3.5 h-3.5" /> Messages
+              {unread > 0 && (
+                <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-indigo-600 text-white text-[10px] font-semibold flex items-center justify-center">
+                  {unread > 99 ? '99+' : unread}
+                </span>
+              )}
+            </button>
             <button
               onClick={() => setActiveView('fees')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${

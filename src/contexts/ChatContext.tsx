@@ -22,6 +22,7 @@ type ActiveView =
   | 'lessons'
   | 'examiner'
   | 'monitoring'
+  | 'messages'
   | 'settings';
 
 

@@ -8,6 +8,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { ChatProvider } from "@/contexts/ChatContext";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { SettingsProvider } from "@/contexts/SettingsContext";
+import { LiveProvider } from "@/contexts/LiveContext";
 import Index from "./pages/Index";
 import TenantSignup from "./pages/TenantSignup";
 import PlatformOwner from "./pages/PlatformOwner";
@@ -21,6 +22,7 @@ const App = () => (
       <TooltipProvider>
         <AuthProvider>
           <SettingsProvider>
+          <LiveProvider>
           <ChatProvider>
             <Toaster />
             <Sonner />
@@ -33,6 +35,7 @@ const App = () => (
               </Routes>
             </BrowserRouter>
           </ChatProvider>
+          </LiveProvider>
           </SettingsProvider>
         </AuthProvider>
       </TooltipProvider>

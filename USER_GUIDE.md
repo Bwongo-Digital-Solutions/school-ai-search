@@ -170,6 +170,16 @@ the arrears ageing table.
 
 ---
 
+### Paying before the bill arrives
+
+If a family pays before an invoice has been raised — a deposit at admission, a parent settling next
+term early — that money is held as **credit** against the student. When the bill is finally raised
+it comes out already reduced by what was paid, and the receipt shows how much was applied.
+
+Nothing to remember and nothing to reconcile by hand: pay 200,000 against a 500,000 term and the
+invoice is issued showing 300,000 outstanding. Pay more than the term costs and the remainder stays
+as credit against the next one.
+
 ## 6. Report cards
 
 From **Student Management**, open a student and choose **Build PDF Report Card**.
@@ -346,6 +356,24 @@ on the platform is affected.
 
 > If the screen says the server has no encryption key configured, provider keys cannot be stored at
 > all. That is a platform-level setting; ask whoever runs it. You can still set a self-hosted address.
+
+## 8c. Messages
+
+**Messages** in the top navigation is the staff inbox. Colleagues' messages and school events — a
+student refused at the gate, an exam admission rejected — share one list, because the bell is one
+bell.
+
+- **New messages arrive without refreshing.** The badge on the tab moves the moment someone sends
+  one. A small **Live** marker shows the connection is up; if it says *Offline* the app still works
+  exactly as before, it just waits until you next open the inbox.
+- **Send to one person, a role, a team, or everybody.** Roles are Administrators, Teachers and
+  Support staff; teams are designations like *askari* or *bursar*. You never receive your own
+  broadcast.
+- **Tick urgent** for something that cannot wait — it is marked in the list.
+- **Read receipts**: when someone reads your message you see it, without reloading.
+- **Online now** lists who is signed in at your school this minute.
+
+Support staff are included — messaging is how the gate and the kitchen get told things.
 
 ## 9. Finding things — global search
 

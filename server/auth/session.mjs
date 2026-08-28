@@ -28,6 +28,9 @@ export const SESSION_COOKIE = 'eschool_session';
 /** Twelve hours: long enough for a school day, short enough that a stolen token is not forever. */
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_HOURS || 12) * 60 * 60 * 1000;
 
+/** The same lifetime in seconds, for a client that was handed the token and must plan to renew. */
+export const SESSION_TTL_SECONDS = Math.floor(SESSION_TTL_MS / 1000);
+
 // A secret short enough to guess makes every session forgeable, so a short one is refused outright
 // rather than quietly used.
 const MIN_SECRET_LENGTH = 32;

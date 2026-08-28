@@ -664,6 +664,20 @@ certificate, given `ACME_EMAIL` and a DNS API token.
 | `BANK_PAYMENT_GATEWAY_URL` | Bank or aggregator endpoint for bank payment collection requests. |
 | `BANK_PAYMENT_API_KEY` | API key for the bank payment gateway. |
 
+## Fee Credit
+
+A family that pays before it is billed used to be billed again in full. `recordPayment` spreads a payment across *open* invoices; with none open the remainder sat in `payments` doing nothing, and the next invoice went out for its whole amount as though the money had never arrived.
+
+Credit is derived, never stored:
+
+```
+credit = (everything paid) - (everything an invoice absorbed)
+```
+
+where the second term is `total_amount - balance_due` summed over the student's invoices (`unallocatedCredit` in `server/services/fees.mjs`). Nothing to keep in sync, nothing that can disagree with the ledger, and it stays correct if an invoice is later adjusted. It is summed in JavaScript rather than with `SUM` over an expression — a student has a handful of invoices, and pg-mem is unreliable with aggregates over arithmetic, exactly the kind of difference that passes in tests and fails against real Postgres.
+
+`applyCreditToInvoice` runs **inside the transaction that creates the invoice**, on both the single-student and bulk billing paths, so a family that paid first is never billed for money the school is already holding — not even for the instant between the two writes. The credit applied is reported on the response and recorded in the audit entry, so a bursar can see why a bill is not the full amount.
+
 ## Payment Gateway Flow
 
 Payment gateway integration is implemented in `server/services/payment-gateway.mjs` and exposed through `POST /api/functions/payments`.
@@ -768,6 +782,26 @@ The platform's environment is the default; a row in the tenant's `provider_crede
 How the override reaches the model layer is the interesting part. The reads are synchronous and deep inside it (`providerHasCredentials`, `baseUrlFor`, `requireKey`), while loading a school's row is a query — so threading a credentials object through `runAgent`, the chat pipeline, every provider adapter and the embedding batcher would change dozens of signatures for a value none of them care about. `server/services/credential-store.mjs` uses an `AsyncLocalStorage` instead: `dispatch` puts the school's overrides in scope for the paths that can reach a model, and `credentialFor(name)` reads them there or falls back to `process.env`. Async context follows awaits, so it survives a whole agent run. The store lives in its own import-free module because the service that populates it imports `PROVIDER_ENV` from the model layer, and putting the reader there too would make a load-order cycle.
 
 Administered from **Settings → AI Providers**, admin-only. The key is write-only from the browser's point of view: the API returns a masked preview and nothing else.
+
+## Live Events
+
+`GET /api/events` is a Server-Sent Events stream. One endpoint serves browsers and the mobile apps: the traffic only goes one way, so a WebSocket would buy duplex nobody uses and cost an upgrade handler plus a proxy `Connection` header change that would undo the keep-alive fix.
+
+There is **no broker**, deliberately. A broker carries events between processes; this deployment is one container, so the publisher and the subscriber share a heap. `server/events/bus.mjs` is a `Map` of tenant to subscribers and nothing else — it is the seam where a Redis backend would go if a second replica ever appeared, and nothing above it would change. Durability is not its problem: every message is already a row in Postgres, and an event is a notification that the row exists.
+
+**Keyed by tenant first, always.** One process serves every school, so a bus keyed only by user id would deliver one school's broadcast into another's app.
+
+`server/events/audience.mjs` holds `reaches(event, user)` — the in-memory twin of `audienceClause`. Recipients are never materialised in this schema: one row addresses `all`, a `role`, a `designation` or one `user`, and membership is decided against the reader. The inbox does that in SQL and fan-out does it in JavaScript, so the rule lives in one function and is tested against the clause's behaviour.
+
+**Catch-up.** Every event carries an id; on reconnect a browser sends `Last-Event-ID` and a mobile client sends `?since=`. `server/events/replay.mjs` replays from Postgres using the same audience clause, so a client can never be replayed something it could not have seen by asking. The cursor is `created_at` plus `id` — time alone would make two messages written in the same microsecond unreachable — compared as two predicates rather than a row-value, which pg-mem does not implement.
+
+**Held connections.** A 25-second heartbeat keeps the connection under the proxies' `proxy_read_timeout 300s` and makes a dead socket fail fast. Authentication is re-checked every minute: every request path re-reads the user's row, and a connection held for hours is the one place that would otherwise keep whatever it was granted when it opened.
+
+`server/events/sse.mjs` is the only file that touches a socket, and it is handled in the HTTP layer ahead of `dispatch` — which returns plain objects and can only express one `writeHead` plus one `end`. Everything with a decision in it lives in the sibling modules, which are tested through the ordinary runtime.
+
+### Bearer tokens
+
+Most mobile HTTP clients will not keep an HttpOnly cookie, so `authenticateRequest` accepts the same session token from `Authorization: Bearer` when there is no cookie. Same signature, same tenant binding, same expiry — a transport difference, not a second credential. `signin` returns the token in the body only when the caller passes `issueToken: true`; browsers never ask, so it stays out of reach of anything running on the page. The cookie wins when both are present.
 
 ## Authentication and Sessions
 
