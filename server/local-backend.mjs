@@ -697,7 +697,14 @@ const readRequestBody = async (request) => {
   return { raw, body };
 };
 
-const serveStatic = async (requestPath, response, staticRoot) => {
+/**
+ * Serves the built SPA.
+ *
+ * HEAD is handled alongside GET because uptime monitors, load balancers and link previewers use it,
+ * and answering a bare 404 to those made a healthy deployment look broken. A HEAD response carries
+ * the same headers as the GET and no body, which is what the method means.
+ */
+const serveStatic = async (requestPath, response, staticRoot, { method = 'GET' } = {}) => {
   if (!existsSync(staticRoot)) {
     sendText(response, 404, 'Build output not found. Run "npm run build" first.');
     return;
@@ -726,6 +733,12 @@ const serveStatic = async (requestPath, response, staticRoot) => {
   const extension = extname(pathToServe);
   const contentType = MIME_TYPES[extension] || 'application/octet-stream';
   response.writeHead(200, { ...securityHeaders(response), 'Content-Type': contentType });
+
+  if (method === 'HEAD') {
+    response.end();
+    return;
+  }
+
   createReadStream(pathToServe).pipe(response);
 };
 
@@ -3918,8 +3931,8 @@ export const createAppServer = async ({
         return;
       }
 
-      if (request.method === 'GET') {
-        await serveStatic(url.pathname, response, staticRoot);
+      if (request.method === 'GET' || request.method === 'HEAD') {
+        await serveStatic(url.pathname, response, staticRoot, { method: request.method });
         return;
       }
 

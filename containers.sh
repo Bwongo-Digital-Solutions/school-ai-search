@@ -150,11 +150,13 @@ set_environment() {
       compose_file="$PROD_COMPOSE_FILE"
       project_name="$APP_NAME"
       environment_label="Production"
+      env_file=".env.production"
       ;;
     dev)
       compose_file="$DEV_COMPOSE_FILE"
       project_name="$APP_NAME-dev"
       environment_label="Development"
+      env_file=".env.development"
       ;;
     *)
       printf 'Unknown environment: %s\n\n' "$environment" >&2
@@ -220,11 +222,35 @@ compose_profiles() {
   esac
 }
 
+# Which file supplies the ${VARIABLES} in the compose file.
+#
+# Compose only reads `.env` on its own. The documented template here is `.env.production`, so
+# without this every secret in it — SESSION_SECRET, PLATFORM_OWNER_TOKEN, the whole control plane —
+# silently interpolated to empty and the app came up unconfigured with no error anywhere.
+env_file_args() {
+  if [ -n "${env_file:-}" ] && [ -f "$env_file" ]; then
+    printf -- '--env-file\n%s' "$env_file"
+  elif [ -f ".env" ]; then
+    printf -- '--env-file\n.env'
+  fi
+}
+
 compose() {
   detect_compose
+
+  # --env-file, -p and -f are all top-level flags and must come BEFORE the subcommand, so they are
+  # prepended to the arguments this was called with. IFS is switched to a newline so only the
+  # (possibly empty) --env-file pair is word-split; sh has no arrays to do this more tidily.
+  old_ifs="$IFS"
+  IFS='
+'
+  # shellcheck disable=SC2046,SC2086
+  set -- $(env_file_args) -p "$project_name" -f "$compose_file" "$@"
+  IFS="$old_ifs"
+
   # Unquoted on purpose: "docker compose" has to split into a command and its subcommand.
   # shellcheck disable=SC2086
-  COMPOSE_PROFILES="$(compose_profiles)" $compose_bin -p "$project_name" -f "$compose_file" "$@"
+  COMPOSE_PROFILES="$(compose_profiles)" $compose_bin "$@"
 }
 
 set_proxy() {
