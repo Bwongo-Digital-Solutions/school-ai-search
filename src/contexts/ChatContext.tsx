@@ -11,6 +11,8 @@ import type { JsonRecord } from '@/types/auth';
 // 'lessons' and 'examiner' are the teacher-facing planning and assessment workspaces.
 // 'monitoring' is the office view of what happened at the gate, the exam room door and the
 // registers — the same records the mobile app writes, read back in one place.
+// 'teaching' reports each teacher's lessons, their students' attendance and their results, and
+// is where classes are assigned to teachers in the first place.
 type ActiveView =
   | 'chat'
   | 'students'
@@ -22,6 +24,7 @@ type ActiveView =
   | 'lessons'
   | 'examiner'
   | 'monitoring'
+  | 'teaching'
   | 'messages'
   | 'settings';
 

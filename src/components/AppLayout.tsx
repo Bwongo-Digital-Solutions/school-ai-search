@@ -13,6 +13,7 @@ import DigitalExaminerWorkspace from './chat/DigitalExaminerWorkspace';
 import SettingsPanel from './chat/SettingsPanel';
 import InboxPanel from './chat/InboxPanel';
 import MonitoringDashboard from './chat/MonitoringDashboard';
+import TeacherPerformance from './chat/TeacherPerformance';
 import AppFooter from './common/AppFooter';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useAuth } from '@/contexts/AuthContext';
@@ -91,6 +92,8 @@ const AppLayout: React.FC = () => {
         return <DigitalExaminerWorkspace />;
       case 'monitoring':
         return <MonitoringDashboard />;
+      case 'teaching':
+        return <TeacherPerformance />;
       case 'messages':
         return <InboxPanel />;
       case 'settings':
