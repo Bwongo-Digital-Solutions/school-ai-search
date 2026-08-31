@@ -79,6 +79,7 @@ ALTER TABLE users DROP CONSTRAINT IF EXISTS users_designation_check;
 ALTER TABLE users ADD CONSTRAINT users_designation_check
   CHECK (designation IS NULL OR designation IN ('bursar', 'askari', 'matron', 'cook'));
 
+
 -- The school's global identity: one row (id = 'default'), edited by an admin under Settings and
 -- read by every document (report cards, ID cards, receipts, statements, finance reports) and the
 -- app header. In a multi-tenant deployment each tenant database carries its own row.
@@ -258,6 +259,11 @@ CREATE TABLE IF NOT EXISTS teachers (
   department TEXT
 );
 
+-- Which staff record this login teaches under. A login and a teacher record were previously
+-- joinable only by hoping auth_email and teachers.email matched, which nothing checked and nothing
+-- maintained; this makes the link a real one. NULL until the account is given something to teach.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS teacher_id TEXT REFERENCES teachers(id) ON DELETE SET NULL;
+
 CREATE TABLE IF NOT EXISTS subject_allocations (
   id TEXT PRIMARY KEY,
   subject_id TEXT REFERENCES subjects_catalog(id) ON DELETE SET NULL,
@@ -267,6 +273,13 @@ CREATE TABLE IF NOT EXISTS subject_allocations (
   academic_year TEXT NOT NULL,
   term TEXT NOT NULL
 );
+
+-- A class here is the (grade, section) pair the register already works in — the same definition
+-- roll call uses, taken off the students themselves. The classes table is the other, unpopulated
+-- notion of a class; class_id stays available for schools that fill it, but nothing has to for an
+-- allocation to be complete.
+ALTER TABLE subject_allocations ADD COLUMN IF NOT EXISTS grade_level INTEGER;
+ALTER TABLE subject_allocations ADD COLUMN IF NOT EXISTS class_section TEXT;
 
 CREATE TABLE IF NOT EXISTS timetables (
   id TEXT PRIMARY KEY,

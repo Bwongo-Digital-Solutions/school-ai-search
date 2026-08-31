@@ -2542,6 +2542,108 @@ const handleGatePassFunction = async (database, body = {}) => {
 };
 
 /** The gate's own record: who moved which way, when, and whether they were let through. */
+/* ── teaching staff: what they teach, and how it is going ──────────────────────────────
+ *
+ * Attributing anything to a teacher was, until this, not possible. subject_allocations and
+ * timetables carry exactly the right columns and have never had a writer; gradebook_entries
+ * records no teacher at all; lesson_plans.teacher_id is always NULL because no caller sends
+ * one; and a login in `users` had no join to a row in `teachers`. So "how did this teacher's
+ * students do" had no query behind it.
+ *
+ * Allocating is what supplies the missing link: it creates the teacher record for a login,
+ * points the login at it, and writes one subject_allocations row per student in the class.
+ * Everything below reads off that. Where a teacher has no allocation we fall back to what can
+ * be inferred from the work they have actually done — the lesson plans they wrote and the
+ * registers they called — and every figure says which of the two it came from, so an estimate
+ * is never mistaken for a record.
+ */
+
+/** A class, as the register already understands one: a grade and a section. */
+const classKeyOf = (row) => `${row.grade_level}|${row.class_section}`;
+
+/**
+ * `column IN ($1, $2, …)` for a list of values, as a fragment and the parameters to go with it.
+ *
+ * Deliberately not `= ANY($1)`, which reads better and works on PostgreSQL: pg-mem — which backs
+ * the test suite and the in-memory deployment — matches nothing at all for it and reports no
+ * error, so the query returns an empty result that looks exactly like "this teacher has no
+ * students". An enumerated list behaves the same on both.
+ */
+const inList = (column, values, startAt = 1) => ({
+  sql: `${column} IN (${values.map((_, i) => `$${startAt + i}`).join(', ')})`,
+  params: values,
+  next: startAt + values.length,
+});
+
+/** The teacher record behind a login, made if this is the first thing they have been given. */
+const ensureTeacherRecord = async (database, userId) => {
+  const { rows } = await database.query(
+    'SELECT id, teacher_id, auth_email, display_name FROM users WHERE id = $1 LIMIT 1',
+    [userId],
+  );
+  const user = rows[0];
+  if (!user) return null;
+
+  if (user.teacher_id) {
+    const existing = await database.query('SELECT * FROM teachers WHERE id = $1 LIMIT 1', [user.teacher_id]);
+    if (existing.rows[0]) return existing.rows[0];
+  }
+
+  /* Databases that already keep a teachers table will have a row whose email matches; adopt it
+     rather than creating a second record for the same person. */
+  const byEmail = await database.query('SELECT * FROM teachers WHERE email = $1 LIMIT 1', [user.auth_email]);
+  let teacher = byEmail.rows[0];
+
+  if (!teacher) {
+    const created = await database.query(
+      `
+        INSERT INTO teachers (id, staff_id, display_name, email)
+        VALUES ($1, $2, $3, $4)
+        RETURNING *
+      `,
+      [randomUUID(), `STAFF-${randomUUID().slice(0, 8).toUpperCase()}`, user.display_name, user.auth_email],
+    );
+    teacher = created.rows[0];
+  }
+
+  await database.query('UPDATE users SET teacher_id = $2 WHERE id = $1', [user.id, teacher.id]);
+  return teacher;
+};
+
+/** A subject by name, made on first use — nothing else in the app writes the catalogue. */
+const ensureSubject = async (database, name) => {
+  const subjectName = String(name || '').trim();
+  if (!subjectName) return null;
+
+  const existing = await database.query(
+    'SELECT * FROM subjects_catalog WHERE LOWER(name) = LOWER($1) LIMIT 1',
+    [subjectName],
+  );
+  if (existing.rows[0]) return existing.rows[0];
+
+  // The code is derived from the name but must stay unique; a collision falls back to a suffix.
+  const base = subjectName.replace(/[^A-Za-z0-9]/g, '').slice(0, 6).toUpperCase() || 'SUBJ';
+  const taken = await database.query('SELECT 1 FROM subjects_catalog WHERE code = $1 LIMIT 1', [base]);
+  const code = taken.rows[0] ? `${base}-${randomUUID().slice(0, 4).toUpperCase()}` : base;
+
+  const created = await database.query(
+    'INSERT INTO subjects_catalog (id, code, name) VALUES ($1, $2, $3) RETURNING *',
+    [randomUUID(), code, subjectName],
+  );
+  return created.rows[0];
+};
+
+const PASS_MARK_DEFAULT = 50;
+
+const tally = (rows, field, keys) => {
+  const counts = Object.fromEntries(keys.map((k) => [k, 0]));
+  rows.forEach((row) => {
+    const key = row[field];
+    if (key in counts) counts[key] += 1;
+  });
+  return counts;
+};
+
 /**
  * One read for the monitoring dashboard: what happened at the gate, at the exam room door,
  * in the register and in the kitchen, plus who is off the premises right now.
@@ -2745,6 +2847,308 @@ const handleMonitoringFunction = async (database, body = {}) => {
       lunch: tallyMeal('lunch'),
       supper: tallyMeal('supper'),
       served: meals.rows.length,
+    },
+  };
+};
+
+/**
+ * Everything about a teacher's teaching: what they are allocated, what they planned, whether
+ * their students turned up, and how those students did.
+ *
+ * Admins see every teacher. A teacher sees themselves and nobody else — the figures are about
+ * a person's work, and one member of staff should not be able to read another's by changing an
+ * id in a request.
+ */
+const handleTeacherPerformanceFunction = async (database, body = {}, { actor: authenticated } = {}) => {
+  const actor = resolveActor(authenticated, body);
+  const refusal = requireRole(actor, ['admin', 'teacher']);
+  if (refusal) return refusal;
+
+  const action = String(body.action || 'summary').trim();
+  const isAdmin = actor.role === 'admin';
+
+  /* Teaching staff are the logins that teach, not the rows in `teachers` — that table is a
+     staff directory which, before allocation, is empty. */
+  const staffRows = async () => {
+    const { rows } = await database.query(
+      `
+        SELECT id, auth_email, display_name, role, teacher_id
+        FROM users
+        WHERE role IN ('admin', 'teacher') AND approval_status = 'approved'
+        ORDER BY display_name
+      `,
+    );
+
+    /* Counted separately and joined here rather than as an aggregate over a LEFT JOIN: pg-mem
+       backs the test suite and the demo deployment, and cannot plan that shape. */
+    const counts = await database.query(
+      'SELECT teacher_id, COUNT(*) AS n FROM subject_allocations GROUP BY teacher_id',
+    );
+    const byTeacher = new Map(counts.rows.map((row) => [row.teacher_id, Number(row.n)]));
+
+    return rows.map((row) => ({
+      ...row,
+      allocation_rows: (row.teacher_id && byTeacher.get(row.teacher_id)) || 0,
+    }));
+  };
+
+  if (action === 'staff') {
+    const rows = await staffRows();
+    return { staff: isAdmin ? rows : rows.filter((row) => row.id === actor.id) };
+  }
+
+  /* Which login the request is about. A teacher asking about anyone else is refused rather
+     than quietly answered with their own figures. */
+  const requestedId = String(body.userId || '').trim() || actor.id;
+  if (!isAdmin && requestedId !== actor.id) return { error: 'Unauthorized' };
+
+  const subject = await database.query(
+    'SELECT id, auth_email, display_name, role, teacher_id FROM users WHERE id = $1 LIMIT 1',
+    [requestedId],
+  );
+  const person = subject.rows[0];
+  if (!person) return { error: 'No such member of staff' };
+
+  if (action === 'allocate') {
+    if (!isAdmin) return { error: 'Unauthorized' };
+
+    const gradeLevel = Number(body.gradeLevel);
+    const classSection = String(body.classSection || '').trim();
+    const academicYear = String(body.academicYear || '').trim();
+    const term = String(body.term || '').trim();
+    if (!Number.isFinite(gradeLevel) || !classSection) return { error: 'A class is required' };
+    if (!academicYear || !term) return { error: 'An academic year and term are required' };
+
+    const teacher = await ensureTeacherRecord(database, person.id);
+    if (!teacher) return { error: 'No such member of staff' };
+    const subjectRow = await ensureSubject(database, body.subject);
+    if (!subjectRow) return { error: 'A subject is required' };
+
+    const students = await database.query(
+      'SELECT id FROM students WHERE grade_level = $1 AND class_section = $2',
+      [gradeLevel, classSection],
+    );
+    if (!students.rows.length) return { error: 'That class has no students' };
+
+    /* Re-allocating the same class replaces it rather than doubling it: a student added to the
+       class after the first allocation should be picked up, and one who left should drop out. */
+    await database.query(
+      `
+        DELETE FROM subject_allocations
+        WHERE teacher_id = $1 AND subject_id = $2 AND grade_level = $3
+          AND class_section = $4 AND academic_year = $5 AND term = $6
+      `,
+      [teacher.id, subjectRow.id, gradeLevel, classSection, academicYear, term],
+    );
+
+    for (const student of students.rows) {
+      await database.query(
+        `
+          INSERT INTO subject_allocations
+            (id, subject_id, teacher_id, student_id, grade_level, class_section, academic_year, term)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `,
+        [randomUUID(), subjectRow.id, teacher.id, student.id, gradeLevel, classSection, academicYear, term],
+      );
+    }
+
+    return {
+      allocated: {
+        teacher_id: teacher.id,
+        subject: subjectRow.name,
+        grade_level: gradeLevel,
+        class_section: classSection,
+        academic_year: academicYear,
+        term,
+        students: students.rows.length,
+      },
+    };
+  }
+
+  if (action === 'unallocate') {
+    if (!isAdmin) return { error: 'Unauthorized' };
+    if (!person.teacher_id) return { error: 'That member of staff has no allocations' };
+
+    const removed = await database.query(
+      `
+        DELETE FROM subject_allocations
+        WHERE teacher_id = $1 AND subject_id = $2 AND grade_level = $3
+          AND class_section = $4 AND academic_year = $5 AND term = $6
+        RETURNING id
+      `,
+      [
+        person.teacher_id, String(body.subjectId || ''), Number(body.gradeLevel),
+        String(body.classSection || ''), String(body.academicYear || ''), String(body.term || ''),
+      ],
+    );
+    return { removed: removed.rows.length };
+  }
+
+  // ── everything below is the read ──────────────────────────────────────────────────────
+  const passMark = Number.isFinite(Number(body.passMark)) ? Number(body.passMark) : PASS_MARK_DEFAULT;
+  const from = String(body.from || '').trim() || null;
+  const to = String(body.to || '').trim() || null;
+
+  const allocations = person.teacher_id
+    ? (await database.query(
+      `
+        SELECT a.id, a.student_id, a.subject_id, a.grade_level, a.class_section,
+               a.academic_year, a.term, c.name AS subject_name
+        FROM subject_allocations a
+        LEFT JOIN subjects_catalog c ON c.id = a.subject_id
+        WHERE a.teacher_id = $1
+      `,
+      [person.teacher_id],
+    )).rows
+    : [];
+
+  /* Lesson plans are the one piece of teaching work that is already recorded per person, but
+     under created_by rather than teacher_id — nothing sends a teacher_id — so both are matched. */
+  const plans = (await database.query(
+    `
+      SELECT p.id, p.status, p.lesson_date, p.duration_minutes, p.grade_level,
+             p.subject_id, p.subject_name, p.class_id
+      FROM lesson_plans p
+      WHERE (p.teacher_id = $1 OR LOWER(p.created_by) = LOWER($2))
+        AND ($3::date IS NULL OR p.lesson_date IS NULL OR p.lesson_date >= $3::date)
+        AND ($4::date IS NULL OR p.lesson_date IS NULL OR p.lesson_date <= $4::date)
+    `,
+    [person.teacher_id, person.auth_email, from, to],
+  )).rows;
+
+  const timetabled = person.teacher_id
+    ? (await database.query(
+      'SELECT id, day_of_week, start_time, end_time FROM timetables WHERE teacher_id = $1',
+      [person.teacher_id],
+    )).rows
+    : [];
+
+  const allocatedStudentIds = [...new Set(allocations.map((row) => row.student_id))];
+  const allocatedSubjectIds = [...new Set(allocations.map((row) => row.subject_id).filter(Boolean))];
+  const allocated = allocatedStudentIds.length > 0;
+
+  /* With an allocation the register is read for exactly that teacher's students. Without one
+     the only handle left is who called the register, which is stored as a typed name. */
+  const students = inList('student_id', allocatedStudentIds);
+  const attendanceRows = allocated
+    ? (await database.query(
+      `
+        SELECT status FROM attendance_records
+        WHERE ${students.sql}
+          AND ($${students.next}::date IS NULL OR attendance_date >= $${students.next}::date)
+          AND ($${students.next + 1}::date IS NULL OR attendance_date <= $${students.next + 1}::date)
+      `,
+      [...students.params, from, to],
+    )).rows
+    : (await database.query(
+      `
+        SELECT status FROM attendance_records
+        WHERE LOWER(marked_by) = LOWER($1)
+          AND ($2::date IS NULL OR attendance_date >= $2::date)
+          AND ($3::date IS NULL OR attendance_date <= $3::date)
+      `,
+      [person.display_name, from, to],
+    )).rows;
+
+  /* Results are the teacher's students in the teacher's subjects. Without an allocation there
+     is no defensible way to say which marks belong to whom, so nothing is claimed. */
+  const gradeStudents = inList('g.student_id', allocatedStudentIds);
+  const gradeSubjects = inList('g.subject_id', allocatedSubjectIds, gradeStudents.next);
+  const resultRows = allocated
+    ? (await database.query(
+      `
+        SELECT g.score, g.max_score, g.subject_id, c.name AS subject_name
+        FROM gradebook_entries g
+        LEFT JOIN subjects_catalog c ON c.id = g.subject_id
+        WHERE ${gradeStudents.sql}
+        ${allocatedSubjectIds.length ? `AND ${gradeSubjects.sql}` : ''}
+      `,
+      [...gradeStudents.params, ...(allocatedSubjectIds.length ? gradeSubjects.params : [])],
+    )).rows
+    : [];
+
+  const scored = resultRows
+    .map((row) => ({
+      ...row,
+      percent: Number(row.max_score) > 0 ? (Number(row.score) / Number(row.max_score)) * 100 : null,
+    }))
+    .filter((row) => row.percent !== null);
+
+  const bySubject = new Map();
+  scored.forEach((row) => {
+    const key = row.subject_name || 'Unnamed subject';
+    const entry = bySubject.get(key) || { subject: key, entries: 0, passed: 0, failed: 0, total: 0 };
+    entry.entries += 1;
+    entry.total += row.percent;
+    if (row.percent >= passMark) entry.passed += 1;
+    else entry.failed += 1;
+    bySubject.set(key, entry);
+  });
+
+  const classes = [...new Set(allocations.map(classKeyOf))]
+    .map((key) => {
+      const [gradeLevel, classSection] = key.split('|');
+      const rows = allocations.filter((row) => classKeyOf(row) === key);
+      return {
+        grade_level: Number(gradeLevel),
+        class_section: classSection,
+        subjects: [...new Set(rows.map((row) => row.subject_name).filter(Boolean))],
+        students: new Set(rows.map((row) => row.student_id)).size,
+      };
+    })
+    .sort((a, b) => a.grade_level - b.grade_level || a.class_section.localeCompare(b.class_section));
+
+  const attendanceCounts = tally(attendanceRows, 'status', ['present', 'absent', 'late', 'excused']);
+  const attendanceTotal = Object.values(attendanceCounts).reduce((sum, n) => sum + n, 0);
+  const passed = scored.filter((row) => row.percent >= passMark).length;
+
+  return {
+    teacher: {
+      id: person.id,
+      name: person.display_name,
+      email: person.auth_email,
+      role: person.role,
+      teacher_id: person.teacher_id,
+      allocated,
+    },
+    pass_mark: passMark,
+    range: { from, to },
+    classes,
+    /* No source here: a plan is matched on the teacher's own id or their email address, which
+       identifies them exactly. Allocation has no bearing on it, so flagging these as estimated
+       would be wrong — and read as "this teacher has no classes", which may be untrue. */
+    lessons: {
+      total: plans.length,
+      ...tally(plans, 'status', ['draft', 'approved', 'delivered']),
+      minutes: plans.reduce((sum, row) => sum + (Number(row.duration_minutes) || 0), 0),
+      timetabled_periods: timetabled.length,
+    },
+    attendance: {
+      source: allocated ? 'allocated' : 'inferred',
+      total: attendanceTotal,
+      ...attendanceCounts,
+      present_rate: attendanceTotal
+        ? Number(((attendanceCounts.present / attendanceTotal) * 100).toFixed(1))
+        : null,
+    },
+    results: {
+      source: allocated ? 'allocated' : 'none',
+      entries: scored.length,
+      passed,
+      failed: scored.length - passed,
+      pass_rate: scored.length ? Number(((passed / scored.length) * 100).toFixed(1)) : null,
+      average_percent: scored.length
+        ? Number((scored.reduce((sum, row) => sum + row.percent, 0) / scored.length).toFixed(1))
+        : null,
+      by_subject: [...bySubject.values()]
+        .map((entry) => ({
+          subject: entry.subject,
+          entries: entry.entries,
+          passed: entry.passed,
+          failed: entry.failed,
+          average_percent: Number((entry.total / entry.entries).toFixed(1)),
+        }))
+        .sort((a, b) => a.average_percent - b.average_percent),
     },
   };
 };
@@ -3857,6 +4261,13 @@ export const createAppRuntime = async ({
       if (method === 'POST' && pathname === '/api/functions/monitoring') {
         const data = await handleMonitoringFunction(database, body);
         return { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/teacher-performance') {
+        const data = await handleTeacherPerformanceFunction(database, body, { actor });
+        return data?.error
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/gate-log') {

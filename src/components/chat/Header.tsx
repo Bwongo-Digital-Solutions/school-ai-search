@@ -17,7 +17,7 @@ import GlobalSearch from './GlobalSearch';
 
 const Header: React.FC = () => {
   const { toggleSidebar, messages, activeView, setActiveView, currentConversationId } = useChatContext();
-  const { user, isAuthenticated, isAdmin, isSupportStaff, signOut } = useAuth();
+  const { user, isAuthenticated, isAdmin, isTeacher, isSupportStaff, signOut } = useAuth();
   // The badge is driven by the live channel, so it moves the moment a message arrives rather than
   // on the next page load.
   const { unread } = useLive();
@@ -260,6 +260,12 @@ const Header: React.FC = () => {
                         className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
                       >
                         <ClipboardCheck className="w-3.5 h-3.5" /> Digital Examiner
+                      </button>
+                      <button
+                        onClick={() => { setActiveView('teaching'); setShowTeachingMenu(false); }}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                      >
+                        <GraduationCap className="w-3.5 h-3.5" /> Teacher Performance
                       </button>
                     </div>
                   </>
@@ -582,6 +588,14 @@ const Header: React.FC = () => {
                           className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
                         >
                           <ArrowLeftRight className="w-3.5 h-3.5" /> Monitoring
+                        </button>
+                      )}
+                      {(isAdmin || isTeacher) && (
+                        <button
+                          onClick={() => { setActiveView('teaching'); setShowUserMenu(false); }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                        >
+                          <GraduationCap className="w-3.5 h-3.5" /> Teacher Performance
                         </button>
                       )}
                       {isAdmin && (

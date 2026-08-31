@@ -7781,3 +7781,110 @@ test('the gate can list the permissions waiting for it, and close the one it nam
     await cleanup();
   }
 });
+
+test('teacher performance attributes work through allocations, and refuses to cross between teachers', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const perf = (body) => dispatch(runtime, 'POST', '/api/functions/teacher-performance', body);
+  const asAdmin = (body) => perf({ requesterRole: 'admin', ...body });
+  const db = (body) => dispatch(runtime, 'POST', '/api/db', body);
+
+  const signup = async (email, name) => {
+    const res = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email, password: 'test1234', displayName: name,
+    });
+    const id = res.body.data.user.id;
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'approve_account', requesterRole: 'admin', userId: id,
+    });
+    return id;
+  };
+
+  try {
+    await signup('head-perf@kps.ac.ug', 'Head');           // first account is the admin
+    const taught = await signup('taught@kps.ac.ug', 'Allocated Teacher');
+    const untaught = await signup('untaught@kps.ac.ug', 'Unallocated Teacher');
+
+    const students = (await db({ table: 'students', operation: 'select', columns: 'id,grade_level,class_section' })).body.data;
+    const group = students.filter(
+      (s) => s.grade_level === students[0].grade_level && s.class_section === students[0].class_section,
+    );
+
+    // Nothing links a login to a teacher record until they are given something to teach.
+    const before = (await asAdmin({ action: 'staff' })).body.data.staff;
+    assert.equal(before.find((row) => row.auth_email === 'taught@kps.ac.ug').teacher_id, null);
+
+    const allocated = await asAdmin({
+      action: 'allocate', userId: taught, subject: 'Biology',
+      gradeLevel: group[0].grade_level, classSection: group[0].class_section,
+      academicYear: '2026', term: 'Term 2',
+    });
+    assert.equal(allocated.body.data.allocated.students, group.length,
+      'one allocation row per student in the class');
+
+    const after = (await asAdmin({ action: 'staff' })).body.data.staff
+      .find((row) => row.auth_email === 'taught@kps.ac.ug');
+    assert.ok(after.teacher_id, 'allocating creates the teacher record and links the login');
+    assert.equal(after.allocation_rows, group.length);
+
+    // Allocating the same class again replaces it, so a class list can be corrected.
+    await asAdmin({
+      action: 'allocate', userId: taught, subject: 'Biology',
+      gradeLevel: group[0].grade_level, classSection: group[0].class_section,
+      academicYear: '2026', term: 'Term 2',
+    });
+    const repeated = (await asAdmin({ action: 'staff' })).body.data.staff
+      .find((row) => row.auth_email === 'taught@kps.ac.ug');
+    assert.equal(repeated.allocation_rows, group.length, 're-allocating replaces rather than doubles');
+
+    const subjectId = (await db({ table: 'subjects_catalog', operation: 'select', columns: 'id,name' }))
+      .body.data.find((row) => row.name === 'Biology').id;
+
+    // Alternating clear passes and clear fails, so the split is a fact rather than a guess.
+    let index = 0;
+    for (const student of group) {
+      await db({ table: 'gradebook_entries', operation: 'insert', payload: {
+        id: `gb-perf-${index}`, student_id: student.id, subject_id: subjectId,
+        score: index % 2 === 0 ? 80 : 30, max_score: 100 } });
+      await db({ table: 'attendance_records', operation: 'insert', payload: {
+        id: `att-perf-${index}`, student_id: student.id, attendance_date: '2026-08-20',
+        status: index % 2 === 0 ? 'present' : 'absent', marked_by: 'Allocated Teacher' } });
+      index += 1;
+    }
+    const passes = group.filter((_, n) => n % 2 === 0).length;
+
+    const summary = (await asAdmin({ action: 'summary', userId: taught })).body.data;
+    assert.equal(summary.results.source, 'allocated');
+    assert.equal(summary.results.passed, passes);
+    assert.equal(summary.results.failed, group.length - passes);
+    assert.equal(summary.attendance.total, group.length, 'the register is read for the allocated students');
+    assert.equal(summary.classes.length, 1);
+    assert.deepEqual(summary.classes[0].subjects, ['Biology']);
+
+    // The pass mark is a question the reader asks, not a constant baked into the figures.
+    assert.equal((await asAdmin({ action: 'summary', userId: taught, passMark: 95 })).body.data.results.passed, 0);
+    assert.equal((await asAdmin({ action: 'summary', userId: taught, passMark: 10 })).body.data.results.failed, 0);
+
+    /* With no allocation there is no defensible way to say which marks are whose, so none are
+       claimed — an empty result is honest where an inferred one would be a guess. */
+    const none = (await asAdmin({ action: 'summary', userId: untaught })).body.data;
+    assert.equal(none.teacher.allocated, false);
+    assert.equal(none.results.source, 'none');
+    assert.equal(none.results.entries, 0);
+    assert.equal(none.attendance.source, 'inferred');
+
+    // A teacher may read themselves and nobody else.
+    const own = await perf({ requesterRole: 'teacher', actorId: taught, action: 'summary', userId: taught });
+    assert.equal(own.body.data.teacher.id, taught);
+
+    const other = await perf({ requesterRole: 'teacher', actorId: taught, action: 'summary', userId: untaught });
+    assert.equal(other.body.error, 'Unauthorized', 'one teacher cannot read another by changing an id');
+
+    const escalate = await perf({ requesterRole: 'teacher', actorId: taught, action: 'allocate', userId: taught, subject: 'Physics', gradeLevel: 10, classSection: 'A', academicYear: '2026', term: 'Term 2' });
+    assert.equal(escalate.body.error, 'Unauthorized', 'and cannot allocate themselves work');
+
+    const stranger = await perf({ requesterRole: 'support_staff', action: 'staff' });
+    assert.equal(stranger.body.error, 'Unauthorized', 'non-teaching staff have no business here');
+  } finally {
+    await cleanup();
+  }
+});
