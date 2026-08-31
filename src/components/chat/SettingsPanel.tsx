@@ -1,8 +1,17 @@
 import React, { useEffect, useState } from 'react';
-import { ImagePlus, Loader2, Palette, Save, Settings as SettingsIcon, Shield } from 'lucide-react';
+import { KeyRound, Plug, Search } from 'lucide-react';
+import McpServersPanel from './McpServersPanel';
+import AiKeysPanel from './AiKeysPanel';
+import LibreChatPanel from './LibreChatPanel';
+import { GraduationCap, ImagePlus, Loader2, Palette, Save, Settings as SettingsIcon, Shield } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
-import { saveSchoolSettings, type SchoolSettings } from '@/lib/settings';
+import {
+  GRADING_COUNTRY_OPTIONS,
+  SCHOOL_LEVEL_OPTIONS,
+  saveSchoolSettings,
+  type SchoolSettings,
+} from '@/lib/settings';
 
 const MAX_LOGO_BYTES = 2 * 1024 * 1024;
 
@@ -27,6 +36,7 @@ const SettingsPanel: React.FC = () => {
   const [form, setForm] = useState<SchoolSettings>(settings);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [tab, setTab] = useState<'branding' | 'mcp' | 'integrations' | 'ai-keys'>('branding');
 
   // Keep the form in sync when the global settings load/refresh.
   useEffect(() => {
@@ -47,6 +57,8 @@ const SettingsPanel: React.FC = () => {
     setForm(current => ({ ...current, [key]: value }));
     setSaved(false);
   };
+
+  const selectedLevel = SCHOOL_LEVEL_OPTIONS.find(option => option.value === form.school_level);
 
   const onLogo = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -80,11 +92,52 @@ const SettingsPanel: React.FC = () => {
           School Settings
         </h2>
         <p className="text-xs text-gray-400 mt-0.5">
-          Set the school identity used across report cards, receipts, statements, ID cards and the app header.
+          {tab === 'branding'
+            ? 'Set the school identity used across report cards, receipts, statements, ID cards and the app header.'
+            : tab === 'mcp'
+              ? 'Connect external MCP servers so the assistant can use their tools.'
+              : tab === 'ai-keys'
+                ? "Use your school's own AI accounts instead of the platform's."
+                : 'Global search across the school, and connecting LibreChat to this data.'}
         </p>
+
+        <div className="flex flex-wrap gap-1.5 mt-4">
+          {([
+            { key: 'branding', label: 'Branding', icon: SettingsIcon },
+            { key: 'mcp', label: 'MCP Servers', icon: Plug },
+            { key: 'integrations', label: 'Search & LibreChat', icon: Search },
+            { key: 'ai-keys', label: 'AI Providers', icon: KeyRound },
+          ] as const).map(({ key, label, icon: Icon }) => (
+            <button
+              key={key}
+              onClick={() => setTab(key)}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                tab === key
+                  ? 'bg-indigo-600 text-white'
+                  : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'
+              }`}
+            >
+              <Icon className="w-3.5 h-3.5" />
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="flex-1 overflow-auto px-6 py-5">
+        {tab === 'integrations' ? (
+          <div className="max-w-3xl">
+            <LibreChatPanel />
+          </div>
+        ) : tab === 'mcp' ? (
+          <div className="max-w-3xl">
+            <McpServersPanel />
+          </div>
+        ) : tab === 'ai-keys' ? (
+          <div className="max-w-3xl">
+            <AiKeysPanel />
+          </div>
+        ) : (
         <div className="max-w-2xl space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <label className="block">
@@ -111,6 +164,49 @@ const SettingsPanel: React.FC = () => {
               <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Contact Email</span>
               <input type="email" value={form.contact_email} onChange={e => set('contact_email')(e.target.value)} placeholder="info@school.ac.ug" className={inputClass} />
             </label>
+          </div>
+
+          <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-3">
+            <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5 flex items-center gap-1.5">
+              <GraduationCap className="w-3.5 h-3.5 text-indigo-500" /> Academic Level &amp; Grading
+            </span>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="block">
+                <span className="block text-[11px] text-gray-500 dark:text-gray-400 mb-1">School level</span>
+                <select
+                  value={form.school_level}
+                  onChange={e => set('school_level')(e.target.value)}
+                  className={inputClass}
+                >
+                  {SCHOOL_LEVEL_OPTIONS.map(option => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="block">
+                <span className="block text-[11px] text-gray-500 dark:text-gray-400 mb-1">Examination system</span>
+                <select
+                  value={form.grading_country}
+                  onChange={e => set('grading_country')(e.target.value)}
+                  className={inputClass}
+                >
+                  {GRADING_COUNTRY_OPTIONS.map(option => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            {/* The consequence of the choice, shown before it is saved. */}
+            <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-2">
+              <span className="font-medium text-gray-600 dark:text-gray-300">Report cards will grade on: </span>
+              {selectedLevel?.grades}
+            </p>
+            <p className="text-[11px] text-gray-400 mt-1">
+              Set this once — every report card follows it, so nobody has to choose a scale per student. A
+              secondary school gets both O-Level and A-Level scales automatically; each student's own class
+              decides which applies.
+            </p>
           </div>
 
           <div>
@@ -158,6 +254,7 @@ const SettingsPanel: React.FC = () => {
             {saved && <span className="text-sm text-emerald-600 dark:text-emerald-400">Saved. Documents now use this branding.</span>}
           </div>
         </div>
+        )}
       </div>
     </div>
   );

@@ -367,8 +367,9 @@ const StudentRecordsWorkspace: React.FC = () => {
   });
 
   const markAttendance = () => saveRecord('Attendance marking', async () => {
-    // One record per student per day: update the existing record for this date instead of adding
-    // a duplicate (the database also enforces this with a unique index).
+    // One record per student per day. Updating in place when this date is already loaded saves a
+    // round trip and keeps the edit obvious, but it is only an optimisation — this list can be
+    // stale, so the guarantee comes from the server, which upserts on (student_id, attendance_date).
     const existing = (selectedStudentRecords.attendance || []).find(
       row => String(row.attendance_date).slice(0, 10) === attendance.attendance_date,
     );

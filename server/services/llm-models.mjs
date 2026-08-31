@@ -1,3 +1,5 @@
+import { credentialFor } from './credential-store.mjs';
+
 const createDefaultModelCatalog = () => [
   {
     id: 'local-rules',
@@ -19,7 +21,7 @@ const createDefaultModelCatalog = () => [
     id: 'anthropic-default',
     label: 'Anthropic Claude',
     provider: 'anthropic',
-    model: process.env.ANTHROPIC_MODEL || 'claude-3-5-haiku-latest',
+    model: process.env.ANTHROPIC_MODEL || 'claude-opus-5',
     type: 'commercial',
     description: 'Anthropic Messages API model.',
   },
@@ -59,13 +61,16 @@ const createDefaultModelCatalog = () => [
     id: 'ollama-default',
     label: 'Ollama',
     provider: 'ollama',
-    model: process.env.OLLAMA_MODEL || 'qwen3.5:2b',
+    model: process.env.OLLAMA_MODEL || 'qwen2.5-coder:0.5b',
     type: 'open_source',
     description: 'Local open-source model served by Ollama.',
   },
 ];
 
-const PROVIDER_ENV = {
+// Exported so the embeddings layer (server/rag/embeddings.mjs) and the agent's tool-calling
+// adapters (server/agent/providers.mjs) resolve credentials and base URLs from this one table
+// rather than each keeping their own copy.
+export const PROVIDER_ENV = {
   openai: {
     apiKey: 'OPENAI_API_KEY',
     baseUrl: 'OPENAI_BASE_URL',
@@ -102,26 +107,43 @@ const PROVIDER_ENV = {
   },
 };
 
-const parseCatalogOverride = () => {
-  if (!process.env.AI_MODEL_CATALOG) return null;
+const parseModelJson = (value, variableName) => {
+  if (!value) return null;
 
   try {
-    const parsed = JSON.parse(process.env.AI_MODEL_CATALOG);
+    const parsed = JSON.parse(value);
     return Array.isArray(parsed) ? parsed : null;
-  } catch {
+  } catch (error) {
+    console.warn(`Invalid ${variableName} JSON:`, error instanceof Error ? error.message : error);
     return null;
   }
 };
+
+/** Replaces the built-in catalogue outright. */
+const parseCatalogOverride = () => parseModelJson(process.env.AI_MODEL_CATALOG, 'AI_MODEL_CATALOG');
+
+/**
+ * Adds models to the built-in catalogue instead of replacing it.
+ *
+ * The common case is wanting one more model — a second Ollama model, or an Ollama cloud model
+ * beside the local one — and AI_MODEL_CATALOG makes that awkward, because redefining the list to
+ * add one entry silently drops Local Rules and every configured provider. An entry here whose `id`
+ * matches a built-in replaces just that one, so the default Ollama entry can be retuned without
+ * restating the rest.
+ */
+const parseExtraModels = () => parseModelJson(process.env.AI_EXTRA_MODELS, 'AI_EXTRA_MODELS') || [];
 
 const providerHasCredentials = (provider) => {
   if (provider === 'local_rules') return true;
   if (provider === 'ollama') return true;
 
   const env = PROVIDER_ENV[provider];
-  return Boolean(env?.apiKey && process.env[env.apiKey]);
+  // credentialFor, not process.env: a school that supplied its own key is configured even when the
+  // platform has none, and the model picker has to say so.
+  return Boolean(env?.apiKey && credentialFor(env.apiKey));
 };
 
-const publicModel = (model) => ({
+export const publicModel = (model) => ({
   id: model.id,
   label: model.label,
   provider: model.provider,
@@ -133,14 +155,27 @@ const publicModel = (model) => ({
 
 export const getModelCatalog = () => {
   const override = parseCatalogOverride();
-  const catalog = override || createDefaultModelCatalog();
-  return catalog.map((model) => ({
-    ...model,
-    id: model.id || `${model.provider}:${model.model}`,
-    label: model.label || `${model.provider} ${model.model}`,
-    type: model.type || (model.provider === 'ollama' ? 'open_source' : 'commercial'),
-    description: model.description || '',
-  }));
+  const base = override || createDefaultModelCatalog();
+
+  // Extras are merged by id: a matching id replaces that entry in place (keeping its position),
+  // anything else is appended.
+  const merged = [...base];
+  for (const extra of parseExtraModels()) {
+    const id = extra.id || `${extra.provider}:${extra.model}`;
+    const index = merged.findIndex((model) => (model.id || `${model.provider}:${model.model}`) === id);
+    if (index >= 0) merged[index] = { ...merged[index], ...extra };
+    else merged.push(extra);
+  }
+
+  return merged
+    .filter((model) => model && model.provider)
+    .map((model) => ({
+      ...model,
+      id: model.id || `${model.provider}:${model.model}`,
+      label: model.label || `${model.provider} ${model.model}`,
+      type: model.type || (model.provider === 'ollama' ? 'open_source' : 'commercial'),
+      description: model.description || '',
+    }));
 };
 
 export const getPublicModelCatalog = () => getModelCatalog().map(publicModel);
@@ -169,27 +204,53 @@ const createStudentContext = (students) =>
     )
     .join('\n');
 
-const createMessages = ({ message, students, hasImage }) => [
-  {
-    role: 'system',
-    content: [
-      'You are SchoolBot AI, a school information assistant.',
-      'Answer only from the provided student records.',
-      'Use concise Markdown. If the answer is not in the records, say so.',
-      'Never invent student records, grades, payments, health details, or attendance.',
-      hasImage ? 'The user attached an image, but local OCR is not available unless the selected model can interpret it.' : '',
-      '',
-      'Student records:',
-      createStudentContext(students),
-    ].join('\n'),
-  },
-  {
-    role: 'user',
-    content: message || 'Please analyze this request.',
-  },
-];
+// Inlining the whole roster stops scaling somewhere around a few hundred students. Past this many,
+// the caller is expected to have narrowed the set by retrieval first; the prompt then says so
+// explicitly, so the model reports "not in the records I can see" rather than "no such student".
+// Read per call, like every other tunable in this file, so it stays reconfigurable at runtime.
+const rosterInlineLimit = () => Number(process.env.AI_ROSTER_INLINE_LIMIT || 50);
 
-const readJson = async (response) => {
+export const createMessages = ({ message, students, hasImage, contextBlocks = '', history = [] }) => {
+  const roster = students.slice(0, rosterInlineLimit());
+  const truncated = students.length > roster.length;
+
+  return [
+    {
+      role: 'system',
+      content: [
+        'You are SchoolBot AI, a school information assistant.',
+        'Answer only from the provided records and reference material.',
+        'Use concise Markdown. If the answer is not in the records, say so.',
+        'Never invent student records, grades, payments, health details, or attendance.',
+        hasImage
+          ? 'The user attached an image, but local OCR is not available unless the selected model can interpret it.'
+          : '',
+        contextBlocks
+          ? [
+              '',
+              'Reference material. Cite it as [1], [2] and so on when you use it:',
+              contextBlocks,
+            ].join('\n')
+          : '',
+        '',
+        truncated
+          ? `Student records (showing ${roster.length} of ${students.length}; ask the user to narrow ` +
+            'the query if the student they mean is not listed):'
+          : 'Student records:',
+        createStudentContext(roster),
+      ]
+        .filter((line) => line !== '')
+        .join('\n'),
+    },
+    ...history,
+    {
+      role: 'user',
+      content: message || 'Please analyze this request.',
+    },
+  ];
+};
+
+export const readJson = async (response) => {
   const text = await response.text();
   if (!text) return {};
 
@@ -200,7 +261,7 @@ const readJson = async (response) => {
   }
 };
 
-const postJson = async (httpClient, url, { headers = {}, body }) => {
+export const postJson = async (httpClient, url, { headers = {}, body }) => {
   const response = await httpClient(url, {
     method: 'POST',
     headers: {
@@ -219,8 +280,8 @@ const postJson = async (httpClient, url, { headers = {}, body }) => {
 };
 
 const describeOllamaConnectionError = (error) => {
-  const baseUrl = process.env.OLLAMA_BASE_URL || PROVIDER_ENV.ollama.defaultBaseUrl;
-  const model = process.env.OLLAMA_MODEL || 'qwen3.5:2b';
+  const baseUrl = credentialFor('OLLAMA_BASE_URL') || PROVIDER_ENV.ollama.defaultBaseUrl;
+  const model = process.env.OLLAMA_MODEL || 'qwen2.5-coder:0.5b';
   const detail = error instanceof Error && error.message ? error.message : 'Unknown connection error';
 
   return [
@@ -237,10 +298,10 @@ const describeOllamaConnectionError = (error) => {
 
 const callOpenAiCompatible = async ({ model, messages, httpClient }) => {
   const env = PROVIDER_ENV[model.provider];
-  const apiKey = process.env[env.apiKey];
+  const apiKey = credentialFor(env.apiKey);
   if (!apiKey) throw new Error(`${env.apiKey} is required for ${model.label}`);
 
-  const baseUrl = process.env[env.baseUrl] || env.defaultBaseUrl;
+  const baseUrl = credentialFor(env.baseUrl) || env.defaultBaseUrl;
   const headers = {
     Authorization: `Bearer ${apiKey}`,
   };
@@ -267,11 +328,23 @@ const callOpenAiCompatible = async ({ model, messages, httpClient }) => {
   };
 };
 
+// Claude 4.6 and later (the Opus 4.6/4.7/4.8 and 5 family, Sonnet 4.6/5, Fable and Mythos) removed
+// the sampling parameters: sending `temperature` to one of them is a 400, not a silent ignore.
+// Older Claude models still honour it, and a school may well have pinned one through
+// ANTHROPIC_MODEL, so this is a targeted deny-list rather than dropping temperature outright.
+const ANTHROPIC_NO_SAMPLING =
+  /^claude-(?:fable|mythos)-|^claude-opus-(?:5|4-6|4-7|4-8)|^claude-sonnet-(?:5|4-6)/;
+
+export const anthropicSamplingParams = (modelName) =>
+  ANTHROPIC_NO_SAMPLING.test(String(modelName || ''))
+    ? {}
+    : { temperature: Number(process.env.AI_TEMPERATURE || 0.2) };
+
 const callAnthropic = async ({ model, messages, httpClient }) => {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = credentialFor('ANTHROPIC_API_KEY');
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY is required for Anthropic Claude');
 
-  const baseUrl = process.env.ANTHROPIC_BASE_URL || PROVIDER_ENV.anthropic.defaultBaseUrl;
+  const baseUrl = credentialFor('ANTHROPIC_BASE_URL') || PROVIDER_ENV.anthropic.defaultBaseUrl;
   const system = messages.find((item) => item.role === 'system')?.content || '';
   const chatMessages = messages
     .filter((item) => item.role !== 'system')
@@ -285,7 +358,7 @@ const callAnthropic = async ({ model, messages, httpClient }) => {
     body: {
       model: model.model,
       max_tokens: Number(process.env.AI_MAX_TOKENS || 900),
-      temperature: Number(process.env.AI_TEMPERATURE || 0.2),
+      ...anthropicSamplingParams(model.model),
       system,
       messages: chatMessages,
     },
@@ -299,10 +372,10 @@ const callAnthropic = async ({ model, messages, httpClient }) => {
 };
 
 const callGoogle = async ({ model, messages, httpClient }) => {
-  const apiKey = process.env.GOOGLE_GEMINI_API_KEY;
+  const apiKey = credentialFor('GOOGLE_GEMINI_API_KEY');
   if (!apiKey) throw new Error('GOOGLE_GEMINI_API_KEY is required for Google Gemini');
 
-  const baseUrl = process.env.GOOGLE_GEMINI_BASE_URL || PROVIDER_ENV.google.defaultBaseUrl;
+  const baseUrl = credentialFor('GOOGLE_GEMINI_BASE_URL') || PROVIDER_ENV.google.defaultBaseUrl;
   const data = await postJson(
     httpClient,
     `${baseUrl.replace(/\/$/, '')}/models/${encodeURIComponent(model.model)}:generateContent`,
@@ -336,7 +409,7 @@ const callGoogle = async ({ model, messages, httpClient }) => {
 };
 
 const callOllama = async ({ model, messages, httpClient }) => {
-  const baseUrl = process.env.OLLAMA_BASE_URL || PROVIDER_ENV.ollama.defaultBaseUrl;
+  const baseUrl = credentialFor('OLLAMA_BASE_URL') || PROVIDER_ENV.ollama.defaultBaseUrl;
   let data;
   try {
     data = await postJson(httpClient, `${baseUrl.replace(/\/$/, '')}/api/chat`, {
@@ -363,13 +436,21 @@ const callOllama = async ({ model, messages, httpClient }) => {
   };
 };
 
-export const generateLlmSearchReply = async ({ modelId, message, students, hasImage, httpClient = fetch }) => {
+export const generateLlmSearchReply = async ({
+  modelId,
+  message,
+  students,
+  hasImage,
+  contextBlocks = '',
+  history = [],
+  httpClient = fetch,
+}) => {
   const model = resolveModelSelection(modelId);
   if (!model || model.provider === 'local_rules') {
     return null;
   }
 
-  const messages = createMessages({ message, students, hasImage });
+  const messages = createMessages({ message, students, hasImage, contextBlocks, history });
   const params = { model, messages, httpClient };
 
   let result;

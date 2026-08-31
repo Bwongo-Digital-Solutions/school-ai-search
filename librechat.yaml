@@ -1,0 +1,63 @@
+# LibreChat configuration for use alongside e-School.
+#
+# Only needed if you run the optional `librechat` compose profile:
+#
+#   docker compose --profile librechat up -d
+#
+# The point of this file is the mcpServers block: it connects LibreChat to this deployment's MCP
+# server, so LibreChat users can ask about students, fees, the curriculum and the gradebook and have
+# it answered from the school's real records.
+#
+# Before starting, issue a token. In the app's environment set, for example:
+#
+#   MCP_SERVER_TOKENS={"tok-admin":"admin","tok-teacher":"teacher"}
+#
+# then put the one LibreChat should use in SCHOOLBOT_MCP_TOKEN. The token decides which role
+# LibreChat acts as, and therefore which tools it can see — a teacher token cannot reach the fee
+# ledger. Treat tokens like passwords.
+
+version: 1.2.8
+cache: true
+
+mcpServers:
+  schoolbot:
+    type: streamable-http
+    # host.docker.internal reaches the app from inside the LibreChat container. Running LibreChat
+    # elsewhere? Use the app's public URL instead.
+    url: http://host.docker.internal:8787/api/mcp
+    headers:
+      Authorization: 'Bearer ${SCHOOLBOT_MCP_TOKEN}'
+    timeout: 30000
+    initTimeout: 10000
+
+interface:
+  modelSelect: true
+  parameters: true
+  sidePanel: true
+  presets: true
+  agents: true
+
+# LibreChat consumes AI providers; it does not expose one. Add whichever you already pay for — the
+# same keys the app itself uses will do. Anything listed here is available to LibreChat users
+# *alongside* the schoolbot tools above.
+endpoints:
+  custom:
+    - name: 'Anthropic'
+      apiKey: '${ANTHROPIC_API_KEY}'
+      baseURL: 'https://api.anthropic.com/v1'
+      models:
+        default: ['claude-opus-5', 'claude-sonnet-5']
+        fetch: false
+      titleConvo: true
+      titleModel: 'claude-sonnet-5'
+      modelDisplayLabel: 'Anthropic'
+
+    - name: 'OpenAI'
+      apiKey: '${OPENAI_API_KEY}'
+      baseURL: 'https://api.openai.com/v1'
+      models:
+        default: ['gpt-4o-mini']
+        fetch: true
+      titleConvo: true
+      titleModel: 'gpt-4o-mini'
+      modelDisplayLabel: 'OpenAI'

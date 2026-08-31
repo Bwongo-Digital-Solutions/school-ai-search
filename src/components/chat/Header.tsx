@@ -2,19 +2,36 @@ import React, { useState } from 'react';
 import {
   Menu, Download, Settings, HelpCircle,
   Moon, Sun, X, ChevronDown, LogOut, User, Shield, HardHat,
-  MessageSquare, Users, Clock, ClipboardList, UserCog, Wallet, Landmark
+  MessageSquare, Users, Clock, ClipboardList, UserCog, Wallet, Landmark,
+  ClipboardCheck, GraduationCap, NotebookPen, FileText, Loader2,
+  Mail, Printer, ArrowLeftRight, Inbox
 } from 'lucide-react';
+import { downloadFromUrl, printFromUrl } from '@/lib/download';
+import { callChatReport, teachingDocumentUrl } from '@/lib/teaching';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useAuth } from '@/contexts/AuthContext';
+import { useLive } from '@/contexts/LiveContext';
 import { getRoleLabel, getRoleShortLabel } from '@/lib/roles';
 import AuthModal from './AuthModal';
+import GlobalSearch from './GlobalSearch';
 
 const Header: React.FC = () => {
-  const { toggleSidebar, messages, activeView, setActiveView } = useChatContext();
-  const { user, isAuthenticated, isAdmin, isSupportStaff, signOut } = useAuth();
+  const { toggleSidebar, messages, activeView, setActiveView, currentConversationId } = useChatContext();
+  const { user, isAuthenticated, isAdmin, isTeacher, isSupportStaff, signOut } = useAuth();
+  // The badge is driven by the live channel, so it moves the moment a message arrives rather than
+  // on the next page load.
+  const { unread } = useLive();
+  const [buildingReport, setBuildingReport] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
+  const [showSendDialog, setShowSendDialog] = useState(false);
+  const [sendTo, setSendTo] = useState('');
+  const [sendNote, setSendNote] = useState('');
+  const [sending, setSending] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  // The two teaching tools share one nav entry: the bar already carries seven buttons, and adding
+  // them individually overflows on a laptop.
+  const [showTeachingMenu, setShowTeachingMenu] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [isDark, setIsDark] = useState(false);
 
@@ -53,6 +70,83 @@ const Header: React.FC = () => {
     a.click();
     URL.revokeObjectURL(url);
     setShowExportMenu(false);
+  };
+
+  /**
+   * Downloads the conversation as a branded PDF the school can file or hand over.
+   *
+   * Built server-side from the saved messages rather than from what is on screen, so it carries the
+   * sources and tools behind each answer — the things that make a printed answer checkable.
+   */
+  const handleReportDownload = async () => {
+    if (!currentConversationId) {
+      alert('Send a message first — there is no saved conversation to report on yet.');
+      setShowExportMenu(false);
+      return;
+    }
+
+    setBuildingReport(true);
+    try {
+      await downloadFromUrl(
+        teachingDocumentUrl(`/api/chat-reports/${currentConversationId}.pdf`, user),
+        `schoolbot-report-${new Date().toISOString().split('T')[0]}.pdf`,
+      );
+      setShowExportMenu(false);
+    } catch (err) {
+      alert(`Could not build the report: ${err instanceof Error ? err.message : 'Unexpected error'}`);
+    } finally {
+      setBuildingReport(false);
+    }
+  };
+
+  /** Same report, straight to the printer, without losing the conversation on screen. */
+  const handleReportPrint = async () => {
+    if (!currentConversationId) {
+      alert('Send a message first — there is no saved conversation to report on yet.');
+      setShowExportMenu(false);
+      return;
+    }
+
+    setBuildingReport(true);
+    try {
+      await printFromUrl(teachingDocumentUrl(`/api/chat-reports/${currentConversationId}.pdf`, user));
+      setShowExportMenu(false);
+    } catch (err) {
+      alert(`Could not print the report: ${err instanceof Error ? err.message : 'Unexpected error'}`);
+    } finally {
+      setBuildingReport(false);
+    }
+  };
+
+  const openSendDialog = () => {
+    if (!currentConversationId) {
+      alert('Send a message first — there is no saved conversation to report on yet.');
+      setShowExportMenu(false);
+      return;
+    }
+    // Prefilled with the signed-in user's own address: sending yourself a copy is the common case,
+    // and it means the field is never blank when someone just wants to file the report.
+    setSendTo(user?.auth_email || '');
+    setSendNote('');
+    setShowExportMenu(false);
+    setShowSendDialog(true);
+  };
+
+  const handleReportSend = async () => {
+    setSending(true);
+    try {
+      await callChatReport('send', {
+        conversationId: currentConversationId,
+        recipient: sendTo,
+        note: sendNote,
+      }, user);
+      setShowSendDialog(false);
+      alert(`Report sent to ${sendTo}.`);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Could not send the report.');
+    } finally {
+      setSending(false);
+    }
   };
 
   const toggleTheme = () => {
@@ -137,6 +231,62 @@ const Header: React.FC = () => {
                 <ClipboardList className="w-3.5 h-3.5" /> Records
               </button>
             )}
+            {!isSupportStaff && (
+              <div className="relative">
+                <button
+                  onClick={() => setShowTeachingMenu(prev => !prev)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                    activeView === 'lessons' || activeView === 'examiner'
+                      ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
+                      : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  <GraduationCap className="w-3.5 h-3.5" /> Teaching
+                  <ChevronDown className="w-3 h-3" />
+                </button>
+
+                {showTeachingMenu && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setShowTeachingMenu(false)} />
+                    <div className="absolute left-0 top-full mt-1 w-56 bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-100 dark:border-gray-700 py-1 z-50">
+                      <button
+                        onClick={() => { setActiveView('lessons'); setShowTeachingMenu(false); }}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                      >
+                        <NotebookPen className="w-3.5 h-3.5" /> Lesson Planner
+                      </button>
+                      <button
+                        onClick={() => { setActiveView('examiner'); setShowTeachingMenu(false); }}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                      >
+                        <ClipboardCheck className="w-3.5 h-3.5" /> Digital Examiner
+                      </button>
+                      <button
+                        onClick={() => { setActiveView('teaching'); setShowTeachingMenu(false); }}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                      >
+                        <GraduationCap className="w-3.5 h-3.5" /> Teacher Performance
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+            <button
+              onClick={() => setActiveView('messages')}
+              className={`relative flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                activeView === 'messages'
+                  ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              <Inbox className="w-3.5 h-3.5" /> Messages
+              {unread > 0 && (
+                <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-indigo-600 text-white text-[10px] font-semibold flex items-center justify-center">
+                  {unread > 99 ? '99+' : unread}
+                </span>
+              )}
+            </button>
             <button
               onClick={() => setActiveView('fees')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
@@ -173,6 +323,18 @@ const Header: React.FC = () => {
             )}
             {isAdmin && (
               <button
+                onClick={() => setActiveView('monitoring')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                  activeView === 'monitoring'
+                    ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <ArrowLeftRight className="w-3.5 h-3.5" /> Monitoring
+              </button>
+            )}
+            {isAdmin && (
+              <button
                 onClick={() => setActiveView('audit')}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
                   activeView === 'audit'
@@ -197,6 +359,8 @@ const Header: React.FC = () => {
 
         {/* Right */}
         <div className="flex items-center gap-1">
+          {isAuthenticated && <GlobalSearch />}
+
           {/* Export */}
           <div className="relative">
             <button
@@ -211,6 +375,28 @@ const Header: React.FC = () => {
                 <div className="fixed inset-0 z-40" onClick={() => setShowExportMenu(false)} />
                 <div className="absolute right-0 top-full mt-1 w-48 bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-100 dark:border-gray-700 py-1 z-50">
                   <p className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Export As</p>
+                  <button
+                    onClick={handleReportDownload}
+                    disabled={buildingReport}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
+                  >
+                    {buildingReport ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileText className="w-3.5 h-3.5 text-indigo-500" />}
+                    {buildingReport ? 'Building report…' : 'Printable Report (.pdf)'}
+                  </button>
+                  <button
+                    onClick={handleReportPrint}
+                    disabled={buildingReport}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
+                  >
+                    <Printer className="w-3.5 h-3.5 text-indigo-500" /> Print Report
+                  </button>
+                  <button
+                    onClick={openSendDialog}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                  >
+                    <Mail className="w-3.5 h-3.5 text-indigo-500" /> Email Report…
+                  </button>
+                  <div className="my-1 border-t border-gray-100 dark:border-gray-700" />
                   <button onClick={() => handleExport('txt')} className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">
                     <Download className="w-3.5 h-3.5" /> Text File (.txt)
                   </button>
@@ -358,6 +544,22 @@ const Header: React.FC = () => {
                           <ClipboardList className="w-3.5 h-3.5" /> Student Records
                         </button>
                       )}
+                      {!isSupportStaff && (
+                        <button
+                          onClick={() => { setActiveView('lessons'); setShowUserMenu(false); }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                        >
+                          <NotebookPen className="w-3.5 h-3.5" /> Lesson Planner
+                        </button>
+                      )}
+                      {!isSupportStaff && (
+                        <button
+                          onClick={() => { setActiveView('examiner'); setShowUserMenu(false); }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                        >
+                          <ClipboardCheck className="w-3.5 h-3.5" /> Digital Examiner
+                        </button>
+                      )}
                       <button
                         onClick={() => { setActiveView('fees'); setShowUserMenu(false); }}
                         className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
@@ -378,6 +580,22 @@ const Header: React.FC = () => {
                           className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
                         >
                           <UserCog className="w-3.5 h-3.5" /> Staff Access
+                        </button>
+                      )}
+                      {isAdmin && (
+                        <button
+                          onClick={() => { setActiveView('monitoring'); setShowUserMenu(false); }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                        >
+                          <ArrowLeftRight className="w-3.5 h-3.5" /> Monitoring
+                        </button>
+                      )}
+                      {(isAdmin || isTeacher) && (
+                        <button
+                          onClick={() => { setActiveView('teaching'); setShowUserMenu(false); }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                        >
+                          <GraduationCap className="w-3.5 h-3.5" /> Teacher Performance
                         </button>
                       )}
                       {isAdmin && (
@@ -421,6 +639,74 @@ const Header: React.FC = () => {
           </div>
         </div>
       </header>
+
+      {/* Email the report */}
+      {showSendDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-md rounded-xl bg-white dark:bg-gray-800 shadow-xl border border-gray-100 dark:border-gray-700">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 dark:border-gray-700">
+              <h3 className="text-sm font-semibold text-gray-800 dark:text-white flex items-center gap-2">
+                <Mail className="w-4 h-4 text-indigo-500" /> Email this report
+              </h3>
+              <button
+                onClick={() => setShowSendDialog(false)}
+                className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
+                aria-label="Close"
+              >
+                <X className="w-3.5 h-3.5 text-gray-400" />
+              </button>
+            </div>
+
+            <div className="px-4 py-4 space-y-3">
+              <label className="block">
+                <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Send to</span>
+                <input
+                  type="email"
+                  value={sendTo}
+                  onChange={event => setSendTo(event.target.value)}
+                  placeholder="name@school.ac.ug"
+                  className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                />
+              </label>
+
+              <label className="block">
+                <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">
+                  Message (optional)
+                </span>
+                <textarea
+                  value={sendNote}
+                  onChange={event => setSendNote(event.target.value)}
+                  rows={3}
+                  placeholder="A short note to go above the report…"
+                  className="w-full resize-none bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                />
+              </label>
+
+              <p className="text-[11px] text-gray-400">
+                The report is attached as a PDF, so the recipient does not need an account to read it. It
+                contains whatever student data was discussed — check the address before sending.
+              </p>
+            </div>
+
+            <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-100 dark:border-gray-700">
+              <button
+                onClick={() => setShowSendDialog(false)}
+                className="px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleReportSend}
+                disabled={sending || !sendTo.trim()}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 text-white text-sm font-medium hover:shadow-lg transition-all disabled:opacity-50"
+              >
+                {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
+                {sending ? 'Sending…' : 'Send report'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Auth Modal */}
       <AuthModal isOpen={showAuthModal} onClose={() => setShowAuthModal(false)} />

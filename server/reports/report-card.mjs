@@ -1,5 +1,5 @@
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
-import { gradeScore, resolveGradingScheme } from './grading-config.mjs';
+import { gradeScore, resolveGradingScheme, summariseResults } from './grading-config.mjs';
 
 const SCHOOL_NAME = process.env.SCHOOL_NAME || 'eSchool';
 const SCHOOL_TAGLINE = process.env.SCHOOL_TAGLINE || 'Academic Excellence and Character';
@@ -82,6 +82,8 @@ const buildSubjectResults = (student, term, academicYear, gradingScheme) => {
       score,
       grade: result.grade,
       remark: result.remark,
+      // Present only on scales that carry points (UNEB aggregates, GPAs); summariseResults uses it.
+      points: result.points,
     };
   });
 };
@@ -133,6 +135,7 @@ export const buildReportCardPdf = async ({
   academicYear,
   gradingCountry,
   academicLevel,
+  schoolLevel,
   reportTitle,
   schoolName,
   schoolTagline,
@@ -146,9 +149,13 @@ export const buildReportCardPdf = async ({
   reportNotes,
 }) => {
   const resolvedYear = formatAcademicYear(academicYear);
+  // The school's level (set once under Settings) picks the scale, and for a secondary school the
+  // student's own grade decides between the O-Level and A-Level scales. An explicit academicLevel
+  // still overrides, so a one-off report card can be graded on something else.
   const gradingScheme = resolveGradingScheme({
     country: gradingCountry,
     academicLevel,
+    schoolLevel,
     gradeLevel: student.grade_level,
   });
   const subjectResults = buildSubjectResults(student, term, resolvedYear, gradingScheme);
@@ -156,6 +163,9 @@ export const buildReportCardPdf = async ({
     subjectResults.reduce((total, result) => total + result.score, 0) / Math.max(subjectResults.length, 1);
   const generalComment = valueOrDefault(teacherComment, buildGeneralComment(student, averageScore));
   const overallGrade = gradeScore(Math.round(averageScore), gradingScheme).grade;
+  // The headline figure this system reports: a UNEB aggregate and division, principal points, or a
+  // GPA. Null for scales with no such concept, in which case the row is simply omitted.
+  const summary = summariseResults(subjectResults, gradingScheme);
   const resolvedSchoolName = valueOrDefault(schoolName, SCHOOL_NAME);
   const resolvedSchoolTagline = valueOrDefault(schoolTagline, SCHOOL_TAGLINE);
   const resolvedSchoolAddress = valueOrDefault(schoolAddress, SCHOOL_ADDRESS);
@@ -256,6 +266,10 @@ export const buildReportCardPdf = async ({
   drawText('Subject', { x: 60, y: y - 12, size: 10, bold: true });
   drawText('Score', { x: 315, y: y - 12, size: 10, bold: true });
   drawText('Grade', { x: 390, y: y - 12, size: 10, bold: true });
+  // Only shown for scales that award points, so a plain letter scale keeps its original layout.
+  if (subjectResults.some((result) => typeof result.points === 'number')) {
+    drawText('Pts', { x: 428, y: y - 12, size: 10, bold: true });
+  }
   drawText('Remark', { x: 455, y: y - 12, size: 10, bold: true });
 
   y -= 36;
@@ -270,6 +284,9 @@ export const buildReportCardPdf = async ({
     drawText(result.subject, { x: 60, y, size: 10 });
     drawText(String(result.score), { x: 320, y, size: 10 });
     drawText(result.grade, { x: 395, y, size: 10, bold: true });
+    if (typeof result.points === 'number') {
+      drawText(String(result.points), { x: 428, y, size: 10, color: MUTED });
+    }
     drawText(result.remark, { x: 455, y, size: 10 });
     y -= 24;
   }
@@ -277,6 +294,27 @@ export const buildReportCardPdf = async ({
   y -= 8;
   drawText(`Average Score: ${averageScore.toFixed(1)}`, { x: 50, y, size: 11, bold: true });
   drawText(`Overall Grade: ${overallGrade}`, { x: 315, y, size: 11, bold: true, color: theme });
+
+  if (summary) {
+    y -= 20;
+    drawText(`${summary.label}: ${summary.display}`, { x: 50, y, size: 11, bold: true });
+
+    if (summary.band) {
+      // "Division 1" already names itself, so prefixing it would read "Division: Division 1".
+      const label = summary.bandLabel || 'Result';
+      const bandText = summary.band.startsWith(label) ? summary.band : `${label}: ${summary.band}`;
+      drawText(bandText, { x: 315, y, size: 11, bold: true, color: theme });
+    } else if (summary.complete === false) {
+      // Saying "Division 1" off five subjects when the aggregate needs eight would be wrong, so the
+      // report says why the division is absent instead of printing a misleading one.
+      drawText(`Provisional — ${summary.subjectsCounted} subject(s) recorded`, {
+        x: 315,
+        y,
+        size: 9,
+        color: MUTED,
+      });
+    }
+  }
 
   y -= 34;
   drawText('Teacher Comment', { x: 50, y, size: 12, bold: true, color: theme });

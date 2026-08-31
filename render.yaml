@@ -1,0 +1,28 @@
+# Render Blueprint — one persistent Node web service (built from the Dockerfile) + managed Postgres.
+# Deploy: push this repo, then in Render choose "New → Blueprint" and pick this file.
+# The whole app (SPA + API) runs as one service; data is durable in the managed database.
+databases:
+  - name: eschool-db
+    databaseName: school_ai_search
+    user: schoolapp
+    plan: free # 90-day free tier; upgrade for production
+
+services:
+  - type: web
+    name: eschool
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL # Render injects the managed database's internal connection string
+        fromDatabase:
+          name: eschool-db
+          property: connectionString
+      - key: DATABASE_SSL # internal Render connections do not need SSL
+        value: "false"
+      - key: SCHOOL_NAME
+        value: eSchool
+      - key: SCHOOL_TAGLINE
+        value: Academic Excellence and Character
+      # Multi-tenant + provisioning (optional): set CONTROL_DATABASE_URL, PROVISION_ADMIN_DATABASE_URL,
+      # TENANT_DB_URL_TEMPLATE, SUBSCRIPTION_AMOUNT, PAYMENT_* and EMAIL_* here. See DEPLOYMENT.md.

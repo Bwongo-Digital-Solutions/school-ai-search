@@ -87,6 +87,7 @@ test('local backend supports auth, data queries, audit logging, and chat', async
     assert.equal(auditRead.body.data.logs[0].entity_name, 'Emma Johnson');
 
     const aiChat = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+      requesterRole: 'teacher',
       message: 'Who are the top 3 students by GPA?',
       conversationId: null,
       modelId: 'local-rules',
@@ -98,6 +99,7 @@ test('local backend supports auth, data queries, audit logging, and chat', async
     assert.equal(aiChat.body.data.model.id, 'local-rules');
 
     const partialStudentSearch = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+      requesterRole: 'teacher',
       message: 'tell me about Emma',
       conversationId: null,
       modelId: 'local-rules',
@@ -107,6 +109,7 @@ test('local backend supports auth, data queries, audit logging, and chat', async
     assert.equal(partialStudentSearch.body.data.studentsFound, 1);
 
     const studentIdSearch = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+      requesterRole: 'teacher',
       message: 'show STU 2026 001',
       conversationId: null,
       modelId: 'local-rules',
@@ -616,6 +619,8 @@ test('grading schemes resolve by country and academic level', () => {
   assert.deepEqual(gradeScore(88, ugandaSecondary), {
     grade: 'D2',
     remark: 'Very Good',
+    // UNEB grades carry an aggregate point value; scales without points omit the field entirely.
+    points: 2,
   });
 
   const nursery = resolveGradingScheme({
@@ -628,6 +633,7 @@ test('grading schemes resolve by country and academic level', () => {
   // and is a distinct system from the classic UNEB D1-F9 scale.
   const cbc = resolveGradingScheme({ country: 'uganda-cbc', academicLevel: 'secondary' });
   assert.equal(cbc.label, 'Uganda Competency-Based (Lower Secondary, UCE)');
+  // The competency-based scale awards no points, so gradeScore returns just the two fields.
   assert.deepEqual(gradeScore(84, cbc), { grade: 'A', remark: 'Outstanding' });
   assert.deepEqual(gradeScore(55, cbc), { grade: 'D', remark: 'Basic' });
   assert.equal(gradeScore(20, cbc).grade, 'E');
@@ -1086,6 +1092,7 @@ test('ai search can use a selected OpenAI-compatible model provider', async () =
 
   try {
     const result = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+      requesterRole: 'teacher',
       message: 'Tell me about Emma Johnson',
       conversationId: null,
       modelId: 'openai-default',
@@ -1141,6 +1148,7 @@ test('ai search can use a selected Ollama model provider', async () => {
 
   try {
     const result = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+      requesterRole: 'teacher',
       message: 'Tell me about Emma Johnson',
       conversationId: null,
       modelId: 'ollama-default',
@@ -1184,6 +1192,7 @@ test('ai search reports actionable Ollama connection errors', async () => {
 
   try {
     const result = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+      requesterRole: 'teacher',
       message: 'Tell me about Emma Johnson',
       conversationId: null,
       modelId: 'ollama-default',
@@ -1781,15 +1790,22 @@ test('fee receipts and statements render as PDFs for admins only', async () => {
     assert.equal(statement.type, 'binary');
     assert.ok(statement.body.length > 500);
 
-    // A support-staff browser must not be able to pull a full fee statement.
-    for (const role of ['support_staff', 'teacher']) {
-      const denied = await runtime.dispatch({
-        method: 'GET',
-        pathname: `/api/fees/statements/${invoice.student_id}.pdf`,
-        searchParams: new URLSearchParams({ requesterRole: role }),
-      });
-      assert.equal(denied.status, 403);
-    }
+    // A support-staff browser must not be able to pull a full fee statement. Teachers now can:
+    // one student's history is a read a teacher fielding "has this family paid?" legitimately
+    // needs, and it is a different thing from the school-wide financial report below.
+    const asTeacher = await runtime.dispatch({
+      method: 'GET',
+      pathname: `/api/fees/statements/${invoice.student_id}.pdf`,
+      searchParams: new URLSearchParams({ requesterRole: 'teacher' }),
+    });
+    assert.equal(asTeacher.status, 200);
+
+    const denied = await runtime.dispatch({
+      method: 'GET',
+      pathname: `/api/fees/statements/${invoice.student_id}.pdf`,
+      searchParams: new URLSearchParams({ requesterRole: 'support_staff' }),
+    });
+    assert.equal(denied.status, 403);
 
     const anonymous = await runtime.dispatch({
       method: 'GET',
@@ -2358,20 +2374,31 @@ test('tenant resolution maps subdomains to tenants and defaults safely', async (
   );
 
   // Subdomain routing.
-  assert.equal(resolveTenantId('kampala-high.eschool.app'), 'kampala-high');
-  assert.equal(resolveTenantId('Gulu-SS.eschool.app'), 'gulu-ss');
-  assert.equal(resolveTenantId('kampala-high.eschool.app:8787'), 'kampala-high');
+  assert.equal(resolveTenantId('kampala-high.eschool.ink'), 'kampala-high');
+  assert.equal(resolveTenantId('Gulu-SS.eschool.ink'), 'gulu-ss');
+  assert.equal(resolveTenantId('kampala-high.eschool.ink:8787'), 'kampala-high');
 
   // Apex, www, localhost and IPs fall back to the default tenant.
-  assert.equal(resolveTenantId('eschool.app'), DEFAULT_TENANT);
-  assert.equal(resolveTenantId('www.eschool.app'), DEFAULT_TENANT);
+  assert.equal(resolveTenantId('eschool.ink'), DEFAULT_TENANT);
+  assert.equal(resolveTenantId('www.eschool.ink'), DEFAULT_TENANT);
   assert.equal(resolveTenantId('localhost'), DEFAULT_TENANT);
   assert.equal(resolveTenantId('127.0.0.1:8787'), DEFAULT_TENANT);
   assert.equal(resolveTenantId(''), DEFAULT_TENANT);
   assert.equal(resolveTenantId(undefined), DEFAULT_TENANT);
 
-  // An explicit X-Tenant header wins over the host.
-  assert.equal(resolveTenantId('kampala-high.eschool.app', 'gulu-ss'), 'gulu-ss');
+  // The X-Tenant header is ignored unless it is explicitly enabled: it is a local-testing
+  // convenience, and honouring it in production would let any page on the internet name whichever
+  // school it wanted. The Host header cannot be forged cross-origin, so it is the one that decides.
+  assert.equal(resolveTenantId('kampala-high.eschool.ink', 'gulu-ss'), 'kampala-high');
+
+  const originalAllow = process.env.ALLOW_TENANT_HEADER;
+  process.env.ALLOW_TENANT_HEADER = 'true';
+  try {
+    assert.equal(resolveTenantId('kampala-high.eschool.ink', 'gulu-ss'), 'gulu-ss');
+  } finally {
+    if (originalAllow === undefined) delete process.env.ALLOW_TENANT_HEADER;
+    else process.env.ALLOW_TENANT_HEADER = originalAllow;
+  }
 
   // Registry parsing.
   assert.equal(parseTenantRegistry(undefined).size, 0);
@@ -2384,7 +2411,7 @@ test('tenant resolution maps subdomains to tenants and defaults safely', async (
   const singleTenant = createTenantRegistry({ registry: new Map() });
   assert.equal(singleTenant.enabled, false);
   const sentinel = { marker: 'default-db' };
-  assert.equal((await singleTenant.resolve('anything.eschool.app', undefined, sentinel)).database, sentinel);
+  assert.equal((await singleTenant.resolve('anything.eschool.ink', undefined, sentinel)).database, sentinel);
 });
 
 test('configured tenants get isolated databases', async () => {
@@ -2406,8 +2433,8 @@ test('configured tenants get isolated databases', async () => {
   try {
     assert.equal(tenants.enabled, true);
 
-    const a = await tenants.resolve('kampala-high.eschool.app', undefined, null);
-    const b = await tenants.resolve('gulu-ss.eschool.app', undefined, null);
+    const a = await tenants.resolve('kampala-high.eschool.ink', undefined, null);
+    const b = await tenants.resolve('gulu-ss.eschool.ink', undefined, null);
     assert.equal(a.tenantId, 'kampala-high');
     assert.equal(b.tenantId, 'gulu-ss');
     assert.notEqual(a.database, b.database);
@@ -2424,11 +2451,11 @@ test('configured tenants get isolated databases', async () => {
     assert.equal((await b.database.query('SELECT COUNT(*)::int AS n FROM students')).rows[0].n, 15);
 
     // The same tenant resolves to the same cached connection.
-    const aAgain = await tenants.resolve('kampala-high.eschool.app', undefined, null);
+    const aAgain = await tenants.resolve('kampala-high.eschool.ink', undefined, null);
     assert.equal(aAgain.database, a.database);
 
     // An unknown subdomain has no database, so the server would 404 it.
-    const unknown = await tenants.resolve('ghost-school.eschool.app', undefined, null);
+    const unknown = await tenants.resolve('ghost-school.eschool.ink', undefined, null);
     assert.equal(unknown.database, null);
     assert.equal(unknown.tenantId, 'ghost-school');
   } finally {
@@ -2470,7 +2497,12 @@ test('a school that pays is provisioned, served, and suspended when it lapses', 
   };
 
   const runtime = await createAppRuntime({ useInMemoryDatabase: true, useInMemoryControl: true, provisionOptions });
-  const P = (body) => runtime.dispatch({ method: 'POST', pathname: '/api/provision', body });
+  const P = (body, headers = {}) => runtime.dispatch({ method: 'POST', pathname: '/api/provision', body, headers });
+
+  // Platform actions carry the operator's own token rather than a role the browser claims.
+  const savedOwnerToken = process.env.PLATFORM_OWNER_TOKEN;
+  process.env.PLATFORM_OWNER_TOKEN = 'owner-token-for-tests-0123456789abcdef';
+  const owner = { authorization: `Bearer ${process.env.PLATFORM_OWNER_TOKEN}` };
 
   try {
     assert.equal(runtime.provisioningEnabled, true);
@@ -2497,7 +2529,7 @@ test('a school that pays is provisioned, served, and suspended when it lapses', 
     // Now taken; still pending (unpaid) so its subdomain is not yet served.
     assert.equal((await P({ action: 'availability', subdomain: 'kampala-high' })).body.data.available, false);
     assert.equal((await P({ action: 'status', subdomain: 'kampala-high' })).body.data.tenant.status, 'pending');
-    let route = await runtime.resolveDatabase('kampala-high.eschool.app', undefined);
+    let route = await runtime.resolveDatabase('kampala-high.eschool.ink', undefined);
     assert.equal(route.status, 'pending');
     assert.equal(route.database, null);
 
@@ -2513,7 +2545,7 @@ test('a school that pays is provisioned, served, and suspended when it lapses', 
     assert.ok(tenantRow.db_name.includes('kampala'), 'db_name is derived from the subdomain');
 
     // Its subdomain now routes to a real (isolated) database.
-    route = await runtime.resolveDatabase('kampala-high.eschool.app', undefined);
+    route = await runtime.resolveDatabase('kampala-high.eschool.ink', undefined);
     assert.equal(route.status, 'active');
     assert.ok(route.database);
     assert.equal((await route.database.query('SELECT COUNT(*)::int AS n FROM students')).rows[0].n, 15);
@@ -2522,22 +2554,38 @@ test('a school that pays is provisioned, served, and suspended when it lapses', 
     assert.equal((await P({ action: 'callback', externalReference: reference, status: 'successful' })).body.data.alreadyProcessed, true);
 
     // An unknown subdomain has no database (server 404s it).
-    const ghost = await runtime.resolveDatabase('ghost.eschool.app', undefined);
+    const ghost = await runtime.resolveDatabase('ghost.eschool.ink', undefined);
     assert.equal(ghost.database, null);
     assert.equal(ghost.status, 'unknown');
 
     // Lapse the subscription and sweep: the school is suspended and its subdomain stops serving.
     await runtime.control.query("UPDATE tenants SET current_period_end = NOW() - INTERVAL '400 days', status = 'past_due' WHERE subdomain = 'kampala-high'");
-    const swept = await P({ action: 'sweep', requesterRole: 'admin' });
+    const swept = await P({ action: 'sweep' }, owner);
     assert.equal(swept.body.data.suspended, 1);
-    const suspended = await runtime.resolveDatabase('kampala-high.eschool.app', undefined);
+    const suspended = await runtime.resolveDatabase('kampala-high.eschool.ink', undefined);
     assert.equal(suspended.status, 'suspended');
     assert.equal(suspended.database, null);
 
-    // list/sweep are admin-only.
-    assert.equal((await P({ action: 'list', requesterRole: 'teacher' })).body.error, 'Unauthorized');
-    assert.equal((await P({ action: 'sweep', requesterRole: 'teacher' })).body.error, 'Unauthorized');
-    assert.equal((await P({ action: 'list', requesterRole: 'admin' })).body.data.tenants.length, 1);
+    // Platform actions need the operator's token. A school's own administrator claiming the role in
+    // the request body used to be enough to enumerate every school on the platform.
+    assert.equal((await P({ action: 'list', requesterRole: 'admin' })).body.error, 'Unauthorized');
+    assert.equal((await P({ action: 'sweep', requesterRole: 'admin' })).body.error, 'Unauthorized');
+    assert.equal((await P({ action: 'list' }, { authorization: 'Bearer wrong-token-entirely-0123456789' })).body.error, 'Unauthorized');
+
+    const listed = await P({ action: 'list' }, owner);
+    assert.equal(listed.body.data.tenants.length, 1);
+    // A school's connection string is never handed out, not even to the operator's console.
+    assert.equal(listed.body.data.tenants[0].db_url, undefined, 'db_url must never leave the control plane');
+    assert.equal(listed.body.data.tenants[0].db_name, undefined);
+
+    // The operator can also provision directly and set a status by hand.
+    const created = await P({ action: 'create', subdomain: 'gulu-ss', schoolName: 'Gulu SS' }, owner);
+    assert.equal(created.body.data.tenant.subdomain, 'gulu-ss');
+    assert.equal(created.body.data.tenant.status, 'active');
+    assert.equal(created.body.data.tenant.db_url, undefined);
+    assert.equal((await P({ action: 'set_status', subdomain: 'gulu-ss', status: 'suspended' }, owner)).body.data.tenant.status, 'suspended');
+    assert.match((await P({ action: 'set_status', subdomain: 'gulu-ss', status: 'nonsense' }, owner)).body.error, /Unsupported tenant status/);
+    assert.equal((await P({ action: 'create', subdomain: 'gulu-ss' })).body.error, 'Unauthorized');
 
     // Renewal reactivates the suspended school.
     const renew = await P({ action: 'signup', subdomain: 'kampala-high', provider: 'mtn_momo', phoneNumber: '+256700000000' });
@@ -2545,6 +2593,8 @@ test('a school that pays is provisioned, served, and suspended when it lapses', 
     assert.equal((await P({ action: 'status', subdomain: 'kampala-high' })).body.data.tenant.status, 'active');
   } finally {
     await runtime.close();
+    if (savedOwnerToken === undefined) delete process.env.PLATFORM_OWNER_TOKEN;
+    else process.env.PLATFORM_OWNER_TOKEN = savedOwnerToken;
     process.env.SUBSCRIPTION_AMOUNT = saved.amount;
     process.env.TENANT_DB_URL_TEMPLATE = saved.template;
     process.env.PAYMENT_GATEWAY_MODE = saved.mode;
@@ -2603,10 +2653,10 @@ test('a "your school is ready" email is sent when a school is activated', async 
   const { initializeDatabase } = await import('../server/db/schema.mjs');
 
   // Pure render.
-  const message = email.renderActivationEmail({ schoolName: 'Kampala High', subdomain: 'kampala-high', rootDomain: 'eschool.app' });
+  const message = email.renderActivationEmail({ schoolName: 'Kampala High', subdomain: 'kampala-high', rootDomain: 'eschool.ink' });
   assert.match(message.subject, /Kampala High is ready/);
-  assert.equal(message.url, 'https://kampala-high.eschool.app');
-  assert.match(message.html, /kampala-high\.eschool\.app/);
+  assert.equal(message.url, 'https://kampala-high.eschool.ink');
+  assert.match(message.html, /kampala-high\.eschool\.ink/);
 
   const saved = { mode: process.env.EMAIL_MODE, key: process.env.EMAIL_API_KEY, amount: process.env.SUBSCRIPTION_AMOUNT, template: process.env.TENANT_DB_URL_TEMPLATE };
   process.env.EMAIL_MODE = 'http';
@@ -2736,12 +2786,16 @@ test('attendance is unique per student per day', async () => {
     const first = await mark({ student_id: 'student-001', attendance_date: '2026-05-01', status: 'present', marked_by: 'T' });
     assert.equal(first.status, 200);
 
-    // A second record for the same student and date is rejected by the unique index (the write
-    // path in the UI upserts instead; this constraint is the safety net that stops duplicates).
-    await assert.rejects(
-      () => mark({ student_id: 'student-001', attendance_date: '2026-05-01', status: 'late', marked_by: 'T' }),
-      /duplicate key|unique/i,
-    );
+    // A second record for the same student and date updates the first rather than being rejected:
+    // attendance_records declares a natural key, so the insert upserts on it. Marking a student
+    // again is an ordinary correction, so making the caller handle an error for it was the wrong
+    // contract — what matters is that a second row never appears.
+    const corrected = await mark({
+      student_id: 'student-001', attendance_date: '2026-05-01', status: 'late', marked_by: 'T',
+    });
+    assert.equal(corrected.status, 200);
+    assert.equal(corrected.body.data.id, first.body.data.id);
+    assert.equal(corrected.body.data.status, 'late');
 
     // A different date is fine, and only one record exists for the first date.
     const nextDay = await mark({ student_id: 'student-001', attendance_date: '2026-05-02', status: 'present', marked_by: 'T' });
@@ -2751,6 +2805,5085 @@ test('attendance is unique per student per day', async () => {
       filters: [{ field: 'student_id', operator: 'eq', value: 'student-001' }],
     });
     assert.equal(rows.body.data.length, 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a scan card carries only the sections the staff profile grants', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const card = (role, designation) => dispatch(runtime, 'POST', '/api/functions/student-card', {
+    code: 'STU-2026-001', role, designation,
+  });
+
+  try {
+    const bursar = await card('admin', 'bursar');
+    assert.equal(bursar.status, 200);
+    assert.equal(bursar.body.data.profile.label, 'Bursar');
+    // 'payments' is the ledger behind the balance — the bursar answering "has this family paid?"
+    // needs it, and it arrived with the payment-history work.
+    assert.deepEqual(bursar.body.data.sections,
+      ['fees', 'payments', 'bio', 'class', 'dormitory', 'parents', 'gate_permission', 'exam_clearance_grant']);
+
+    // The gate needs to know who the student is and whether they may leave — nothing else.
+    const askari = await card('support_staff', 'askari');
+    assert.deepEqual(askari.body.data.sections, ['class', 'gate_pass']);
+    assert.equal('fees' in askari.body.data, false);
+    assert.equal('parents' in askari.body.data, false);
+    assert.equal('bio' in askari.body.data, false);
+
+    // The kitchen sees the meal card and no personal record at all.
+    const cook = await card('support_staff', 'cook');
+    assert.deepEqual(cook.body.data.sections, ['class', 'meal_card']);
+    assert.equal('fees' in cook.body.data, false);
+    assert.equal(cook.body.data.meal_card.meals.length, 3);
+
+    const matron = await card('support_staff', 'matron');
+    assert.deepEqual(matron.body.data.sections,
+      ['bio', 'class', 'dormitory', 'parents', 'gate_permission']);
+    assert.equal('fees' in matron.body.data, false);
+
+    // Support staff with no designation keep the fees-only card they had before designations.
+    const plain = await card('support_staff', null);
+    assert.deepEqual(plain.body.data.sections, ['fees']);
+
+    // An unknown designation falls back to the role rather than granting anything extra.
+    const bogus = await card('support_staff', 'headmaster');
+    assert.deepEqual(bogus.body.data.sections, ['fees']);
+
+    const missing = await card('teacher', null);
+    assert.equal(missing.status, 200);
+    const unknown = await dispatch(runtime, 'POST', '/api/functions/student-card', {
+      code: 'NOT-A-STUDENT', role: 'teacher',
+    });
+    assert.equal(unknown.status, 404);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the fees position and exam clearance are reported separately', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const clearance = async (code) => {
+    const res = await dispatch(runtime, 'POST', '/api/functions/student-card', { code, role: 'teacher' });
+    return res.body.data.exam_clearance;
+  };
+
+  try {
+    // Nothing invoiced, so the ledger has no objection — but clearance is a decision a member of
+    // staff makes, and nobody has made it, so the invigilator is not told to let the student in.
+    const unbilled = await clearance('STU-2026-001');
+    assert.equal(unbilled.fees_settled, true);
+    assert.equal(unbilled.cleared, false);
+
+    await dispatch(runtime, 'POST', '/api/db', {
+      table: 'invoices', operation: 'insert', columns: '*', single: true,
+      payload: {
+        id: 'inv-exam-1', student_id: 'student-001', invoice_number: 'INV-EXAM-1',
+        status: 'partial', total_amount: 900000, balance_due: 400000, currency: 'UGX',
+      },
+    });
+
+    const owing = await clearance('STU-2026-001');
+    assert.equal(owing.fees_settled, false);
+    assert.equal(owing.balance_due, 400000);
+    assert.equal(owing.cleared, false);
+
+    // A bursar may clear a student the ledger would still hold back — a hardship case, a
+    // promise to pay — so the grant wins over the balance.
+    await dispatch(runtime, 'POST', '/api/functions/exam-clearance', {
+      action: 'grant', code: 'STU-2026-001', grantedBy: 'Bursar', note: 'Hardship case',
+    });
+
+    const granted = await clearance('STU-2026-001');
+    assert.equal(granted.cleared, true);
+    assert.equal(granted.fees_settled, false, 'the balance is still owed and still reported');
+    assert.equal(granted.reason, 'Cleared by Bursar');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('gate passes track whether a student is on the premises', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const pass = (payload) => dispatch(runtime, 'POST', '/api/functions/gate-pass', payload);
+  const onPremises = async () => {
+    const res = await dispatch(runtime, 'POST', '/api/functions/student-card', {
+      code: 'STU-2026-001', role: 'support_staff', designation: 'askari',
+    });
+    return res.body.data.gate_pass.on_premises;
+  };
+
+  try {
+    // A student nobody has signed out is on the premises.
+    assert.equal(await onPremises(), true);
+
+    const missingAuthoriser = await pass({ code: 'STU-2026-001', direction: 'out' });
+    assert.equal(missingAuthoriser.status, 400);
+
+    const badDirection = await pass({ code: 'STU-2026-001', direction: 'sideways', authorisedBy: 'Matron' });
+    assert.equal(badDirection.status, 400);
+
+    const out = await pass({
+      code: 'STU-2026-001', direction: 'out', authorisedBy: 'Matron', reason: 'Clinic', recordedBy: 'Askari',
+    });
+    assert.equal(out.status, 200);
+    assert.equal(out.body.data.pass.authorised_by, 'Matron');
+    assert.equal(await onPremises(), false);
+
+    await pass({ code: 'STU-2026-001', direction: 'in', authorisedBy: 'Matron', recordedBy: 'Askari' });
+    assert.equal(await onPremises(), true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a meal is served once per student per day', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const serve = (meal) => dispatch(runtime, 'POST', '/api/functions/meal-record', {
+    code: 'STU-2026-001', meal, servedBy: 'Cook',
+  });
+  const mealCard = async () => {
+    const res = await dispatch(runtime, 'POST', '/api/functions/student-card', {
+      code: 'STU-2026-001', role: 'support_staff', designation: 'cook',
+    });
+    return res.body.data.meal_card;
+  };
+
+  try {
+    const before = await mealCard();
+    assert.deepEqual(before.meals.map((m) => m.eaten), [false, false, false]);
+
+    assert.equal((await serve('brunch')).status, 400);
+
+    const first = await serve('lunch');
+    assert.equal(first.status, 200);
+    assert.equal(first.body.data.already_served, false);
+
+    // Re-scanning a student who has eaten reports the original serving rather than a new one.
+    const again = await serve('lunch');
+    assert.equal(again.status, 200);
+    assert.equal(again.body.data.already_served, true);
+
+    const after = await mealCard();
+    assert.deepEqual(
+      after.meals.map((m) => [m.meal, m.eaten]),
+      [['breakfast', false], ['lunch', true], ['supper', false]],
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('designations are constrained to the role that owns them', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const auth = (payload) => dispatch(runtime, 'POST', '/api/functions/auth', payload);
+
+  try {
+    await auth({ action: 'signup', email: 'head@school.local', password: 'password123', displayName: 'Head' });
+    await auth({ action: 'signup', email: 'cook@school.local', password: 'password123', displayName: 'Cook' });
+    await runtime.database.query(
+      "UPDATE users SET role = 'support_staff', approval_status = 'approved' WHERE auth_email = 'cook@school.local'",
+    );
+
+    const ok = await auth({ action: 'set_designation', email: 'cook@school.local', designation: 'cook' });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.data.user.designation, 'cook');
+
+    // A bursar keeps the books, so it belongs to an admin and not to support staff.
+    const wrongRole = await auth({ action: 'set_designation', email: 'cook@school.local', designation: 'bursar' });
+    assert.equal(wrongRole.status, 400);
+
+    // The designation reaches the app through the ordinary sign-in payload.
+    const signin = await auth({ action: 'signin', email: 'cook@school.local', password: 'password123' });
+    assert.equal(signin.body.data.user.designation, 'cook');
+
+    const cleared = await auth({ action: 'set_designation', email: 'cook@school.local', designation: '' });
+    assert.equal(cleared.body.data.user.designation, null);
+  } finally {
+    await cleanup();
+  }
+});
+
+const curriculumCall = (runtime, action, body = {}) =>
+  dispatch(runtime, 'POST', '/api/functions/curriculum', {
+    action,
+    requesterRole: 'teacher',
+    actorEmail: 'teacher@school.ug',
+    actorName: 'Grace Teacher',
+    ...body,
+  });
+
+test('the curriculum corpus seeds Uganda and IGCSE outlines and ranks them by relevance', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const listed = await curriculumCall(runtime, 'list_documents');
+    assert.equal(listed.status, 200);
+
+    const titles = listed.body.data.documents.map((document) => document.title);
+    assert.ok(
+      titles.some((title) => /Uganda Lower Secondary Biology/.test(title)),
+      'expected the bundled Uganda Biology outline',
+    );
+    assert.ok(
+      titles.some((title) => /Cambridge IGCSE Biology/.test(title)),
+      'expected the bundled IGCSE Biology outline',
+    );
+    assert.ok(listed.body.data.documents.every((document) => document.source_type === 'seed'));
+    assert.ok(
+      listed.body.data.documents.every((document) => document.chunk_count > 0),
+      'every seeded document should have produced chunks',
+    );
+
+    // Seeding must not embed: that would be an API call per chunk on every fresh database.
+    assert.ok(
+      listed.body.data.documents.every((document) => document.embedded_count === 0),
+      'seeded chunks should carry no embeddings',
+    );
+
+    const search = await curriculumCall(runtime, 'search', {
+      query: 'photosynthesis limiting factors',
+      subject: 'Biology',
+      limit: 3,
+    });
+    assert.equal(search.status, 200);
+
+    const citations = search.body.data.citations;
+    assert.ok(citations.length > 0, 'keyword retrieval should work with no embedding provider');
+    assert.match(citations[0].content, /photosynthesis/i);
+    // Numbering is what the model cites with and what the UI renders; they must agree.
+    assert.deepEqual(
+      citations.map((citation) => citation.citationIndex),
+      citations.map((_, index) => index + 1),
+    );
+
+    // The metadata filter must actually exclude other curricula.
+    const ugandaOnly = await curriculumCall(runtime, 'search', {
+      query: 'photosynthesis',
+      curriculum: 'uganda-cbc-lower-secondary',
+    });
+    assert.ok(ugandaOnly.body.data.citations.length > 0);
+    assert.ok(
+      ugandaOnly.body.data.citations.every((citation) => citation.curriculum === 'uganda-cbc-lower-secondary'),
+      'a curriculum filter must not leak passages from another framework',
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('teachers can upload syllabus documents, and re-uploading the same text does not duplicate it', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const content = [
+      '# Simultaneous Equations',
+      '',
+      'Learners solve two linear equations by substitution, elimination and graphical methods.',
+      'Word problems drawn from market pricing and transport fares.',
+      '',
+      '# Matrices',
+      '',
+      'Order of a matrix, addition, multiplication, determinant and inverse of a two by two matrix.',
+    ].join('\n');
+
+    const upload = await curriculumCall(runtime, 'upload_document', {
+      title: 'S3 Mathematics Scheme of Work — Term 2',
+      content,
+      curriculum: 'uganda-cbc-lower-secondary',
+      subject: 'Mathematics',
+      gradeLevel: 10,
+    });
+    assert.equal(upload.status, 200);
+    assert.equal(upload.body.data.document.chunkCount, 2);
+    assert.equal(upload.body.data.document.unchanged, false);
+    // No embedding provider is configured in tests, so ingestion stays lexical.
+    assert.equal(upload.body.data.document.embedded, false);
+
+    const found = await curriculumCall(runtime, 'search', {
+      query: 'determinant and inverse of a matrix',
+      subject: 'Mathematics',
+    });
+    assert.match(found.body.data.citations[0].title, /S3 Mathematics Scheme of Work/);
+
+    const again = await curriculumCall(runtime, 'upload_document', {
+      title: 'S3 Mathematics Scheme of Work — Term 2',
+      content,
+      curriculum: 'uganda-cbc-lower-secondary',
+      subject: 'Mathematics',
+      gradeLevel: 10,
+    });
+    assert.equal(again.body.data.document.unchanged, true, 're-uploading identical text should be a no-op');
+
+    const chunkCount = await countRows(runtime, 'curriculum_chunks');
+    const reupload = await curriculumCall(runtime, 'upload_document', {
+      title: 'S3 Mathematics Scheme of Work — Term 2',
+      content: `${content}\n\n# Vectors\n\nMagnitude and direction of a vector in two dimensions.`,
+      curriculum: 'uganda-cbc-lower-secondary',
+      subject: 'Mathematics',
+      gradeLevel: 10,
+    });
+    assert.equal(reupload.body.data.document.chunkCount, 3);
+    assert.equal(
+      await countRows(runtime, 'curriculum_chunks'),
+      chunkCount + 1,
+      'a corrected re-upload should replace the old chunks, not add to them',
+    );
+
+    const blankTitle = await curriculumCall(runtime, 'upload_document', { title: '', content });
+    assert.equal(blankTitle.status, 400);
+    assert.equal(blankTitle.body.error, 'A document title is required');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the curriculum library is closed to non-teaching staff, and seeded outlines to non-admins', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const { CURRICULUM_ACTIONS } = await import('../server/services/curriculum.mjs');
+
+    for (const action of CURRICULUM_ACTIONS) {
+      for (const requesterRole of ['support_staff', undefined]) {
+        const response = await dispatch(runtime, 'POST', '/api/functions/curriculum', {
+          action,
+          requesterRole,
+          title: 'Smuggled syllabus',
+          content: 'Should never be indexed.',
+          query: 'anything',
+        });
+        assert.equal(response.status, 403, `${action} as ${requesterRole} should be refused`);
+        assert.equal(response.body.error, 'Unauthorized');
+      }
+    }
+
+    assert.ok(
+      !(await curriculumCall(runtime, 'search', { query: 'Smuggled syllabus' })).body.data.citations.some(
+        (citation) => /Smuggled/.test(citation.title),
+      ),
+      'nothing should have been written past the guard',
+    );
+
+    const seeded = await curriculumCall(runtime, 'list_documents');
+    const seedDocument = seeded.body.data.documents[0];
+
+    const teacherDelete = await curriculumCall(runtime, 'delete_document', { documentId: seedDocument.id });
+    assert.equal(teacherDelete.status, 400);
+    assert.match(teacherDelete.body.error, /Only an administrator/);
+
+    const adminDelete = await curriculumCall(runtime, 'delete_document', {
+      documentId: seedDocument.id,
+      requesterRole: 'admin',
+    });
+    assert.equal(adminDelete.status, 200);
+    assert.equal(adminDelete.body.data.deleted.id, seedDocument.id);
+  } finally {
+    await cleanup();
+  }
+});
+
+// A provider mock that replays a scripted sequence of Anthropic Messages API responses, recording
+// what was sent. Enough to drive the agent loop without a network.
+const createClaudeStub = (turns) => {
+  const sent = [];
+  let index = 0;
+
+  const httpClient = async (url, options) => {
+    sent.push({ url, body: JSON.parse(options.body) });
+    const turn = turns[Math.min(index, turns.length - 1)];
+    index += 1;
+    return new Response(
+      JSON.stringify({
+        id: `msg_${index}`,
+        stop_reason: turn.toolUses?.length ? 'tool_use' : 'end_turn',
+        usage: { input_tokens: 10, output_tokens: 5 },
+        content: [
+          ...(turn.text ? [{ type: 'text', text: turn.text }] : []),
+          ...(turn.toolUses || []).map((use, position) => ({
+            type: 'tool_use',
+            id: `tu_${index}_${position}`,
+            name: use.name,
+            input: use.input,
+          })),
+        ],
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  };
+
+  return { httpClient, sent };
+};
+
+const withAnthropicKey = async (run) => {
+  const original = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = 'test-anthropic-key';
+  try {
+    return await run();
+  } finally {
+    if (original === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = original;
+  }
+};
+
+test('the agent loop runs a tool, feeds the result back, and reports every step', async () => {
+  await withAnthropicKey(async () => {
+    const { httpClient, sent } = createClaudeStub([
+      { text: 'Let me check the syllabus.', toolUses: [{ name: 'search_curriculum', input: { query: 'photosynthesis', subject: 'Biology' } }] },
+      { text: 'Photosynthesis sits under Plant Nutrition [1].' },
+    ]);
+
+    const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+    try {
+      const { buildToolRegistry } = await import('../server/agent/tools.mjs');
+      const { runAgent, createAgentContext } = await import('../server/agent/loop.mjs');
+      const { resolveModelSelection } = await import('../server/services/llm-models.mjs');
+
+      const context = createAgentContext({ database: runtime.database, httpClient, requesterRole: 'teacher' });
+      const result = await runAgent({
+        model: resolveModelSelection('anthropic-default'),
+        system: 'You are SchoolBot.',
+        messages: [{ role: 'user', content: 'What does the syllabus say about photosynthesis?' }],
+        registry: buildToolRegistry({ requesterRole: 'teacher' }),
+        context,
+        httpClient,
+      });
+
+      assert.equal(result.message, 'Photosynthesis sits under Plant Nutrition [1].');
+      assert.equal(result.stoppedAtStepLimit, false);
+      assert.equal(result.steps.length, 1);
+      assert.equal(result.steps[0].tool, 'search_curriculum');
+      assert.equal(result.steps[0].isError, false);
+      assert.match(result.steps[0].output, /photosynthesis/i);
+
+      // Retrieval accumulated citations on the shared context, so what the model saw is what gets
+      // persisted and rendered.
+      assert.ok(result.citations.length > 0);
+      assert.equal(result.citations[0].citationIndex, 1);
+
+      // Usage is summed across both turns, not overwritten by the last one.
+      assert.equal(result.usage.input_tokens, 20);
+      assert.equal(result.usage.output_tokens, 10);
+
+      assert.equal(sent.length, 2);
+      // claude-opus-5 rejects sampling parameters outright, so temperature must not be sent.
+      assert.equal('temperature' in sent[0].body, false);
+      assert.ok(sent[0].body.tools.some((tool) => tool.name === 'search_curriculum'));
+
+      // The assistant turn is replayed verbatim (which is what keeps thinking blocks intact) and
+      // every tool_result arrives in a single user message.
+      const followUp = sent[1].body.messages;
+      assert.deepEqual(followUp.map((message) => message.role), ['user', 'assistant', 'user']);
+      assert.deepEqual(followUp[1].content.map((block) => block.type), ['text', 'tool_use']);
+      assert.equal(followUp[2].content.length, 1);
+      assert.equal(followUp[2].content[0].type, 'tool_result');
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+test('the agent loop is bounded, and a failing tool is reported back rather than aborting the turn', async () => {
+  await withAnthropicKey(async () => {
+    // Always asks for a tool, and asks for one that does not exist.
+    const { httpClient } = createClaudeStub([
+      { text: 'Working.', toolUses: [{ name: 'drop_all_tables', input: {} }] },
+    ]);
+
+    const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+    try {
+      const { buildToolRegistry } = await import('../server/agent/tools.mjs');
+      const { runAgent, createAgentContext } = await import('../server/agent/loop.mjs');
+      const { resolveModelSelection } = await import('../server/services/llm-models.mjs');
+
+      const context = createAgentContext({ database: runtime.database, httpClient, requesterRole: 'teacher' });
+      const result = await runAgent({
+        model: resolveModelSelection('anthropic-default'),
+        system: 'You are SchoolBot.',
+        messages: [{ role: 'user', content: 'Go wild.' }],
+        registry: buildToolRegistry({ requesterRole: 'teacher' }),
+        context,
+        httpClient,
+        maxSteps: 3,
+      });
+
+      assert.equal(result.stoppedAtStepLimit, true);
+      assert.equal(result.steps.length, 3, 'the loop must stop at maxSteps');
+      assert.ok(result.steps.every((step) => step.isError), 'an unknown tool is an error step');
+      assert.match(result.steps[0].output, /Unknown tool: drop_all_tables/);
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+test('the tool registry hides tools a role may not use', async () => {
+  const { buildToolRegistry } = await import('../server/agent/tools.mjs');
+
+  const teacher = buildToolRegistry({ requesterRole: 'teacher' });
+  assert.ok(teacher.names.includes('search_students'));
+  assert.ok(teacher.names.includes('search_curriculum'));
+
+  const supportStaff = buildToolRegistry({ requesterRole: 'support_staff' });
+  assert.deepEqual(supportStaff.names, [], 'non-teaching staff get no tools at all');
+  assert.deepEqual(supportStaff.definitions, []);
+
+  // Definitions are what the model is shown; handlers and role metadata must not leak into them.
+  for (const definition of teacher.definitions) {
+    assert.deepEqual(Object.keys(definition).sort(), ['description', 'input_schema', 'name']);
+  }
+});
+
+test('the MCP client handshakes, lists tools, and calls one through the agent registry', async () => {
+  const requests = [];
+  const httpClient = async (url, options) => {
+    const body = JSON.parse(options.body);
+    requests.push({ url, method: body.method, headers: options.headers });
+
+    const respond = (result) =>
+      new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'Mcp-Session-Id': 'session-123' },
+      });
+
+    if (body.method === 'initialize') {
+      return respond({ protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'ncdc-syllabus', version: '0.1.0' } });
+    }
+    if (body.method === 'notifications/initialized') {
+      return new Response('', { status: 202 });
+    }
+    if (body.method === 'tools/list') {
+      return respond({
+        tools: [
+          {
+            name: 'lookup_topic',
+            description: 'Look up an NCDC topic.',
+            inputSchema: { type: 'object', properties: { topic: { type: 'string' } }, required: ['topic'] },
+          },
+        ],
+      });
+    }
+    if (body.method === 'tools/call') {
+      assert.equal(body.params.name, 'lookup_topic', 'the remote name is sent, not the namespaced one');
+      assert.deepEqual(body.params.arguments, { topic: 'Osmosis' });
+      return respond({ content: [{ type: 'text', text: 'Osmosis is covered in S2 Biology, Term 1.' }] });
+    }
+    throw new Error(`Unexpected MCP method: ${body.method}`);
+  };
+
+  const { loadMcpTools } = await import('../server/agent/mcp-client.mjs');
+  const { tools, errors } = await loadMcpTools({
+    servers: [{ id: 'srv-1', name: 'ncdc-syllabus', url: 'https://mcp.example.test/rpc', auth_token: 'secret-token' }],
+    httpClient,
+  });
+
+  assert.deepEqual(errors, []);
+  assert.equal(tools.length, 1);
+  // Namespacing is what stops a remote tool shadowing a built-in one.
+  assert.equal(tools[0].name, 'mcp__ncdc-syllabus__lookup_topic');
+  assert.equal(tools[0].source, 'mcp');
+  assert.equal(tools[0].serverId, 'srv-1');
+
+  assert.deepEqual(requests.map((request) => request.method), ['initialize', 'notifications/initialized', 'tools/list']);
+  assert.equal(requests[0].headers.Authorization, 'Bearer secret-token');
+  // The session the server assigned on initialize is echoed on every later call.
+  assert.equal(requests[2].headers['Mcp-Session-Id'], 'session-123');
+
+  const { buildToolRegistry } = await import('../server/agent/tools.mjs');
+  const registry = buildToolRegistry({ requesterRole: 'teacher', extraTools: tools });
+  assert.ok(registry.names.includes('mcp__ncdc-syllabus__lookup_topic'));
+
+  const output = await registry.get('mcp__ncdc-syllabus__lookup_topic').handler({ topic: 'Osmosis' });
+  assert.equal(output, 'Osmosis is covered in S2 Biology, Term 1.');
+});
+
+test('one unreachable MCP server does not take down the others', async () => {
+  const httpClient = async (url, options) => {
+    if (url.includes('broken')) throw new Error('ECONNREFUSED');
+    const body = JSON.parse(options.body);
+    const result =
+      body.method === 'initialize'
+        ? { serverInfo: { name: 'working' } }
+        : { tools: [{ name: 'ping', description: 'Ping.', inputSchema: { type: 'object', properties: {} } }] };
+    return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  const { loadMcpTools } = await import('../server/agent/mcp-client.mjs');
+  const { tools, errors } = await loadMcpTools({
+    servers: [
+      { id: 'a', name: 'broken', url: 'https://broken.example.test/rpc', auth_token: '' },
+      { id: 'b', name: 'working', url: 'https://working.example.test/rpc', auth_token: '' },
+    ],
+    httpClient,
+  });
+
+  assert.equal(tools.length, 1);
+  assert.equal(tools[0].name, 'mcp__working__ping');
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].serverName, 'broken');
+  assert.match(errors[0].message, /ECONNREFUSED/);
+});
+
+test('MCP server registration is admin-only and never returns the stored auth token', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const { MCP_ACTIONS } = await import('../server/services/mcp-servers.mjs');
+
+    for (const action of MCP_ACTIONS) {
+      for (const requesterRole of ['teacher', 'support_staff', undefined]) {
+        const response = await dispatch(runtime, 'POST', '/api/functions/mcp', {
+          action,
+          requesterRole,
+          name: 'smuggled',
+          url: 'https://evil.example.test/rpc',
+          authToken: 'stolen',
+        });
+        assert.equal(response.status, 403, `${action} as ${requesterRole} should be refused`);
+        assert.equal(response.body.error, 'Unauthorized');
+      }
+    }
+
+    const mcpCall = (action, body = {}) =>
+      dispatch(runtime, 'POST', '/api/functions/mcp', {
+        action,
+        requesterRole: 'admin',
+        actorEmail: 'admin@school.ug',
+        ...body,
+      });
+
+    assert.deepEqual((await mcpCall('list')).body.data.servers, [], 'nothing leaked past the guard');
+
+    const created = await mcpCall('save', {
+      name: 'ncdc-syllabus',
+      url: 'https://mcp.example.test/rpc',
+      authToken: 'super-secret',
+    });
+    assert.equal(created.status, 200);
+    assert.equal(created.body.data.server.auth_token, '••••••••');
+    assert.equal(created.body.data.server.hasAuthToken, true);
+
+    const listed = await mcpCall('list');
+    assert.equal(listed.body.data.servers.length, 1);
+    assert.equal(listed.body.data.servers[0].auth_token, '••••••••');
+    assert.ok(
+      !JSON.stringify(listed.body).includes('super-secret'),
+      'the stored token must never reach the browser',
+    );
+
+    // Editing the URL without resupplying the token must keep the stored one.
+    const serverId = listed.body.data.servers[0].id;
+    await mcpCall('save', { id: serverId, name: 'ncdc-syllabus', url: 'https://mcp2.example.test/rpc' });
+
+    const { loadEnabledMcpServers } = await import('../server/services/mcp-servers.mjs');
+    const live = await loadEnabledMcpServers(runtime.database);
+    assert.equal(live[0].url, 'https://mcp2.example.test/rpc');
+    assert.equal(live[0].auth_token, 'super-secret', 'an omitted token must not blank the stored one');
+
+    // An explicit empty string does clear it.
+    await mcpCall('save', { id: serverId, name: 'ncdc-syllabus', url: 'https://mcp2.example.test/rpc', authToken: '' });
+    assert.equal((await loadEnabledMcpServers(runtime.database))[0].auth_token, '');
+
+    const badUrl = await mcpCall('save', { name: 'bad', url: 'not-a-url' });
+    assert.equal(badUrl.status, 400);
+    assert.match(badUrl.body.error, /valid http\(s\) URL/);
+
+    assert.equal((await mcpCall('delete', { id: serverId })).status, 200);
+    assert.deepEqual((await mcpCall('list')).body.data.servers, []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('curriculum frameworks expose Uganda and International GCSE examination structure', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const response = await dispatch(runtime, 'GET', '/api/curriculum-frameworks');
+    assert.equal(response.status, 200);
+
+    const frameworks = response.body.data.frameworks;
+    const ids = frameworks.map((framework) => framework.id);
+    assert.ok(ids.includes('uganda-cbc-lower-secondary'));
+    assert.ok(ids.includes('uganda-uace'));
+    assert.ok(ids.includes('uganda-primary'));
+    assert.ok(ids.includes('cambridge-igcse'));
+    assert.ok(ids.includes('edexcel-international-gcse'));
+
+    for (const framework of frameworks) {
+      assert.ok(framework.questionTypes.length > 0, `${framework.id} needs question types`);
+      assert.ok(framework.commandWords.length > 0, `${framework.id} needs command words`);
+      assert.ok(framework.assessmentObjectives.length > 0, `${framework.id} needs assessment objectives`);
+    }
+
+    const { resolveFramework, yearLabelFor, describeFramework } = await import(
+      '../server/services/curriculum-frameworks.mjs'
+    );
+
+    // The same numeric grade reads differently under each framework, which is what the year/grade
+    // fine-tuning control depends on.
+    const uganda = resolveFramework({ curriculum: 'uganda-cbc-lower-secondary' });
+    assert.equal(yearLabelFor(uganda, 10), 'S3');
+    assert.equal(yearLabelFor(resolveFramework({ curriculum: 'cambridge-igcse' }), 10), 'Year 10');
+    assert.equal(yearLabelFor(resolveFramework({ curriculum: 'uganda-primary' }), 5), 'P5');
+
+    // An unknown curriculum must still resolve to something usable rather than throwing.
+    assert.ok(resolveFramework({ curriculum: 'atlantis-national' }));
+    assert.match(describeFramework(uganda, { gradeLevel: 10 }), /S3/);
+  } finally {
+    await cleanup();
+  }
+});
+
+const examinerCall = (runtime, action, body = {}) =>
+  dispatch(runtime, 'POST', '/api/functions/digital-examiner', {
+    action,
+    requesterRole: 'teacher',
+    actorEmail: 'teacher@school.ug',
+    actorName: 'Grace Teacher',
+    ...body,
+  });
+
+// Two generated questions that between them exercise both question shapes the paper renderer
+// handles: a multiple-choice item with options, and a structured item with a mark-by-mark scheme.
+const GENERATED_QUESTIONS = [
+  {
+    topic: 'Photosynthesis',
+    subtopic: 'Limiting factors',
+    questionType: 'mcq',
+    difficulty: 'easy',
+    bloomLevel: 'remember',
+    commandWord: 'identify',
+    stem: 'Identify the gas taken in by a leaf during photosynthesis.',
+    options: ['Oxygen', 'Carbon dioxide', 'Nitrogen', 'Hydrogen'],
+    correctAnswer: 'Carbon dioxide',
+    markingScheme: [{ point: 'Carbon dioxide', marks: 1 }],
+    marks: 1,
+    expectedTimeMinutes: 1,
+    assessmentObjective: 'KU',
+    citationIndexes: [1],
+  },
+  {
+    topic: 'Photosynthesis',
+    subtopic: 'Investigations',
+    questionType: 'structured',
+    difficulty: 'moderate',
+    bloomLevel: 'apply',
+    commandWord: 'describe',
+    stem: 'Describe an investigation a learner could carry out to show that light is necessary for photosynthesis.',
+    options: [],
+    correctAnswer: 'Destarch a plant, cover part of a leaf, expose to light, then test both parts for starch.',
+    markingScheme: [
+      { point: 'Destarch the plant in darkness for 24 hours', marks: 1 },
+      { point: 'Cover part of a leaf with foil', marks: 1 },
+      { point: 'Expose to light, then test both regions with iodine', marks: 2 },
+    ],
+    marks: 4,
+    expectedTimeMinutes: 5,
+    assessmentObjective: 'AS',
+    citationIndexes: [1, 2],
+  },
+];
+
+test('the Digital Examiner generates syllabus-grounded questions and banks them with citations', async () => {
+  await withAnthropicKey(async () => {
+    const { httpClient, sent } = createClaudeStub([
+      { text: 'Checking the syllabus first.', toolUses: [{ name: 'search_curriculum', input: { query: 'photosynthesis', subject: 'Biology' } }] },
+      { text: 'Here are the questions.', toolUses: [{ name: 'submit_questions', input: { questions: GENERATED_QUESTIONS } }] },
+    ]);
+
+    const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+    try {
+      const blueprint = await examinerCall(runtime, 'save_blueprint', {
+        name: 'S2 Biology — Term 1 Test',
+        curriculum: 'uganda-cbc-lower-secondary',
+        subjectName: 'Biology',
+        gradeLevel: 9,
+        academicYear: '2026/2027',
+        term: 'Term 1',
+        assessmentType: 'test',
+        totalMarks: 20,
+        difficultyMix: { easy: 2, moderate: 3, challenging: 1 },
+      });
+      assert.equal(blueprint.status, 200);
+      // Unspecified fields fall back to the framework's own paper structure.
+      assert.equal(blueprint.body.data.blueprint.curriculum, 'uganda-cbc-lower-secondary');
+      assert.equal(blueprint.body.data.blueprint.paper_label, 'Paper 1');
+      assert.equal(blueprint.body.data.blueprint.duration_minutes, 150);
+      assert.equal(blueprint.body.data.blueprint.total_marks, 20);
+
+      const generated = await examinerCall(runtime, 'generate_questions', {
+        blueprintId: blueprint.body.data.blueprint.id,
+        modelId: 'anthropic-default',
+        topics: ['Photosynthesis'],
+        count: 5,
+      });
+      assert.equal(generated.status, 200);
+
+      const questions = generated.body.data.questions;
+      assert.equal(questions.length, 2);
+      assert.equal(questions[0].question_type, 'mcq');
+      assert.deepEqual(questions[0].options, ['Oxygen', 'Carbon dioxide', 'Nitrogen', 'Hydrogen']);
+      assert.equal(questions[0].status, 'draft', 'generated questions must be reviewed before use');
+      assert.equal(questions[1].marks, 4);
+      assert.equal(questions[1].marking_scheme.length, 3);
+
+      // Every question carries the syllabus passages it was grounded in.
+      assert.ok(questions[0].source_references.length > 0);
+      assert.ok(questions[0].source_references[0].title);
+      assert.equal(questions[1].source_references.length, 2);
+
+      // The framework and grade came from the blueprint, not the request.
+      assert.ok(questions.every((question) => question.curriculum === 'uganda-cbc-lower-secondary'));
+      assert.ok(questions.every((question) => question.grade_level === 9));
+
+      // The system prompt must carry the framework's conventions, and retrieval must be primed so
+      // the model has syllabus text before its first turn.
+      assert.match(sent[0].body.system, /Uganda Lower Secondary/);
+      assert.match(sent[0].body.system, /Command words to draw on/);
+      assert.match(sent[0].body.messages[0].content, /\[1\]/);
+      assert.ok(sent[0].body.tools.some((tool) => tool.name === 'submit_questions'));
+
+      const banked = await examinerCall(runtime, 'list_questions', { status: 'draft' });
+      assert.equal(banked.body.data.questions.length, 2);
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+test('generation refuses the local rules engine and reports a model that never submits', async () => {
+  await withAnthropicKey(async () => {
+    // A model that talks but never calls submit_questions.
+    const { httpClient } = createClaudeStub([{ text: 'I would rather not.' }]);
+    const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+    try {
+      const localRules = await examinerCall(runtime, 'generate_questions', {
+        modelId: 'local-rules',
+        topics: ['Photosynthesis'],
+      });
+      assert.equal(localRules.status, 400);
+      assert.match(localRules.body.error, /needs a configured AI model/);
+
+      const noSubmission = await examinerCall(runtime, 'generate_questions', {
+        modelId: 'anthropic-default',
+        topics: ['Photosynthesis'],
+        count: 3,
+      });
+      assert.equal(noSubmission.status, 400);
+      // Prose containing no readable questions still fails — but the message now says why and the
+      // model's reply is returned, so the screen can show it instead of discarding it in a dialog.
+      assert.match(noSubmission.body.error, /did not produce anything that could be read as questions/);
+      assert.equal(await countRows(runtime, 'exam_questions'), 0);
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+test('a paper is assembled from approved questions, published into exams, and renders both PDFs', async () => {
+  await withAnthropicKey(async () => {
+    const { httpClient } = createClaudeStub([
+      { text: 'Here are the questions.', toolUses: [{ name: 'submit_questions', input: { questions: GENERATED_QUESTIONS } }] },
+    ]);
+
+    const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+    try {
+      const generated = await examinerCall(runtime, 'generate_questions', {
+        modelId: 'anthropic-default',
+        curriculum: 'cambridge-igcse',
+        subjectName: 'Biology',
+        gradeLevel: 10,
+        topics: ['Photosynthesis'],
+        count: 5,
+      });
+      const questionIds = generated.body.data.questions.map((question) => question.id);
+
+      const paper = await examinerCall(runtime, 'assemble_paper', {
+        title: 'Year 10 Biology — Photosynthesis Test',
+        subjectName: 'Biology',
+        gradeLevel: 10,
+        academicYear: '2026/2027',
+        term: 'Term 1',
+        assessmentType: 'test',
+        durationMinutes: 45,
+        instructions: 'Answer all questions in the spaces provided.',
+        questionIds,
+        // A deliberately wrong total, to prove marks are summed from the questions themselves.
+        totalMarks: 999,
+      });
+      assert.equal(paper.status, 200);
+      assert.equal(paper.body.data.paper.total_marks, 5, 'marks must be summed from the questions');
+      assert.equal(paper.body.data.paper.status, 'draft');
+
+      const paperId = paper.body.data.paper.id;
+
+      // Publishing must be blocked while any question is still unreviewed.
+      const premature = await examinerCall(runtime, 'publish_paper', { id: paperId });
+      assert.equal(premature.status, 400);
+      assert.match(premature.body.error, /still need review/);
+      assert.equal(await countRows(runtime, 'exams'), 0, 'nothing should be written on a refused publish');
+
+      for (const id of questionIds) {
+        const approved = await examinerCall(runtime, 'set_question_status', { id, status: 'approved' });
+        assert.equal(approved.body.data.question.status, 'approved');
+      }
+
+      // A stale class id from the browser must read as a message, not a raw constraint violation.
+      const unknownClass = await examinerCall(runtime, 'publish_paper', {
+        id: paperId,
+        examDate: '2026-10-14',
+        classId: 'no-such-class',
+      });
+      assert.equal(unknownClass.status, 400);
+      assert.match(unknownClass.body.error, /No class found with id/);
+      assert.equal(await countRows(runtime, 'exams'), 0);
+
+      await dispatch(runtime, 'POST', '/api/db', {
+        table: 'classes',
+        operation: 'insert',
+        payload: {
+          id: 'class-10a',
+          grade_level: 10,
+          section_name: 'A',
+          academic_year: '2026/2027',
+          capacity: 40,
+        },
+      });
+
+      const published = await examinerCall(runtime, 'publish_paper', {
+        id: paperId,
+        examDate: '2026-10-14',
+        startTime: '09:00',
+        endTime: '09:45',
+        room: 'Lab 2',
+        classId: 'class-10a',
+      });
+      assert.equal(published.status, 200);
+      assert.equal(published.body.data.paper.status, 'published');
+      assert.ok(published.body.data.examId);
+
+      // Full integration: the rest of the school system now sees a real exam.
+      const exams = await dispatch(runtime, 'POST', '/api/db', { table: 'exams', operation: 'select', columns: '*' });
+      assert.equal(exams.body.data.length, 1);
+      assert.equal(exams.body.data[0].name, 'Year 10 Biology — Photosynthesis Test');
+      assert.equal(exams.body.data[0].exam_type, 'test');
+      assert.equal(exams.body.data[0].status, 'scheduled');
+      assert.equal(exams.body.data[0].id, published.body.data.examId);
+
+      const schedules = await dispatch(runtime, 'POST', '/api/db', { table: 'exam_schedules', operation: 'select', columns: '*' });
+      assert.equal(schedules.body.data.length, 1);
+      assert.equal(schedules.body.data[0].room, 'Lab 2');
+      assert.equal(schedules.body.data[0].exam_id, published.body.data.examId);
+
+      // Publishing twice must not create a second exam.
+      const again = await examinerCall(runtime, 'publish_paper', { id: paperId });
+      assert.equal(again.status, 400);
+      assert.match(again.body.error, /already been published/);
+      assert.equal(await countRows(runtime, 'exams'), 1);
+
+      // audit_logs is deliberately absent from the /api/db allow-list, so it is read the way the
+      // app reads it.
+      const audit = await dispatch(runtime, 'POST', '/api/functions/auth', { action: 'get_audit_log' });
+      const publishEntry = audit.body.data.logs.find((entry) => entry.action === 'exam_published');
+      assert.ok(publishEntry, 'publishing an exam should be audited');
+      assert.equal(publishEntry.entity_name, 'Year 10 Biology — Photosynthesis Test');
+      assert.equal(publishEntry.changes.examId, published.body.data.examId);
+
+      const questionPdf = await runtime.dispatch({
+        method: 'GET',
+        pathname: `/api/papers/${paperId}.pdf`,
+        searchParams: new URLSearchParams({ requesterRole: 'teacher' }),
+      });
+      assert.equal(questionPdf.status, 200);
+      assert.equal(questionPdf.headers['Content-Type'], 'application/pdf');
+      assert.equal(questionPdf.body.subarray(0, 5).toString(), '%PDF-');
+      assert.ok(questionPdf.body.length > 1500);
+
+      const schemePdf = await runtime.dispatch({
+        method: 'GET',
+        pathname: `/api/papers/${paperId}/marking-scheme.pdf`,
+        searchParams: new URLSearchParams({ requesterRole: 'teacher' }),
+      });
+      assert.equal(schemePdf.status, 200);
+      assert.equal(schemePdf.body.subarray(0, 5).toString(), '%PDF-');
+      assert.match(schemePdf.headers['Content-Disposition'], /marking-scheme\.pdf/);
+
+      const refused = await runtime.dispatch({
+        method: 'GET',
+        pathname: `/api/papers/${paperId}/marking-scheme.pdf`,
+        searchParams: new URLSearchParams({ requesterRole: 'support_staff' }),
+      });
+      assert.equal(refused.status, 403);
+
+      const missing = await runtime.dispatch({
+        method: 'GET',
+        pathname: '/api/papers/no-such-paper.pdf',
+        searchParams: new URLSearchParams({ requesterRole: 'teacher' }),
+      });
+      assert.equal(missing.status, 404);
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+test('a retired question cannot reach a paper, and paper questions keep their chosen order', async () => {
+  await withAnthropicKey(async () => {
+    const { httpClient } = createClaudeStub([
+      { toolUses: [{ name: 'submit_questions', input: { questions: GENERATED_QUESTIONS } }] },
+    ]);
+
+    const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+    try {
+      const generated = await examinerCall(runtime, 'generate_questions', {
+        modelId: 'anthropic-default',
+        subjectName: 'Biology',
+        topics: ['Photosynthesis'],
+      });
+      const [first, second] = generated.body.data.questions.map((question) => question.id);
+
+      await examinerCall(runtime, 'set_question_status', { id: first, status: 'retired', reviewNotes: 'Ambiguous stem' });
+
+      const rejected = await examinerCall(runtime, 'assemble_paper', {
+        title: 'Contains a retired question',
+        questionIds: [first, second],
+      });
+      assert.equal(rejected.status, 400);
+      assert.match(rejected.body.error, /retired/);
+
+      const ghost = await examinerCall(runtime, 'assemble_paper', {
+        title: 'Contains a deleted question',
+        questionIds: [second, 'does-not-exist'],
+      });
+      assert.equal(ghost.status, 400);
+      assert.match(ghost.body.error, /no longer exist/);
+
+      // Order is the teacher's choice, and SQL gives no ordering guarantee for an IN list.
+      await examinerCall(runtime, 'set_question_status', { id: first, status: 'approved' });
+      const ordered = await examinerCall(runtime, 'assemble_paper', {
+        title: 'Reversed order',
+        questionIds: [second, first],
+      });
+      const loaded = await examinerCall(runtime, 'get_paper', { id: ordered.body.data.paper.id });
+      assert.deepEqual(loaded.body.data.questions.map((question) => question.id), [second, first]);
+
+      const empty = await examinerCall(runtime, 'assemble_paper', { title: 'Nothing on it', questionIds: [] });
+      assert.equal(empty.status, 400);
+      assert.match(empty.body.error, /at least one question/);
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+test('the Digital Examiner refuses every action to non-teaching staff without writing anything', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const { EXAMINER_ACTIONS } = await import('../server/services/digital-examiner.mjs');
+    assert.ok(EXAMINER_ACTIONS.length >= 13, 'expected the full examiner action catalogue');
+
+    for (const action of EXAMINER_ACTIONS) {
+      for (const requesterRole of ['support_staff', undefined]) {
+        const response = await dispatch(runtime, 'POST', '/api/functions/digital-examiner', {
+          action,
+          requesterRole,
+          // Payloads that would otherwise succeed, to prove the guard runs first.
+          name: 'Smuggled blueprint',
+          title: 'Smuggled paper',
+          stem: 'Smuggled question',
+          questionIds: ['anything'],
+          modelId: 'anthropic-default',
+          topics: ['Photosynthesis'],
+          status: 'approved',
+          id: 'anything',
+        });
+        assert.equal(response.status, 403, `${action} as ${requesterRole} should be refused`);
+        assert.equal(response.body.error, 'Unauthorized');
+      }
+    }
+
+    const unknown = await examinerCall(runtime, 'rewrite_all_grades');
+    assert.equal(unknown.status, 400);
+    assert.equal(unknown.body.error, 'Unsupported digital examiner action: rewrite_all_grades');
+
+    for (const table of ['exam_blueprints', 'exam_questions', 'generated_papers', 'exams']) {
+      assert.equal(await countRows(runtime, table), 0, `${table} should still be empty`);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+const plannerCall = (runtime, action, body = {}) =>
+  dispatch(runtime, 'POST', '/api/functions/lesson-planner', {
+    action,
+    requesterRole: 'teacher',
+    actorEmail: 'teacher@school.ug',
+    actorName: 'Grace Teacher',
+    ...body,
+  });
+
+const GENERATED_PLAN = {
+  title: 'Investigating the Factors Affecting Photosynthesis',
+  learningOutcomes: [
+    'State the raw materials and products of photosynthesis.',
+    'Carry out an investigation showing that light is necessary for photosynthesis.',
+  ],
+  competencies: ['Scientific investigation', 'Critical thinking'],
+  materials: ['Potted plant', 'Aluminium foil', 'Iodine solution', 'Beakers', 'Spirit burner'],
+  activities: [
+    { stage: 'Introduction', minutes: 5, teacherActivity: 'Ask what a plant needs to make food.', learnerActivity: 'Suggest answers from experience of gardening.' },
+    { stage: 'Development', minutes: 20, teacherActivity: 'Demonstrate the destarching and foil-covering procedure.', learnerActivity: 'Record the procedure and predict the outcome.' },
+    { stage: 'Practice', minutes: 10, teacherActivity: 'Supervise groups testing leaves with iodine.', learnerActivity: 'Test both leaf regions and record observations.' },
+    { stage: 'Conclusion', minutes: 5, teacherActivity: 'Draw out the conclusion and set homework.', learnerActivity: 'State the conclusion in their own words.' },
+  ],
+  assessment: [
+    { method: 'Oral questioning', description: 'Check recall of raw materials during the introduction.' },
+    { method: 'Practical observation', description: 'Assess correct use of iodine and safe handling of the burner.' },
+  ],
+  differentiation: 'Pair slower learners with a partner for the practical; ask faster learners to predict the result if carbon dioxide were removed instead.',
+  homework: 'Draw and label a leaf, showing three adaptations for photosynthesis.',
+  citationIndexes: [1, 2],
+};
+
+test('the Lesson Planner drafts a syllabus-grounded plan and renders it as a PDF', async () => {
+  await withAnthropicKey(async () => {
+    const { httpClient, sent } = createClaudeStub([
+      { text: 'Checking the syllabus.', toolUses: [{ name: 'search_curriculum', input: { query: 'photosynthesis', subject: 'Biology' } }] },
+      { text: 'Plan ready.', toolUses: [{ name: 'submit_lesson_plan', input: GENERATED_PLAN }] },
+    ]);
+
+    const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+    try {
+      const generated = await plannerCall(runtime, 'generate', {
+        modelId: 'anthropic-default',
+        curriculum: 'uganda-cbc-lower-secondary',
+        subjectName: 'Biology',
+        gradeLevel: 9,
+        topic: 'Photosynthesis',
+        academicYear: '2026/2027',
+        term: 'Term 1',
+        durationMinutes: 40,
+        lessonDate: '2026-09-14',
+        period: 'Period 3',
+      });
+      assert.equal(generated.status, 200);
+
+      const plan = generated.body.data.plan;
+      assert.equal(plan.title, 'Investigating the Factors Affecting Photosynthesis');
+      assert.equal(plan.status, 'draft', 'a generated plan is a draft until a teacher approves it');
+      assert.equal(plan.curriculum, 'uganda-cbc-lower-secondary');
+      assert.equal(plan.grade_level, 9);
+      assert.equal(plan.duration_minutes, 40);
+      assert.equal(plan.learning_outcomes.length, 2);
+      assert.equal(plan.activities.length, 4);
+      assert.equal(
+        plan.activities.reduce((total, activity) => total + activity.minutes, 0),
+        40,
+        'the lesson sequence should fill the lesson',
+      );
+      assert.equal(plan.materials.length, 5);
+      assert.ok(plan.refs.length > 0, 'the plan should record the syllabus passages it came from');
+      assert.match(plan.homework, /Draw and label a leaf/);
+
+      // The prompt must carry the framework's conventions and the primed syllabus passages.
+      assert.match(sent[0].body.system, /Uganda Lower Secondary/);
+      assert.match(sent[0].body.system, /minutes add up to 40/);
+      assert.match(sent[0].body.messages[0].content, /Syllabus passages already retrieved/);
+
+      const pdf = await runtime.dispatch({
+        method: 'GET',
+        pathname: `/api/lesson-plans/${plan.id}.pdf`,
+        searchParams: new URLSearchParams({ requesterRole: 'teacher' }),
+      });
+      assert.equal(pdf.status, 200);
+      assert.equal(pdf.headers['Content-Type'], 'application/pdf');
+      assert.equal(pdf.body.subarray(0, 5).toString(), '%PDF-');
+      assert.ok(pdf.body.length > 2000);
+
+      const refused = await runtime.dispatch({
+        method: 'GET',
+        pathname: `/api/lesson-plans/${plan.id}.pdf`,
+        searchParams: new URLSearchParams({ requesterRole: 'support_staff' }),
+      });
+      assert.equal(refused.status, 403);
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+test('a scheme of work generates one plan per topic and survives a topic that fails', async () => {
+  await withAnthropicKey(async () => {
+    // Succeed for the first two topics, then return prose without submitting for the third.
+    let call = 0;
+    const httpClient = async (url, options) => {
+      call += 1;
+      const submits = call <= 2;
+      return new Response(
+        JSON.stringify({
+          id: `msg_${call}`,
+          stop_reason: submits ? 'tool_use' : 'end_turn',
+          usage: { input_tokens: 5, output_tokens: 5 },
+          content: submits
+            ? [{ type: 'tool_use', id: `tu_${call}`, name: 'submit_lesson_plan', input: GENERATED_PLAN }]
+            : [{ type: 'text', text: 'I do not have syllabus material for that topic.' }],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    };
+
+    const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+    try {
+      const scheme = await plannerCall(runtime, 'scheme_of_work', {
+        modelId: 'anthropic-default',
+        curriculum: 'uganda-cbc-lower-secondary',
+        subjectName: 'Biology',
+        gradeLevel: 9,
+        academicYear: '2026/2027',
+        term: 'Term 1',
+        topics: ['Cell Biology', 'Photosynthesis', 'Quantum Chromodynamics'],
+      });
+
+      assert.equal(scheme.status, 200);
+      assert.equal(scheme.body.data.plans.length, 2, 'the two workable topics should still produce plans');
+      assert.equal(scheme.body.data.failures.length, 1);
+      assert.equal(scheme.body.data.failures[0].topic, 'Quantum Chromodynamics');
+
+      // Each plan records the topic it was generated for, not the model's generic title.
+      assert.deepEqual(
+        scheme.body.data.plans.map((plan) => plan.topic),
+        ['Cell Biology', 'Photosynthesis'],
+      );
+      assert.ok(scheme.body.data.plans.every((plan) => plan.generated_by.schemeOfWork === true));
+
+      const tooMany = await plannerCall(runtime, 'scheme_of_work', {
+        modelId: 'anthropic-default',
+        topics: Array.from({ length: 25 }, (_, index) => `Topic ${index}`),
+      });
+      assert.equal(tooMany.status, 400);
+      assert.match(tooMany.body.error, /limited to 20 lessons/);
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+test('lesson plans can be edited, approved, duplicated and deleted', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const created = await plannerCall(runtime, 'save', {
+      title: 'Hand-written plan',
+      topic: 'Osmosis',
+      subjectName: 'Biology',
+      gradeLevel: 9,
+      academicYear: '2026/2027',
+      term: 'Term 1',
+      durationMinutes: 40,
+      learningOutcomes: ['Define osmosis.'],
+      activities: [{ stage: 'Introduction', minutes: 40, teacherActivity: 'Explain.', learnerActivity: 'Listen.' }],
+    });
+    assert.equal(created.status, 200);
+    assert.equal(created.body.data.plan.status, 'draft');
+    const planId = created.body.data.plan.id;
+
+    const edited = await plannerCall(runtime, 'save', {
+      id: planId,
+      title: 'Osmosis in plant tissue',
+      topic: 'Osmosis',
+      subjectName: 'Biology',
+      gradeLevel: 9,
+      durationMinutes: 80,
+      learningOutcomes: ['Define osmosis.', 'Investigate osmosis using potato tissue.'],
+    });
+    assert.equal(edited.body.data.plan.title, 'Osmosis in plant tissue');
+    assert.equal(edited.body.data.plan.duration_minutes, 80);
+    assert.equal(edited.body.data.plan.learning_outcomes.length, 2);
+
+    const approved = await plannerCall(runtime, 'set_status', { id: planId, status: 'approved' });
+    assert.equal(approved.body.data.plan.status, 'approved');
+
+    const badStatus = await plannerCall(runtime, 'set_status', { id: planId, status: 'cancelled' });
+    assert.equal(badStatus.status, 400);
+    assert.match(badStatus.body.error, /Unsupported lesson plan status/);
+
+    const copy = await plannerCall(runtime, 'duplicate', { id: planId, term: 'Term 2' });
+    assert.equal(copy.body.data.plan.title, 'Osmosis in plant tissue (copy)');
+    assert.equal(copy.body.data.plan.term, 'Term 2');
+    // A copy is about to be edited for a different class, so it must not inherit 'approved'.
+    assert.equal(copy.body.data.plan.status, 'draft');
+    assert.equal(copy.body.data.plan.learning_outcomes.length, 2);
+
+    assert.equal((await plannerCall(runtime, 'list')).body.data.plans.length, 2);
+    assert.equal((await plannerCall(runtime, 'list', { status: 'approved' })).body.data.plans.length, 1);
+
+    assert.equal((await plannerCall(runtime, 'delete', { id: copy.body.data.plan.id })).status, 200);
+    assert.equal((await plannerCall(runtime, 'list')).body.data.plans.length, 1);
+
+    const missing = await plannerCall(runtime, 'get', { id: 'no-such-plan' });
+    assert.equal(missing.status, 400);
+    assert.equal(missing.body.error, 'Lesson plan not found');
+
+    const untitled = await plannerCall(runtime, 'save', { topic: 'Osmosis' });
+    assert.equal(untitled.status, 400);
+    assert.match(untitled.body.error, /lesson title is required/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the Lesson Planner refuses every action to non-teaching staff without writing anything', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const { LESSON_PLANNER_ACTIONS } = await import('../server/services/lesson-planner.mjs');
+    assert.ok(LESSON_PLANNER_ACTIONS.length >= 8, 'expected the full lesson planner action catalogue');
+
+    for (const action of LESSON_PLANNER_ACTIONS) {
+      for (const requesterRole of ['support_staff', undefined]) {
+        const response = await dispatch(runtime, 'POST', '/api/functions/lesson-planner', {
+          action,
+          requesterRole,
+          title: 'Smuggled plan',
+          topic: 'Photosynthesis',
+          topics: ['Photosynthesis'],
+          modelId: 'anthropic-default',
+          status: 'approved',
+          id: 'anything',
+        });
+        assert.equal(response.status, 403, `${action} as ${requesterRole} should be refused`);
+        assert.equal(response.body.error, 'Unauthorized');
+      }
+    }
+
+    const unknown = await plannerCall(runtime, 'teach_the_lesson_for_me');
+    assert.equal(unknown.status, 400);
+    assert.equal(unknown.body.error, 'Unsupported lesson planner action: teach_the_lesson_for_me');
+
+    assert.equal(await countRows(runtime, 'lesson_plans'), 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the chat is closed to non-teaching staff server-side, not just in the browser', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    for (const requesterRole of ['support_staff', undefined]) {
+      const response = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+        requesterRole,
+        message: 'Tell me about Emma Johnson',
+        modelId: 'local-rules',
+      });
+      assert.equal(response.status, 403, `chat as ${requesterRole} should be refused`);
+      assert.equal(response.body.error, 'Unauthorized');
+    }
+
+    // Nothing was written: a refused request must not even open a conversation.
+    assert.equal(await countRows(runtime, 'conversations'), 0);
+    assert.equal(await countRows(runtime, 'messages'), 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('chat replays conversation history and persists tool steps and citations', async () => {
+  await withAnthropicKey(async () => {
+    const { httpClient, sent } = createClaudeStub([
+      { text: 'Looking that up.', toolUses: [{ name: 'search_curriculum', input: { query: 'osmosis', subject: 'Biology' } }] },
+      { text: 'Osmosis is covered under Cell Biology [1].' },
+    ]);
+
+    const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+    try {
+      const first = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+        requesterRole: 'teacher',
+        actorName: 'Grace Teacher',
+        message: 'What does the syllabus say about osmosis?',
+        modelId: 'anthropic-default',
+        mode: 'agent',
+        useRag: true,
+      });
+
+      assert.equal(first.status, 200);
+      assert.equal(first.body.data.mode, 'agent');
+      assert.equal(first.body.data.message, 'Osmosis is covered under Cell Biology [1].');
+      assert.equal(first.body.data.steps.length, 1);
+      assert.equal(first.body.data.steps[0].tool, 'search_curriculum');
+      assert.ok(first.body.data.citations.length > 0);
+      assert.ok(first.body.data.citations[0].title);
+      // Stored citations carry a snippet, not the whole passage.
+      assert.ok(first.body.data.citations[0].snippet.length <= 240);
+
+      const conversationId = first.body.data.conversationId;
+
+      // The first turn sent no history; the user's message must be the only entry.
+      assert.deepEqual(sent[0].body.messages.map((entry) => entry.role), ['user']);
+
+      const second = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+        requesterRole: 'teacher',
+        conversationId,
+        message: 'And which class covers it?',
+        modelId: 'anthropic-default',
+        mode: 'agent',
+      });
+      assert.equal(second.status, 200);
+
+      // The second turn must replay the first exchange — the chat sent no history at all before.
+      const replayed = sent[2].body.messages;
+      assert.deepEqual(replayed.map((entry) => entry.role), ['user', 'assistant', 'user']);
+      assert.equal(replayed[0].content, 'What does the syllabus say about osmosis?');
+      assert.equal(replayed[1].content, 'Osmosis is covered under Cell Biology [1].');
+      assert.equal(replayed[2].content, 'And which class covers it?');
+
+      // Steps and citations are persisted, so reopening the conversation still shows them.
+      const stored = await dispatch(runtime, 'POST', '/api/db', {
+        table: 'messages',
+        operation: 'select',
+        columns: '*',
+        filters: [{ field: 'conversation_id', operator: 'eq', value: conversationId }],
+        orderBy: { field: 'created_at', ascending: true },
+      });
+      const assistantTurns = stored.body.data.filter((entry) => entry.role === 'assistant');
+      assert.equal(assistantTurns.length, 2);
+      assert.equal(assistantTurns[0].metadata.mode, 'agent');
+      assert.equal(assistantTurns[0].metadata.steps[0].tool, 'search_curriculum');
+      assert.ok(assistantTurns[0].metadata.citations.length > 0);
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+test('Ollama now runs agent mode rather than falling back to a plain call', async () => {
+  const originalBaseUrl = process.env.OLLAMA_BASE_URL;
+  process.env.OLLAMA_BASE_URL = 'http://ollama.test';
+
+  const httpClient = async () =>
+    new Response(JSON.stringify({ message: { content: 'Answered without tools.' } }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const response = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+      requesterRole: 'teacher',
+      message: 'Who is in grade 10?',
+      modelId: 'ollama-default',
+      mode: 'agent',
+    });
+
+    assert.equal(response.status, 200);
+    // Ollama accepts a tools array on /api/chat, so it is no longer excluded from agent mode. It
+    // answers without calling one here, which ends the loop on the first turn — that is a model
+    // choice, not a capability limit, and no "cannot call tools" notice belongs on it.
+    assert.equal(response.body.data.mode, 'agent');
+    assert.equal(response.body.data.notice, undefined);
+    assert.equal(response.body.data.message, 'Answered without tools.');
+  } finally {
+    if (originalBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
+    else process.env.OLLAMA_BASE_URL = originalBaseUrl;
+    await cleanup();
+  }
+});
+
+test('the chat prompt caps the inlined roster instead of stuffing every student record', async () => {
+  const original = process.env.AI_ROSTER_INLINE_LIMIT;
+  process.env.AI_ROSTER_INLINE_LIMIT = '5';
+
+  try {
+    // Re-imported so the module picks up the changed limit at call time.
+    const { createMessages } = await import('../server/services/llm-models.mjs');
+    const students = Array.from({ length: 40 }, (_, index) => ({
+      first_name: 'Student',
+      last_name: `Number${index}`,
+      student_id: `STU-${index}`,
+      grade_level: 10,
+      class_section: 'A',
+      gpa: 3,
+      attendance_rate: 90,
+      status: 'active',
+      subjects: ['Biology'],
+      notes: '',
+    }));
+
+    const messages = createMessages({ message: 'Who is here?', students, hasImage: false });
+    const system = messages[0].content;
+
+    assert.match(system, /showing 5 of 40/, 'the prompt must say the roster was truncated');
+    assert.ok(system.includes('Number4'));
+    assert.ok(!system.includes('Number39'), 'students past the limit must not be inlined');
+
+    // Reference material and prior turns both flow into the prompt.
+    const withContext = createMessages({
+      message: 'And the syllabus?',
+      students: students.slice(0, 2),
+      hasImage: false,
+      contextBlocks: '[1] Biology Outline — Cell Biology\nOsmosis and diffusion.',
+      history: [{ role: 'user', content: 'Earlier question' }, { role: 'assistant', content: 'Earlier answer' }],
+    });
+    assert.match(withContext[0].content, /Cite it as \[1\]/);
+    assert.deepEqual(withContext.map((entry) => entry.role), ['system', 'user', 'assistant', 'user']);
+  } finally {
+    if (original === undefined) delete process.env.AI_ROSTER_INLINE_LIMIT;
+    else process.env.AI_ROSTER_INLINE_LIMIT = original;
+  }
+});
+
+test('SchoolBot exposes its own tools over MCP, gated on a bearer token', async () => {
+  const original = process.env.MCP_SERVER_TOKEN;
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const rpc = (body, headers = {}) => runtime.dispatch({ method: 'POST', pathname: '/api/mcp', body, headers });
+
+  try {
+    // Unset token means disabled, not open — these tools read student records.
+    delete process.env.MCP_SERVER_TOKEN;
+    const disabled = await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    assert.equal(disabled.status, 404);
+    assert.match(disabled.body.error.message, /not enabled/);
+
+    process.env.MCP_SERVER_TOKEN = 'school-mcp-token';
+
+    const noAuth = await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    assert.equal(noAuth.status, 401);
+
+    const wrongAuth = await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' }, { authorization: 'Bearer wrong' });
+    assert.equal(wrongAuth.status, 401);
+
+    const auth = { authorization: 'Bearer school-mcp-token' };
+
+    const initialized = await rpc({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }, auth);
+    assert.equal(initialized.status, 200);
+    assert.equal(initialized.body.result.serverInfo.name, 'schoolbot-ai');
+    assert.ok(initialized.body.result.capabilities.tools);
+
+    const listed = await rpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, auth);
+    assert.equal(listed.status, 200);
+    const toolNames = listed.body.result.tools.map((tool) => tool.name);
+    assert.ok(toolNames.includes('search_students'));
+    assert.ok(toolNames.includes('search_curriculum'));
+    // MCP names the schema field inputSchema, not input_schema.
+    assert.ok(listed.body.result.tools.every((tool) => tool.inputSchema));
+
+    const called = await rpc(
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'search_students', arguments: { gradeLevel: 10 } } },
+      auth,
+    );
+    assert.equal(called.status, 200);
+    assert.equal(called.body.result.isError, false);
+    const payload = JSON.parse(called.body.result.content[0].text);
+    assert.ok(payload.count > 0);
+    assert.ok(payload.students.every((student) => student.grade_level === 10));
+
+    // A tool failure is a readable result, not a transport error.
+    const unknown = await rpc(
+      { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'no_such_tool', arguments: {} } },
+      auth,
+    );
+    assert.equal(unknown.status, 200);
+    assert.equal(unknown.body.error.message, 'Unknown tool: no_such_tool');
+
+    const notification = await rpc({ jsonrpc: '2.0', method: 'notifications/initialized' }, auth);
+    assert.equal(notification.status, 202);
+
+    const badMethod = await rpc({ jsonrpc: '2.0', id: 5, method: 'resources/list' }, auth);
+    assert.equal(badMethod.body.error.message, 'Unsupported method: resources/list');
+  } finally {
+    if (original === undefined) delete process.env.MCP_SERVER_TOKEN;
+    else process.env.MCP_SERVER_TOKEN = original;
+    await cleanup();
+  }
+});
+
+test('a failed MCP connection test is reported as a result, not swallowed as a bad request', async () => {
+  const httpClient = async () => {
+    throw new Error('connect ECONNREFUSED 127.0.0.1:9');
+  };
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const mcpCall = (action, body = {}) =>
+      dispatch(runtime, 'POST', '/api/functions/mcp', { action, requesterRole: 'admin', ...body });
+
+    const created = await mcpCall('save', { name: 'offline', url: 'http://127.0.0.1:9/rpc' });
+    const serverId = created.body.data.server.id;
+
+    const tested = await mcpCall('test', { id: serverId });
+
+    // The request itself succeeded — only the remote server is unreachable. Reporting that under a
+    // top-level `error` would make the route return 400 with a null body, hiding the diagnosis the
+    // settings screen exists to show.
+    assert.equal(tested.status, 200);
+    assert.equal(tested.body.data.connected, false);
+    assert.match(tested.body.data.connectionError, /ECONNREFUSED/);
+    assert.equal(tested.body.error, undefined);
+
+    // The failure is also persisted, so the screen explains a silent server on next load.
+    const listed = await mcpCall('list');
+    assert.match(listed.body.data.servers[0].last_error, /ECONNREFUSED/);
+    assert.equal(listed.body.data.servers[0].last_connected_at, null);
+
+    // A genuinely bad request still is one.
+    const missing = await mcpCall('test', { id: 'no-such-server' });
+    assert.equal(missing.status, 400);
+    assert.equal(missing.body.error, 'MCP server not found');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the school level chooses the grading system, and secondary splits O-Level from A-Level', async () => {
+  const { resolveGradingScheme, academicLevelFor, SCHOOL_LEVEL_VALUES } = await import(
+    '../server/reports/grading-config.mjs'
+  );
+
+  assert.deepEqual(SCHOOL_LEVEL_VALUES, [
+    'pre_school',
+    'kindergarten',
+    'primary',
+    'secondary',
+    'technical',
+    'tertiary',
+  ]);
+
+  const ugandan = (schoolLevel, gradeLevel) =>
+    resolveGradingScheme({ country: 'uganda', schoolLevel, gradeLevel });
+
+  assert.match(ugandan('pre_school', 1).label, /Pre-school/);
+  assert.match(ugandan('kindergarten', 0).label, /Kindergarten/);
+  assert.match(ugandan('primary', 6).label, /Primary Leaving Examination/);
+  assert.match(ugandan('technical', 12).label, /Technical/);
+  assert.match(ugandan('tertiary', 14).label, /GPA/);
+
+  // One secondary school runs both O-Level and A-Level, so the student's own class decides which
+  // scale applies. S1-S4 sit at grades 8-11 and S5-S6 at 12-13.
+  for (const grade of [8, 9, 10, 11]) {
+    assert.equal(academicLevelFor('secondary', grade), 'secondary-o', `grade ${grade} is O-Level`);
+    assert.match(ugandan('secondary', grade).label, /O-Level \(UCE\)/);
+  }
+  for (const grade of [12, 13]) {
+    assert.equal(academicLevelFor('secondary', grade), 'secondary-a', `grade ${grade} is A-Level`);
+    assert.match(ugandan('secondary', grade).label, /A-Level \(UACE\)/);
+  }
+
+  // International schools and institutions report a GPA rather than UNEB grades.
+  assert.match(resolveGradingScheme({ country: 'international', schoolLevel: 'tertiary' }).label, /GPA/);
+
+  // An explicit academicLevel still wins, so a one-off report card can override the school setting.
+  assert.equal(
+    resolveGradingScheme({ country: 'uganda', schoolLevel: 'tertiary', academicLevel: 'secondary-o' }).label,
+    'Uganda O-Level (UCE) Aggregate Points',
+  );
+
+  // A level a build does not know must still yield a usable scheme rather than throwing.
+  assert.ok(resolveGradingScheme({ country: 'uganda', schoolLevel: 'polytechnic', gradeLevel: 10 }));
+});
+
+test('UNEB aggregates, divisions, principal points and GPAs are computed correctly', async () => {
+  const { resolveGradingScheme, gradeScore, summariseResults } = await import(
+    '../server/reports/grading-config.mjs'
+  );
+
+  const grade = (scheme, scores) => scores.map((score) => ({ score, ...gradeScore(score, scheme) }));
+
+  const oLevel = resolveGradingScheme({ country: 'uganda', schoolLevel: 'secondary', gradeLevel: 10 });
+  assert.deepEqual(gradeScore(95, oLevel), { grade: 'D1', remark: 'Distinction', points: 1 });
+  assert.deepEqual(gradeScore(20, oLevel), { grade: 'F9', remark: 'Fail', points: 9 });
+
+  // Eight subjects at D1/D2/C3 -> aggregate 16, which is Division 1 (8-32).
+  const strong = summariseResults(grade(oLevel, [95, 92, 88, 85, 82, 80, 78, 75]), oLevel);
+  assert.equal(strong.label, 'Aggregate');
+  assert.equal(strong.value, 16);
+  assert.equal(strong.band, 'Division 1');
+  assert.equal(strong.complete, true);
+
+  const weak = summariseResults(grade(oLevel, [42, 40, 38, 36, 35, 34, 30, 28]), oLevel);
+  assert.equal(weak.value, 65);
+  assert.equal(weak.band, 'Division 4');
+
+  // A partial aggregate must NOT be given a division: an aggregate of 8 across five subjects is not
+  // a Division 1, and printing one would be wrong on a real report card.
+  const partial = summariseResults(grade(oLevel, [95, 92, 88, 85, 82]), oLevel);
+  assert.equal(partial.value, 8);
+  assert.equal(partial.complete, false);
+  assert.equal(partial.band, null);
+
+  // A-Level: principal letters A-F worth 6 down to 0, summed across three principals.
+  const aLevel = resolveGradingScheme({ country: 'uganda', schoolLevel: 'secondary', gradeLevel: 13 });
+  assert.deepEqual(gradeScore(88, aLevel), { grade: 'A', remark: 'Excellent', points: 6 });
+  assert.deepEqual(gradeScore(36, aLevel), { grade: 'O', remark: 'Subsidiary Pass', points: 1 });
+  assert.deepEqual(gradeScore(10, aLevel), { grade: 'F', remark: 'Fail', points: 0 });
+
+  const principals = summariseResults(grade(aLevel, [88, 85, 72]), aLevel);
+  assert.equal(principals.label, 'Principal points');
+  assert.equal(principals.value, 17);
+  assert.equal(principals.display, '17 / 18');
+
+  // Tertiary: a GPA on Uganda's five-point scale, with a degree classification.
+  const university = resolveGradingScheme({ country: 'uganda', schoolLevel: 'tertiary', gradeLevel: 14 });
+  const gpa = summariseResults(grade(university, [85, 82, 78, 74]), university);
+  assert.equal(gpa.kind, 'gpa');
+  assert.equal(gpa.value, 4.63);
+  assert.equal(gpa.display, '4.63 / 5');
+  assert.equal(gpa.band, 'First Class');
+
+  // International institutions report the familiar four-point GPA instead.
+  const international = resolveGradingScheme({ country: 'international', schoolLevel: 'tertiary' });
+  const intlGpa = summariseResults(grade(international, [95, 91, 88, 84]), international);
+  assert.equal(intlGpa.value, 3.5);
+  assert.equal(intlGpa.display, '3.50 / 4');
+
+  // PLE: four subjects, aggregate 4-36.
+  const ple = resolveGradingScheme({ country: 'uganda', schoolLevel: 'primary', gradeLevel: 7 });
+  const pleSummary = summariseResults(grade(ple, [95, 91, 88, 84]), ple);
+  assert.equal(pleSummary.value, 6);
+  assert.equal(pleSummary.band, 'Division 1');
+
+  // Early years carry no points, so no aggregate is produced and the report simply omits the row.
+  const preSchool = resolveGradingScheme({ country: 'uganda', schoolLevel: 'pre_school' });
+  assert.equal(gradeScore(88, preSchool).points, undefined);
+  assert.equal(summariseResults(grade(preSchool, [88, 72, 60]), preSchool), null);
+});
+
+test('an admin sets the school level once and report cards follow it', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const settingsCall = (body) => dispatch(runtime, 'POST', '/api/functions/settings', body);
+
+    // A fresh database defaults to a Ugandan secondary school, which is how it graded before this
+    // setting existed.
+    const initial = await settingsCall({ action: 'get' });
+    assert.equal(initial.body.data.settings.school_level, 'secondary');
+    assert.equal(initial.body.data.settings.grading_country, 'uganda');
+
+    const saved = await settingsCall({
+      action: 'update',
+      requesterRole: 'admin',
+      actorEmail: 'admin@school.ug',
+      actorName: 'Admin',
+      schoolName: 'Kampala Technical Institute',
+      schoolLevel: 'tertiary',
+      gradingCountry: 'uganda',
+    });
+    assert.equal(saved.body.data.settings.school_level, 'tertiary');
+
+    // Non-admins cannot change it.
+    const refused = await settingsCall({ action: 'update', requesterRole: 'teacher', schoolLevel: 'primary' });
+    assert.equal(refused.status, 400);
+    assert.equal(refused.body.error, 'Unauthorized');
+    assert.equal((await settingsCall({ action: 'get' })).body.data.settings.school_level, 'tertiary');
+
+    // An unrecognised level falls back rather than being stored, so a bad value cannot break grading.
+    await settingsCall({
+      action: 'update',
+      requesterRole: 'admin',
+      schoolName: 'Kampala Technical Institute',
+      schoolLevel: 'hogwarts',
+    });
+    assert.equal((await settingsCall({ action: 'get' })).body.data.settings.school_level, 'secondary');
+
+    // The report card route reads the level from settings without being told it per request.
+    await settingsCall({
+      action: 'update',
+      requesterRole: 'admin',
+      schoolName: 'Kampala Technical Institute',
+      schoolLevel: 'tertiary',
+      gradingCountry: 'uganda',
+    });
+    const pdf = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/report-cards/student-001.pdf',
+      searchParams: new URLSearchParams({ term: 'Term 1' }),
+    });
+    assert.equal(pdf.status, 200);
+    assert.equal(pdf.body.subarray(0, 5).toString(), '%PDF-');
+    assert.ok(pdf.body.length > 1500);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('attendance saves upsert, so a repeated save cannot create a duplicate row', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const save = (payload) =>
+      dispatch(runtime, 'POST', '/api/db', {
+        table: 'attendance_records',
+        operation: 'insert',
+        columns: '*',
+        single: true,
+        payload,
+      });
+
+    const first = await save({
+      student_id: 'student-001',
+      attendance_date: '2026-08-19',
+      status: 'present',
+      marked_by: 'Grace Teacher',
+      notified_parent: false,
+    });
+    assert.equal(first.status, 200);
+    assert.equal(first.body.data.status, 'present');
+
+    // The records workspace checks its own loaded list before inserting, but that list can be stale
+    // and two saves can race. The database has to be what actually enforces one row per day.
+    const second = await save({
+      student_id: 'student-001',
+      attendance_date: '2026-08-19',
+      status: 'late',
+      reason: 'Heavy traffic',
+      marked_by: 'Grace Teacher',
+      notified_parent: true,
+    });
+    assert.equal(second.status, 200);
+    assert.equal(await countRows(runtime, 'attendance_records'), 1, 'a repeat save must not add a row');
+
+    // The repeat updates in place, and the caller still gets the record back (a DO NOTHING would
+    // have returned nothing and handed the UI a null where it expects an id).
+    assert.equal(second.body.data.id, first.body.data.id, 'the same row is reused');
+    assert.equal(second.body.data.status, 'late');
+    assert.equal(second.body.data.reason, 'Heavy traffic');
+    assert.equal(second.body.data.notified_parent, true);
+
+    // A different day, or a different student, is a different record.
+    await save({ student_id: 'student-001', attendance_date: '2026-08-20', status: 'present' });
+    await save({ student_id: 'student-002', attendance_date: '2026-08-19', status: 'absent' });
+    assert.equal(await countRows(runtime, 'attendance_records'), 3);
+
+    // The upsert only works because the unique index exists and is the one ON CONFLICT matched, so
+    // the three assertions above already prove it. (pg-mem has no pg_indexes view to query, which
+    // is why this is asserted through behaviour rather than by inspecting the catalogue.)
+  } finally {
+    await cleanup();
+  }
+});
+
+test('only tables that declare a natural key upsert; the rest still insert normally', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    // notices declares no conflictTarget, so two identical inserts remain two rows. This is what
+    // keeps the change scoped to attendance rather than silently altering every table.
+    for (let index = 0; index < 2; index += 1) {
+      const response = await dispatch(runtime, 'POST', '/api/db', {
+        table: 'notices',
+        operation: 'insert',
+        columns: '*',
+        single: true,
+        payload: { title: 'Sports day', body: 'Saturday at 9am', audience: 'all' },
+      });
+      assert.equal(response.status, 200);
+    }
+
+    assert.equal(await countRows(runtime, 'notices'), 2, 'a table without a natural key still inserts twice');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the attendance dedup keeps the row that records a parent was notified', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    // Recreate the real-world mess: duplicates can only be written with the unique index absent,
+    // which is exactly the state a database gets stuck in.
+    await runtime.database.query('DROP INDEX IF EXISTS idx_attendance_unique');
+
+    const insert = (id, notified, createdAt) =>
+      runtime.database.query(
+        `INSERT INTO attendance_records (id, student_id, attendance_date, status, marked_by, notified_parent, created_at)
+         VALUES ($1, 'student-015', '2026-08-19', 'present', 'Tendo Martin', $2, $3)`,
+        [id, notified, createdAt],
+      );
+
+    // The notified copy is written last and is not the earliest, so "keep the oldest" would drop it.
+    await insert('att-1', false, '2026-08-19T09:00:00Z');
+    await insert('att-2', false, '2026-08-19T10:00:00Z');
+    await insert('att-3', true, '2026-08-19T11:00:00Z');
+    await insert('att-4', false, '2026-08-19T12:00:00Z');
+    // A different day must survive untouched.
+    await runtime.database.query(
+      `INSERT INTO attendance_records (id, student_id, attendance_date, status, notified_parent)
+       VALUES ('att-other', 'student-015', '2026-08-20', 'absent', false)`,
+    );
+
+    assert.equal(await countRows(runtime, 'attendance_records'), 5);
+
+    // The very same ranking scripts/dedupe-attendance.mjs applies, imported rather than restated.
+    const { chooseSurvivors } = await import('../scripts/dedupe-attendance.mjs');
+    const { rows: all } = await runtime.database.query(
+      'SELECT id, student_id, attendance_date, notified_parent, created_at FROM attendance_records',
+    );
+    const { keep, remove } = chooseSurvivors(all);
+    assert.equal(keep.length, 2, 'one survivor per (student, date)');
+    assert.equal(remove.length, 3);
+
+    await runtime.database.query(
+      `DELETE FROM attendance_records WHERE id IN (${remove.map((_, index) => `$${index + 1}`).join(', ')})`,
+      remove,
+    );
+
+    const { rows } = await runtime.database.query(
+      'SELECT id, attendance_date, notified_parent FROM attendance_records ORDER BY attendance_date',
+    );
+    assert.equal(rows.length, 2, 'one row per (student, date) survives');
+    assert.equal(rows[0].id, 'att-3', 'the notified-parent row is the one kept');
+    assert.equal(rows[0].notified_parent, true);
+    assert.equal(rows[1].id, 'att-other', 'a different day is untouched');
+
+    // With the duplicates gone the index can finally be created — which is the whole point.
+    await runtime.database.query(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_unique ON attendance_records(student_id, attendance_date)',
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('admins can edit and delete staff accounts, with the guards that stop a lock-out', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const auth = (body) => dispatch(runtime, 'POST', '/api/functions/auth', body);
+    const signUp = (email, displayName) =>
+      auth({ action: 'signup', email, password: 'password123', displayName });
+
+    await signUp('admin@school.ug', 'First Admin');
+    await signUp('teacher@school.ug', 'Grace Teacher');
+    await signUp('second@school.ug', 'Second Admin');
+
+    const listUsers = async () => (await auth({ action: 'get_users' })).body.data.users;
+    let users = await listUsers();
+    const admin = users.find((user) => user.auth_email === 'admin@school.ug');
+    const teacher = users.find((user) => user.auth_email === 'teacher@school.ug');
+    const second = users.find((user) => user.auth_email === 'second@school.ug');
+
+    const asAdmin = { requesterRole: 'admin', requesterEmail: 'admin@school.ug', requesterName: 'First Admin' };
+
+    // Rename and re-address an account.
+    const renamed = await auth({
+      ...asAdmin,
+      action: 'update_account',
+      userId: teacher.id,
+      displayName: 'Grace Nakato',
+      email: 'g.nakato@school.ug',
+    });
+    assert.equal(renamed.status, 200);
+    assert.equal(renamed.body.data.user.display_name, 'Grace Nakato');
+    assert.equal(renamed.body.data.user.auth_email, 'g.nakato@school.ug');
+    // The role is untouched: editing details must not quietly change permissions.
+    assert.equal(renamed.body.data.user.role, 'teacher');
+
+    // The email is the sign-in identity, so a clash would lock one of the two accounts out.
+    const clash = await auth({ ...asAdmin, action: 'update_account', userId: teacher.id, email: 'admin@school.ug' });
+    assert.equal(clash.body.error, 'Another account already uses that email');
+
+    const blank = await auth({ ...asAdmin, action: 'update_account', userId: teacher.id, displayName: '   ' });
+    assert.equal(blank.body.error, 'A display name is required');
+
+    const badEmail = await auth({ ...asAdmin, action: 'update_account', userId: teacher.id, email: 'not-an-email' });
+    assert.equal(badEmail.body.error, 'A valid email address is required');
+
+    for (const role of ['teacher', 'support_staff', undefined]) {
+      const refused = await auth({ action: 'update_account', requesterRole: role, userId: teacher.id, displayName: 'X' });
+      assert.equal(refused.body.error, 'Unauthorized', `update_account as ${role} must be refused`);
+      const refusedDelete = await auth({ action: 'delete_account', requesterRole: role, userId: teacher.id });
+      assert.equal(refusedDelete.body.error, 'Unauthorized', `delete_account as ${role} must be refused`);
+    }
+
+    // Deleting the account you are signed in as would strand you mid-session.
+    const self = await auth({ ...asAdmin, action: 'delete_account', userId: admin.id });
+    assert.equal(self.body.error, 'You cannot delete the account you are signed in with');
+
+    // Only one approved admin exists so far (the rest are pending), so it cannot be removed —
+    // there would be nobody left able to approve anyone or reach Settings.
+    const lastAdmin = await auth({
+      action: 'delete_account',
+      requesterRole: 'admin',
+      requesterEmail: 'someone.else@school.ug',
+      userId: admin.id,
+    });
+    assert.match(lastAdmin.body.error, /only administrator/);
+
+    // Promote and approve a second admin, and the first becomes removable.
+    await auth({ ...asAdmin, action: 'update_role', userId: second.id, newRole: 'admin' });
+    await auth({ ...asAdmin, action: 'approve_account', userId: second.id });
+    const removed = await auth({
+      action: 'delete_account',
+      requesterRole: 'admin',
+      requesterEmail: 'second@school.ug',
+      requesterName: 'Second Admin',
+      userId: admin.id,
+    });
+    assert.equal(removed.status, 200);
+    assert.equal(removed.body.data.deleted, true);
+
+    users = await listUsers();
+    assert.ok(!users.some((user) => user.auth_email === 'admin@school.ug'), 'the account is gone');
+
+    // Both actions are audited, so staff changes are traceable.
+    const audit = await auth({ action: 'get_audit_log' });
+    const actions = audit.body.data.logs.map((entry) => entry.action);
+    assert.ok(actions.includes('account_updated'));
+    assert.ok(actions.includes('account_deleted'));
+
+    const missing = await auth({ ...asAdmin, action: 'delete_account', userId: 'no-such-user' });
+    assert.equal(missing.body.error, 'User not found');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a conversation downloads as a printable PDF report carrying its sources', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    await runtime.database.query("INSERT INTO conversations (id, title) VALUES ('conv-1', 'Grade 10 review')");
+
+    const addMessage = (id, role, content, metadata = {}) =>
+      runtime.database.query(
+        'INSERT INTO messages (id, conversation_id, role, content, metadata) VALUES ($1, $2, $3, $4, $5)',
+        [id, 'conv-1', role, content, JSON.stringify(metadata)],
+      );
+
+    await addMessage('m1', 'user', 'Who are the top students by GPA?');
+    // A Markdown table is what the assistant actually returns for this question, and printing it as
+    // raw pipes would defeat the purpose of a report.
+    await addMessage(
+      'm2',
+      'assistant',
+      [
+        '## Top Students by GPA',
+        '',
+        '| Student | Grade | GPA |',
+        '| --- | --- | --- |',
+        '| Emma Johnson | 10 | 3.92 |',
+        '| Ethan Brown | 10 | 3.81 |',
+        '',
+        '- **Attendance** tracks GPA closely.',
+      ].join('\n'),
+      {
+        modelName: 'claude-opus-5',
+        steps: [{ tool: 'search_students', ms: 4, isError: false }],
+        citations: [
+          { citationIndex: 1, title: 'Cambridge IGCSE Biology — Topic Outline', heading: 'Movement Into and Out of Cells' },
+        ],
+      },
+    );
+
+    const pdf = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/chat-reports/conv-1.pdf',
+      searchParams: new URLSearchParams({ requesterRole: 'teacher' }),
+    });
+    assert.equal(pdf.status, 200);
+    assert.equal(pdf.headers['Content-Type'], 'application/pdf');
+    assert.equal(pdf.body.subarray(0, 5).toString(), '%PDF-');
+    assert.ok(pdf.body.length > 2000);
+    assert.match(pdf.headers['Content-Disposition'], /grade-10-review\.pdf/);
+
+    // Same gate as the chat itself — the transcript holds whatever student data was discussed.
+    const refused = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/chat-reports/conv-1.pdf',
+      searchParams: new URLSearchParams({ requesterRole: 'support_staff' }),
+    });
+    assert.equal(refused.status, 403);
+
+    const missing = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/chat-reports/no-such-conversation.pdf',
+      searchParams: new URLSearchParams({ requesterRole: 'teacher' }),
+    });
+    assert.equal(missing.status, 404);
+
+    // An empty conversation has nothing to report on, and should say so rather than emit a blank PDF.
+    await runtime.database.query("INSERT INTO conversations (id, title) VALUES ('conv-empty', 'Nothing yet')");
+    const empty = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/chat-reports/conv-empty.pdf',
+      searchParams: new URLSearchParams({ requesterRole: 'teacher' }),
+    });
+    assert.equal(empty.status, 404);
+    assert.match(empty.body.error, /no messages/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a chat conversation downloads as a PDF report and emails with the same content', async () => {
+  const originalMode = process.env.EMAIL_MODE;
+  const originalKey = process.env.EMAIL_API_KEY;
+  process.env.EMAIL_MODE = 'http';
+  process.env.EMAIL_API_KEY = 'test-email-key';
+
+  let sentPayload = null;
+  const httpClient = async (url, options) => {
+    sentPayload = JSON.parse(options.body);
+    return new Response(JSON.stringify({ id: 'email_1' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const chat = (body) =>
+      dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+        requesterRole: 'teacher',
+        actorName: 'Grace Nakato',
+        modelId: 'local-rules',
+        ...body,
+      });
+
+    const opening = await chat({ message: 'Who are the top 5 students by GPA?' });
+    const conversationId = opening.body.data.conversationId;
+    await chat({ conversationId, message: 'Tell me about Emma Johnson' });
+
+    const download = await runtime.dispatch({
+      method: 'GET',
+      pathname: `/api/chat-reports/${conversationId}.pdf`,
+      searchParams: new URLSearchParams({ requesterRole: 'teacher' }),
+    });
+    assert.equal(download.status, 200);
+    assert.equal(download.headers['Content-Type'], 'application/pdf');
+    assert.equal(download.body.subarray(0, 5).toString(), '%PDF-');
+    assert.ok(download.body.length > 2000);
+
+    // The transcript carries student records, so it is gated exactly like the chat itself.
+    const refused = await runtime.dispatch({
+      method: 'GET',
+      pathname: `/api/chat-reports/${conversationId}.pdf`,
+      searchParams: new URLSearchParams({ requesterRole: 'support_staff' }),
+    });
+    assert.equal(refused.status, 403);
+
+    const sent = await dispatch(runtime, 'POST', '/api/functions/chat-report', {
+      action: 'send',
+      requesterRole: 'teacher',
+      actorName: 'Grace Nakato',
+      conversationId,
+      recipient: 'head@school.ug',
+      note: 'For the staff meeting.',
+    });
+    assert.equal(sent.status, 200);
+    assert.equal(sent.body.data.sent, true);
+    assert.equal(sent.body.data.recipient, 'head@school.ug');
+
+    // The report travels as an attachment, so the recipient needs no account to read it.
+    assert.equal(sentPayload.to, 'head@school.ug');
+    assert.equal(sentPayload.attachments.length, 1);
+    assert.match(sentPayload.attachments[0].filename, /\.pdf$/);
+    assert.ok(sentPayload.text.startsWith('For the staff meeting.'));
+
+    const emailed = Buffer.from(sentPayload.attachments[0].content, 'base64');
+    assert.equal(emailed.subarray(0, 5).toString(), '%PDF-');
+    // Byte length differs run to run (pdf-lib stamps a creation time), so compare the size band
+    // rather than the bytes — both are built by the same loader from the same messages.
+    assert.ok(Math.abs(emailed.length - download.body.length) < 200);
+
+    const badAddress = await dispatch(runtime, 'POST', '/api/functions/chat-report', {
+      action: 'send',
+      requesterRole: 'teacher',
+      conversationId,
+      recipient: 'not-an-address',
+    });
+    assert.equal(badAddress.status, 400);
+    assert.match(badAddress.body.error, /valid email address/);
+
+    for (const requesterRole of ['support_staff', undefined]) {
+      const denied = await dispatch(runtime, 'POST', '/api/functions/chat-report', {
+        action: 'send',
+        requesterRole,
+        conversationId,
+        recipient: 'head@school.ug',
+      });
+      assert.equal(denied.status, 403);
+      assert.equal(denied.body.error, 'Unauthorized');
+    }
+  } finally {
+    if (originalMode === undefined) delete process.env.EMAIL_MODE;
+    else process.env.EMAIL_MODE = originalMode;
+    if (originalKey === undefined) delete process.env.EMAIL_API_KEY;
+    else process.env.EMAIL_API_KEY = originalKey;
+    await cleanup();
+  }
+});
+
+test('sending a report says so plainly when email is not configured', async () => {
+  const original = process.env.EMAIL_MODE;
+  delete process.env.EMAIL_MODE;
+
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const opening = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+      requesterRole: 'teacher',
+      modelId: 'local-rules',
+      message: 'Summary',
+    });
+
+    const sent = await dispatch(runtime, 'POST', '/api/functions/chat-report', {
+      action: 'send',
+      requesterRole: 'teacher',
+      conversationId: opening.body.data.conversationId,
+      recipient: 'head@school.ug',
+    });
+
+    // A mock-mode deployment must not claim a delivery that never happened.
+    assert.equal(sent.status, 400);
+    assert.match(sent.body.error, /Email is not configured/);
+    assert.match(sent.body.error, /Download it instead/);
+  } finally {
+    if (original === undefined) delete process.env.EMAIL_MODE;
+    else process.env.EMAIL_MODE = original;
+    await cleanup();
+  }
+});
+
+test('a student profile in chat carries their fee position, and the statement lists every transaction', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const fees = (action, body = {}) =>
+      dispatch(runtime, 'POST', '/api/functions/fees', {
+        action,
+        requesterRole: 'admin',
+        actorEmail: 'admin@school.ug',
+        actorName: 'Admin',
+        ...body,
+      });
+
+    await fees('save_fee_structure', {
+      name: 'Term 1 Tuition',
+      academicYear: '2026/2027',
+      term: 'Term 1',
+      amount: 900000,
+      gradeLevel: 10,
+    });
+    const structure = (await fees('list_fee_structures')).body.data.structures[0];
+    await fees('bill_student', { studentId: 'student-001', feeStructureId: structure.id });
+    await fees('record_payment', { studentId: 'student-001', amount: 400000, paymentMethod: 'MTN MoMo' });
+
+    // A pending and a failed gateway attempt: money that did not move, which the ledger's running
+    // balance must ignore but the statement must still show.
+    await runtime.database.query(`
+      INSERT INTO payment_transactions (id, student_id, provider, amount, currency, external_reference, status)
+      VALUES ('tx-pending', 'student-001', 'mtn_momo', 250000, 'UGX', 'EXT-1', 'pending'),
+             ('tx-failed', 'student-001', 'airtel_money', 250000, 'UGX', 'EXT-2', 'failed')
+    `);
+
+    const ledger = (await fees('student_ledger', { studentId: 'student-001' })).body.data;
+    assert.equal(ledger.summary.balance_due, 500000, 'unsettled attempts must not reduce the balance');
+    assert.equal(ledger.transactions.length, 2);
+    assert.ok(ledger.transactions.every((transaction) => transaction.settled === false));
+
+    // The chat profile now answers "have they paid?" without a separate lookup.
+    const profile = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+      requesterRole: 'teacher',
+      modelId: 'local-rules',
+      message: 'Tell me about Emma Johnson',
+    });
+    assert.match(profile.body.data.message, /### School fees/);
+    assert.match(profile.body.data.message, /Partly paid/);
+    assert.match(profile.body.data.message, /Balance: UGX 500,000/);
+
+    // A teacher can pull the statement; support staff still cannot, and the school-wide financial
+    // report stays admin-only.
+    const asTeacher = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/fees/statements/student-001.pdf',
+      searchParams: new URLSearchParams({ requesterRole: 'teacher' }),
+    });
+    assert.equal(asTeacher.status, 200);
+    assert.equal(asTeacher.body.subarray(0, 5).toString(), '%PDF-');
+
+    for (const [role, path, expected] of [
+      ['support_staff', '/api/fees/statements/student-001.pdf', 403],
+      ['teacher', '/api/fees/report.pdf', 403],
+    ]) {
+      const response = await runtime.dispatch({
+        method: 'GET',
+        pathname: path,
+        searchParams: new URLSearchParams({ requesterRole: role }),
+      });
+      assert.equal(response.status, expected, `${role} on ${path}`);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+/** Captures what is actually sent to Meilisearch, so the role filter can be asserted at the wire. */
+const createMeiliStub = ({ hitsByIndex = {} } = {}) => {
+  const requests = [];
+
+  const httpClient = async (url, options = {}) => {
+    const body = options.body ? JSON.parse(options.body) : null;
+    requests.push({ url, method: options.method || 'GET', body });
+
+    if (url.endsWith('/multi-search')) {
+      return new Response(
+        JSON.stringify({
+          results: (body.queries || []).map((query) => ({
+            indexUid: query.indexUid,
+            hits: hitsByIndex[query.indexUid] || [],
+            estimatedTotalHits: (hitsByIndex[query.indexUid] || []).length,
+            processingTimeMs: 1,
+          })),
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+
+    if (/\/tasks\//.test(url)) {
+      return new Response(JSON.stringify({ status: 'succeeded' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    return new Response(JSON.stringify({ taskUid: requests.length }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  return { httpClient, requests };
+};
+
+const withMeili = async (run) => {
+  const originalHost = process.env.MEILISEARCH_HOST;
+  const originalKey = process.env.MEILISEARCH_API_KEY;
+  process.env.MEILISEARCH_HOST = 'http://meili.test';
+  process.env.MEILISEARCH_API_KEY = 'test-key';
+  try {
+    return await run();
+  } finally {
+    if (originalHost === undefined) delete process.env.MEILISEARCH_HOST;
+    else process.env.MEILISEARCH_HOST = originalHost;
+    if (originalKey === undefined) delete process.env.MEILISEARCH_API_KEY;
+    else process.env.MEILISEARCH_API_KEY = originalKey;
+  }
+};
+
+test('global search falls back to Postgres when Meilisearch is not configured', async () => {
+  // The default state of every existing deployment, so this path matters most.
+  const original = process.env.MEILISEARCH_HOST;
+  delete process.env.MEILISEARCH_HOST;
+
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const result = await dispatch(runtime, 'POST', '/api/functions/search', {
+      action: 'query',
+      requesterRole: 'teacher',
+      query: 'Johnson',
+    });
+
+    assert.equal(result.status, 200);
+    assert.equal(result.body.data.engine, 'postgres');
+    assert.equal(result.body.data.groups[0].index, 'students');
+    assert.match(result.body.data.groups[0].hits[0].title, /Johnson/);
+    // Said plainly rather than implying the results are as good as search gets.
+    assert.match(result.body.data.notice, /not configured/);
+
+    const status = await dispatch(runtime, 'POST', '/api/functions/search', {
+      action: 'status',
+      requesterRole: 'admin',
+    });
+    assert.equal(status.body.data.configured, false);
+    assert.equal(status.body.data.engine, 'postgres');
+  } finally {
+    if (original === undefined) delete process.env.MEILISEARCH_HOST;
+    else process.env.MEILISEARCH_HOST = original;
+    await cleanup();
+  }
+});
+
+test('search results are scoped to the requester role, enforced on the wire', async () => {
+  await withMeili(async () => {
+    const { httpClient, requests } = createMeiliStub();
+    const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+    try {
+      const query = (body) =>
+        dispatch(runtime, 'POST', '/api/functions/search', { action: 'query', query: 'osmosis', ...body });
+
+      const lastQueries = () => requests.filter((r) => r.url.endsWith('/multi-search')).at(-1).body.queries;
+
+      // A teacher must never reach the fees index — the ledger is admin-only in the database, and
+      // an index that answered here would quietly undo that.
+      await query({ requesterRole: 'teacher' });
+      const asTeacher = lastQueries();
+      assert.ok(!asTeacher.some((entry) => entry.indexUid === 'fees'), 'teacher must not query fees');
+      assert.ok(asTeacher.every((entry) => entry.filter === 'roles = teacher'));
+
+      await query({ requesterRole: 'admin' });
+      const asAdmin = lastQueries();
+      assert.ok(asAdmin.some((entry) => entry.indexUid === 'fees'), 'admin may query fees');
+      assert.ok(asAdmin.every((entry) => entry.filter === 'roles = admin'));
+
+      // Naming an index explicitly must not widen scope beyond the role.
+      await query({ requesterRole: 'teacher', indexes: ['fees', 'students'] });
+      assert.deepEqual(lastQueries().map((entry) => entry.indexUid), ['students']);
+
+      // Support staff get no search at all: their access is the fee-status endpoint.
+      for (const requesterRole of ['support_staff', undefined]) {
+        const denied = await query({ requesterRole });
+        assert.equal(denied.status, 403);
+        assert.equal(denied.body.error, 'Unauthorized');
+      }
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+test('search returns results grouped by type, and reindexing is admin-only', async () => {
+  await withMeili(async () => {
+    const { httpClient } = createMeiliStub({
+      hitsByIndex: {
+        students: [
+          {
+            id: 'student-001',
+            kind: 'student',
+            full_name: 'Emma Johnson',
+            student_id: 'STU-2026-001',
+            grade_level: 10,
+            class_section: 'A',
+            status: 'active',
+          },
+        ],
+        exam_questions: [
+          {
+            id: 'q1',
+            kind: 'exam_question',
+            stem: 'Describe how you would investigate osmosis.',
+            subject_name: 'Biology',
+            topic: 'Osmosis',
+            difficulty: 'moderate',
+            marks: 5,
+            status: 'approved',
+          },
+        ],
+      },
+    });
+
+    const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+    try {
+      const result = await dispatch(runtime, 'POST', '/api/functions/search', {
+        action: 'query',
+        requesterRole: 'teacher',
+        query: 'osmosis',
+      });
+
+      assert.equal(result.body.data.engine, 'meilisearch');
+      // Empty groups are dropped so the palette does not render six empty headings.
+      const indexes = result.body.data.groups.map((group) => group.index);
+      assert.deepEqual(indexes.sort(), ['exam_questions', 'students']);
+
+      const students = result.body.data.groups.find((group) => group.index === 'students');
+      assert.equal(students.hits[0].title, 'Emma Johnson');
+      assert.match(students.hits[0].subtitle, /STU-2026-001/);
+
+      const questions = result.body.data.groups.find((group) => group.index === 'exam_questions');
+      assert.match(questions.hits[0].title, /investigate osmosis/);
+      assert.match(questions.hits[0].subtitle, /Biology/);
+
+      const asTeacher = await dispatch(runtime, 'POST', '/api/functions/search', {
+        action: 'reindex',
+        requesterRole: 'teacher',
+      });
+      assert.equal(asTeacher.status, 400);
+      assert.match(asTeacher.body.error, /Only an administrator/);
+
+      const asAdmin = await dispatch(runtime, 'POST', '/api/functions/search', {
+        action: 'reindex',
+        requesterRole: 'admin',
+      });
+      assert.equal(asAdmin.status, 200);
+      // The seeded students and curriculum corpus should both have been indexed.
+      assert.ok(asAdmin.body.data.counts.students > 0);
+      assert.ok(asAdmin.body.data.counts.curriculum > 0);
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+test('an unreachable search server degrades to the basic search rather than failing', async () => {
+  await withMeili(async () => {
+    const httpClient = async () => {
+      throw new Error('connect ECONNREFUSED');
+    };
+
+    const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+    try {
+      const result = await dispatch(runtime, 'POST', '/api/functions/search', {
+        action: 'query',
+        requesterRole: 'teacher',
+        query: 'Johnson',
+      });
+
+      assert.equal(result.status, 200);
+      assert.equal(result.body.data.engine, 'postgres');
+      assert.match(result.body.data.groups[0].hits[0].title, /Johnson/);
+      assert.match(result.body.data.notice, /unreachable/);
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+test('the MCP server maps each token to its own role, so LibreChat sees the right tools', async () => {
+  const originalToken = process.env.MCP_SERVER_TOKEN;
+  const originalTokens = process.env.MCP_SERVER_TOKENS;
+  delete process.env.MCP_SERVER_TOKEN;
+  process.env.MCP_SERVER_TOKENS = JSON.stringify({ 'tok-admin': 'admin', 'tok-teacher': 'teacher' });
+
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const rpc = (body, headers = {}) => runtime.dispatch({ method: 'POST', pathname: '/api/mcp', body, headers });
+
+  try {
+    const listFor = async (token) => {
+      const response = await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' }, { authorization: `Bearer ${token}` });
+      assert.equal(response.status, 200);
+      return response.body.result.tools.map((tool) => tool.name);
+    };
+
+    // Both roles get the teaching tools; the registry is what decides, so this is a lookup change
+    // rather than a second gate to keep in step.
+    const teacherTools = await listFor('tok-teacher');
+    const adminTools = await listFor('tok-admin');
+    assert.ok(teacherTools.includes('search_students'));
+    assert.ok(adminTools.includes('search_students'));
+
+    // An unknown token grants nothing.
+    const unknown = await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' }, { authorization: 'Bearer nope' });
+    assert.equal(unknown.status, 401);
+
+    // The single-token form still works, for deployments configured before per-role tokens existed.
+    delete process.env.MCP_SERVER_TOKENS;
+    process.env.MCP_SERVER_TOKEN = 'legacy-token';
+    process.env.MCP_SERVER_ROLE = 'admin';
+    const legacy = await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' }, { authorization: 'Bearer legacy-token' });
+    assert.equal(legacy.status, 200);
+    assert.ok(legacy.body.result.tools.length > 0);
+  } finally {
+    if (originalToken === undefined) delete process.env.MCP_SERVER_TOKEN;
+    else process.env.MCP_SERVER_TOKEN = originalToken;
+    if (originalTokens === undefined) delete process.env.MCP_SERVER_TOKENS;
+    else process.env.MCP_SERVER_TOKENS = originalTokens;
+    delete process.env.MCP_SERVER_ROLE;
+    await cleanup();
+  }
+});
+
+test('every indexed document id is one Meilisearch will accept', async () => {
+  const { INDEXES, isValidDocumentId } = await import('../server/search/indexer.mjs');
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    // Give the fees index something to build, since that is the one that synthesises composite ids
+    // and so the one that can violate the charset. A colon here fails the whole batch with an
+    // opaque task error, which a stubbed server never surfaces.
+    const fees = (action, body = {}) =>
+      dispatch(runtime, 'POST', '/api/functions/fees', {
+        action,
+        requesterRole: 'admin',
+        actorEmail: 'admin@school.ug',
+        actorName: 'Admin',
+        ...body,
+      });
+
+    await fees('save_fee_structure', {
+      name: 'Term 1 Tuition',
+      academicYear: '2026/2027',
+      term: 'Term 1',
+      amount: 900000,
+      gradeLevel: 10,
+    });
+    const structure = (await fees('list_fee_structures')).body.data.structures[0];
+    await fees('bill_student', { studentId: 'student-001', feeStructureId: structure.id });
+    await fees('record_payment', { studentId: 'student-001', amount: 400000, paymentMethod: 'MTN MoMo' });
+
+    let checked = 0;
+    for (const [name, definition] of Object.entries(INDEXES)) {
+      const documents = await definition.build(runtime.database);
+      for (const document of documents) {
+        assert.ok(
+          isValidDocumentId(document.id),
+          `${name} produced an id Meilisearch would reject: ${document.id}`,
+        );
+        checked += 1;
+      }
+    }
+
+    assert.ok(checked > 0, 'expected documents to check');
+    // The fees index must actually have produced rows, or this test proves nothing about it.
+    assert.ok((await INDEXES.fees.build(runtime.database)).length >= 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('questions a model wrote as prose are recovered rather than reported as a failure', async () => {
+  // Exactly what a small local model does: ignores the submit tool and answers in prose. Discarding
+  // that work and showing an error is the wrong outcome — the questions are right there.
+  const httpClient = async () =>
+    new Response(
+      JSON.stringify({
+        message: {
+          content: [
+            'Sure! Below are five exam questions that cover trigonometry at S4:',
+            '',
+            '1. State the three primary trigonometric ratios for a right-angled triangle. [3 marks]',
+            '',
+            '2. A ladder leans against a wall at 65 degrees. Calculate the height it reaches. [4 marks]',
+            '',
+            '3. Which of the following is equal to sin(30)? [1 mark]',
+            'A. 0.5',
+            'B. 0.866',
+            'C. 1.0',
+            'D. 0.707',
+            '',
+            '4. Prove that sin^2(x) + cos^2(x) = 1. [5 marks]',
+          ].join('\n'),
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+
+  const originalBaseUrl = process.env.OLLAMA_BASE_URL;
+  process.env.OLLAMA_BASE_URL = 'http://ollama.test';
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const result = await dispatch(runtime, 'POST', '/api/functions/digital-examiner', {
+      action: 'generate_questions',
+      requesterRole: 'teacher',
+      actorName: 'Grace Nakato',
+      modelId: 'ollama-default',
+      subjectName: 'Mathematics',
+      gradeLevel: 11,
+      topics: ['Trigonometry'],
+      count: 5,
+    });
+
+    assert.equal(result.status, 200, 'prose must not be reported as a failure');
+    assert.equal(result.body.data.questions.length, 4);
+
+    // Flagged, because these were not grounded or structured and need a closer read.
+    assert.equal(result.body.data.recoveredFromProse, true);
+    assert.ok(result.body.data.rawReply.includes('Below are five exam questions'));
+
+    // The lead-in is not a question.
+    assert.ok(
+      !result.body.data.questions.some((question) => /Below are five/.test(question.stem)),
+      "the model's preamble must not become a question",
+    );
+
+    const [first] = result.body.data.questions;
+    assert.match(first.stem, /three primary trigonometric ratios/);
+    assert.equal(first.marks, 3);
+    assert.equal(first.status, 'draft', 'recovered questions still need review');
+
+    // Multiple-choice options survive the round trip.
+    const mcq = result.body.data.questions.find((question) => question.question_type === 'mcq');
+    assert.ok(mcq, 'the A-D question should be recognised as multiple choice');
+    assert.deepEqual(mcq.options, ['0.5', '0.866', '1.0', '0.707']);
+
+    // They are real banked rows, editable and approvable like any other.
+    const banked = await dispatch(runtime, 'POST', '/api/functions/digital-examiner', {
+      action: 'list_questions',
+      requesterRole: 'teacher',
+      status: 'draft',
+    });
+    assert.equal(banked.body.data.questions.length, 4);
+  } finally {
+    if (originalBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
+    else process.env.OLLAMA_BASE_URL = originalBaseUrl;
+    await cleanup();
+  }
+});
+
+test('Ollama is given tools, and a tool call written into the text is recovered', async () => {
+  const requests = [];
+  const httpClient = async (url, options) => {
+    const body = JSON.parse(options.body);
+    requests.push(body);
+
+    // First turn: emit the tool call as fenced JSON in the content, the way small models do.
+    if (requests.length === 1) {
+      return new Response(
+        JSON.stringify({
+          message: {
+            content:
+              'I will search the syllabus.\n```json\n' +
+              JSON.stringify({ name: 'search_curriculum', arguments: { query: 'osmosis', subject: 'Biology' } }) +
+              '\n```',
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+
+    return new Response(JSON.stringify({ message: { content: 'Osmosis is covered under Cell Biology.' } }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  const originalBaseUrl = process.env.OLLAMA_BASE_URL;
+  process.env.OLLAMA_BASE_URL = 'http://ollama.test';
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const response = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+      requesterRole: 'teacher',
+      message: 'What does the syllabus say about osmosis?',
+      modelId: 'ollama-default',
+      mode: 'agent',
+    });
+
+    assert.equal(response.status, 200);
+    // Previously Ollama was told about no tools at all and could only ever answer in prose.
+    assert.ok(requests[0].tools?.length > 0, 'Ollama must be sent the tool definitions');
+    assert.ok(requests[0].tools.some((tool) => tool.function.name === 'search_curriculum'));
+
+    // The fenced-JSON call was recovered and executed, so this ran as a real agent turn.
+    assert.equal(response.body.data.mode, 'agent');
+    assert.equal(response.body.data.steps.length, 1);
+    assert.equal(response.body.data.steps[0].tool, 'search_curriculum');
+    assert.equal(response.body.data.steps[0].isError, false);
+  } finally {
+    if (originalBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
+    else process.env.OLLAMA_BASE_URL = originalBaseUrl;
+    await cleanup();
+  }
+});
+
+test('the Ollama adapter matches the documented tool-calling wire format', async () => {
+  // Checked against https://docs.ollama.com/capabilities/tool-calling. Ollama has no tool_call_id:
+  // a result is matched to its call by `tool_name`, so omitting that leaves parallel results
+  // ambiguous — which is exactly what several `tool` messages in a row would otherwise be.
+  const chats = [];
+  let turn = 0;
+
+  const httpClient = async (url, options) => {
+    if (!url.endsWith('/api/chat')) {
+      return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    chats.push(JSON.parse(options.body));
+    turn += 1;
+
+    if (turn === 1) {
+      return new Response(
+        JSON.stringify({
+          message: {
+            content: 'Looking those up.',
+            tool_calls: [
+              { type: 'function', function: { index: 0, name: 'search_curriculum', arguments: { query: 'osmosis' } } },
+              { type: 'function', function: { index: 1, name: 'search_students', arguments: { gradeLevel: 10 } } },
+            ],
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+
+    return new Response(JSON.stringify({ message: { content: 'Both done.' } }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  const originalBaseUrl = process.env.OLLAMA_BASE_URL;
+  process.env.OLLAMA_BASE_URL = 'http://ollama.test';
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const response = await dispatch(runtime, 'POST', '/api/functions/ai-chat', {
+      requesterRole: 'teacher',
+      message: 'osmosis and grade 10',
+      modelId: 'ollama-default',
+      mode: 'agent',
+    });
+    assert.equal(response.status, 200);
+
+    // Request: tools are {type:'function', function:{name, description, parameters}}.
+    const [first, followUp] = chats;
+    assert.ok(first.tools.length > 0, 'Ollama must be sent tool definitions');
+    assert.equal(first.tools[0].type, 'function');
+    assert.deepEqual(Object.keys(first.tools[0].function).sort(), ['description', 'name', 'parameters']);
+
+    // Follow-up: the assistant turn carries type + function.index, and arguments stay an object
+    // (Ollama does not use the JSON-string form OpenAI does).
+    const assistant = followUp.messages.find((message) => message.role === 'assistant' && message.tool_calls);
+    assert.ok(assistant, 'the tool-call turn must be replayed');
+    assert.equal(assistant.tool_calls.length, 2);
+    assistant.tool_calls.forEach((call, index) => {
+      assert.equal(call.type, 'function');
+      assert.equal(call.function.index, index);
+      assert.equal(typeof call.function.arguments, 'object');
+    });
+
+    // Results carry tool_name, in the same order as the calls.
+    const results = followUp.messages.filter((message) => message.role === 'tool');
+    assert.equal(results.length, 2);
+    assert.deepEqual(
+      results.map((result) => result.tool_name),
+      ['search_curriculum', 'search_students'],
+    );
+    assert.ok(results.every((result) => result.content));
+    // There is no tool_call_id in Ollama's protocol; sending one would be noise.
+    assert.ok(results.every((result) => result.tool_call_id === undefined));
+
+    assert.deepEqual(
+      response.body.data.steps.map((step) => step.tool),
+      ['search_curriculum', 'search_students'],
+    );
+  } finally {
+    if (originalBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
+    else process.env.OLLAMA_BASE_URL = originalBaseUrl;
+    await cleanup();
+  }
+});
+
+test('a failed generation still returns what the model wrote, so the screen can show it', async () => {
+  // The route used to null the payload on error, which is what left a teacher with a dismissible
+  // dialog and no way to recover the questions the model had just written.
+  const httpClient = async (url) => {
+    if (!url.endsWith('/api/chat')) {
+      return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response(
+      JSON.stringify({
+        message: {
+          content: 'I would rather not generate questions without seeing the syllabus first.',
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  };
+
+  const originalBaseUrl = process.env.OLLAMA_BASE_URL;
+  process.env.OLLAMA_BASE_URL = 'http://ollama.test';
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const result = await dispatch(runtime, 'POST', '/api/functions/digital-examiner', {
+      action: 'generate_questions',
+      requesterRole: 'teacher',
+      modelId: 'ollama-default',
+      subjectName: 'Mathematics',
+      gradeLevel: 11,
+      topics: ['Trigonometry'],
+      count: 5,
+    });
+
+    assert.equal(result.status, 400);
+    assert.match(result.body.error, /did not produce anything that could be read as questions/);
+
+    // The payload survives alongside the error — this is the part that was lost.
+    assert.notEqual(result.body.data, null, 'the payload must not be nulled on error');
+    assert.match(result.body.data.rawReply, /rather not generate questions/);
+    assert.ok(Array.isArray(result.body.data.steps));
+
+    // Nothing unreviewable was banked.
+    assert.equal(await countRows(runtime, 'exam_questions'), 0);
+  } finally {
+    if (originalBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
+    else process.env.OLLAMA_BASE_URL = originalBaseUrl;
+    await cleanup();
+  }
+});
+
+test('a gate permission is granted away from the gate and spent at it', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+  const askariCard = async () => {
+    const res = await call('/api/functions/student-card', {
+      code: 'STU-2026-003', role: 'support_staff', designation: 'askari',
+    });
+    return res.body.data;
+  };
+
+  try {
+    const noDestination = await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-003', reason: 'Sick',
+    });
+    assert.equal(noDestination.status, 400);
+
+    const granted = await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-003', reason: 'Going home for mid-term',
+      destination: 'Kampala', grantedBy: 'Matron', expectedReturn: '2026-08-25',
+    });
+    assert.equal(granted.status, 200);
+    assert.equal(granted.body.data.permission.status, 'active');
+
+    // The gate reads the slip: who allowed the trip, why, and where to.
+    const card = await askariCard();
+    assert.equal(card.gate_pass.permission.granted_by, 'Matron');
+    assert.equal(card.gate_pass.permission.destination, 'Kampala');
+    // ...but may not issue one. The officer at the gate is never the authoriser.
+    assert.equal(card.sections.includes('gate_permission'), false);
+
+    const approved = await call('/api/functions/gate-pass', {
+      code: 'STU-2026-003', direction: 'out', decision: 'approved', recordedBy: 'Askari',
+    });
+    assert.equal(approved.status, 200);
+    // The movement copies the slip so it stays readable once the slip is closed.
+    assert.equal(approved.body.data.pass.authorised_by, 'Matron');
+    assert.equal(approved.body.data.pass.destination, 'Kampala');
+    assert.equal(approved.body.data.on_premises, false);
+
+    // A spent slip cannot be presented to the next officer on duty.
+    const afterUse = await askariCard();
+    assert.equal(afterUse.gate_pass.permission, null);
+    assert.equal(afterUse.gate_pass.on_premises, false);
+
+    const back = await call('/api/functions/gate-pass', {
+      code: 'STU-2026-003', direction: 'in', recordedBy: 'Askari',
+    });
+    assert.equal(back.status, 200);
+    assert.equal((await askariCard()).gate_pass.on_premises, true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a declined exit is recorded and leaves the student on the premises', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+
+  try {
+    await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-004', reason: 'Trip', destination: 'Town', grantedBy: 'Teacher',
+    });
+
+    const noReason = await call('/api/functions/gate-pass', {
+      code: 'STU-2026-004', direction: 'out', decision: 'declined',
+    });
+    assert.equal(noReason.status, 400);
+
+    const declined = await call('/api/functions/gate-pass', {
+      code: 'STU-2026-004', direction: 'out', decision: 'declined',
+      note: 'No parent escort', recordedBy: 'Askari',
+    });
+    assert.equal(declined.status, 200);
+    assert.equal(declined.body.data.pass.decision, 'declined');
+    // Turned back at the gate: the student never left.
+    assert.equal(declined.body.data.on_premises, true);
+
+    const card = await dispatch(runtime, 'POST', '/api/functions/student-card', {
+      code: 'STU-2026-004', role: 'support_staff', designation: 'askari',
+    });
+    assert.equal(card.body.data.gate_pass.on_premises, true);
+    // The refused slip is closed, so it cannot be re-presented.
+    assert.equal(card.body.data.gate_pass.permission, null);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the gate log reports movements, verdicts and times', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+
+  try {
+    await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-005', reason: 'Home', destination: 'Jinja', grantedBy: 'Matron',
+    });
+    await call('/api/functions/gate-pass', { code: 'STU-2026-005', direction: 'out', recordedBy: 'Askari' });
+    await call('/api/functions/gate-pass', { code: 'STU-2026-005', direction: 'in', recordedBy: 'Askari' });
+    await call('/api/functions/gate-pass', {
+      code: 'STU-2026-006', direction: 'out', decision: 'declined',
+      note: 'No permission on file', recordedBy: 'Askari',
+    });
+
+    const log = await call('/api/functions/gate-log', { limit: 50 });
+    assert.equal(log.status, 200);
+    assert.deepEqual(log.body.data.counts, { total: 3, out: 1, in: 1, declined: 1 });
+
+    const [newest] = log.body.data.movements;
+    assert.equal(newest.decision, 'declined');
+    assert.ok(newest.full_name, 'a movement names the student');
+    assert.ok(newest.student_number, 'a movement carries the student number');
+    assert.ok(newest.recorded_at, 'a movement carries its time');
+
+    // A day with no movements reads as empty rather than failing.
+    const empty = await call('/api/functions/gate-log', { date: '1999-01-01' });
+    assert.equal(empty.body.data.movements.length, 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('an exit with no permission on file needs an explicit authoriser', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+
+  try {
+    // Nothing was granted, so the gate cannot fall back to a slip.
+    const bare = await call('/api/functions/gate-pass', { code: 'STU-2026-008', direction: 'out' });
+    assert.equal(bare.status, 400);
+
+    // An override is allowed but must name whoever authorised it, so the log stays answerable.
+    const override = await call('/api/functions/gate-pass', {
+      code: 'STU-2026-008', direction: 'out', authorisedBy: 'Head Teacher (phoned)',
+      reason: 'Family emergency', recordedBy: 'Askari',
+    });
+    assert.equal(override.status, 200);
+    assert.equal(override.body.data.permission, null);
+    assert.equal(override.body.data.pass.authorised_by, 'Head Teacher (phoned)');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('roll call marks a register and re-marking upserts', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+
+  try {
+    const classes = await call('/api/functions/roll-call', { action: 'classes' });
+    assert.equal(classes.status, 200);
+    assert.ok(classes.body.data.classes.length > 0);
+    const { grade_level: gradeLevel, class_section: classSection } = classes.body.data.classes[0];
+
+    const needsClass = await call('/api/functions/roll-call', { action: 'register' });
+    assert.equal(needsClass.status, 400);
+
+    const register = await call('/api/functions/roll-call', {
+      action: 'register', gradeLevel, classSection,
+    });
+    assert.equal(register.status, 200);
+    const roll = register.body.data.students;
+    assert.ok(roll.length > 0);
+    // Nobody is marked until the register is called.
+    assert.equal(register.body.data.counts.unmarked, roll.length);
+    assert.equal(roll[0].status, null);
+
+    const badStatus = await call('/api/functions/roll-call', {
+      action: 'mark', code: roll[0].student_id, status: 'wandering',
+    });
+    assert.equal(badStatus.status, 400);
+
+    const marked = await call('/api/functions/roll-call', {
+      action: 'mark', code: roll[0].student_id, status: 'present', markedBy: 'Teacher',
+    });
+    assert.equal(marked.body.data.record.status, 'present');
+    assert.equal(marked.body.data.updated, false);
+
+    // Calling the register and scanning a card are two routes to the same record, so a second
+    // mark for the same day updates rather than colliding with the unique index.
+    const corrected = await call('/api/functions/roll-call', {
+      action: 'mark', code: roll[0].student_id, status: 'absent', reason: 'Sick', markedBy: 'Teacher',
+    });
+    assert.equal(corrected.status, 200);
+    assert.equal(corrected.body.data.record.status, 'absent');
+    assert.equal(corrected.body.data.updated, true);
+
+    const after = await call('/api/functions/roll-call', { action: 'register', gradeLevel, classSection });
+    assert.equal(after.body.data.counts.absent, 1);
+    assert.equal(after.body.data.counts.unmarked, roll.length - 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('an invigilator checks clearance and admits or turns a student away', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+  const invigilatorCard = async () => {
+    const res = await call('/api/functions/student-card', { code: 'STU-2026-002', role: 'teacher' });
+    return res.body.data;
+  };
+
+  try {
+    // Fees being settled is not the same as clearance: the invigilator waits on a person.
+    const before = await invigilatorCard();
+    assert.equal(before.exam_clearance.cleared, false);
+    assert.equal(before.exam_clearance.fees_settled, true);
+    assert.equal(before.sections.includes('exam_clearance_grant'), false);
+
+    const bursar = await call('/api/functions/student-card', {
+      code: 'STU-2026-002', role: 'admin', designation: 'bursar',
+    });
+    assert.equal(bursar.body.data.sections.includes('exam_clearance_grant'), true);
+
+    const noGranter = await call('/api/functions/exam-clearance', { action: 'grant', code: 'STU-2026-002' });
+    assert.equal(noGranter.status, 400);
+
+    const granted = await call('/api/functions/exam-clearance', {
+      action: 'grant', code: 'STU-2026-002', grantedBy: 'Bursar', note: 'Paid in cash',
+    });
+    assert.equal(granted.status, 200);
+
+    const cleared = await invigilatorCard();
+    assert.equal(cleared.exam_clearance.cleared, true);
+    assert.equal(cleared.exam_clearance.clearance.granted_by, 'Bursar');
+
+    const noReason = await call('/api/functions/exam-clearance', {
+      action: 'admit', code: 'STU-2026-002', decision: 'rejected',
+    });
+    assert.equal(noReason.status, 400);
+
+    const admitted = await call('/api/functions/exam-clearance', {
+      action: 'admit', code: 'STU-2026-002', decision: 'approved', recordedBy: 'Invigilator',
+    });
+    assert.equal(admitted.body.data.admission.decision, 'approved');
+    assert.equal(admitted.body.data.admission.clearance_id, granted.body.data.clearance.id);
+    assert.equal((await invigilatorCard()).exam_clearance.last_admission.decision, 'approved');
+
+    const revoked = await call('/api/functions/exam-clearance', {
+      action: 'revoke', clearanceId: granted.body.data.clearance.id, by: 'Admin',
+    });
+    assert.equal(revoked.status, 200);
+    assert.equal((await invigilatorCard()).exam_clearance.cleared, false);
+
+    // Turning a student away is recorded even when there was no clearance to check.
+    const rejected = await call('/api/functions/exam-clearance', {
+      action: 'admit', code: 'STU-2026-002', decision: 'rejected',
+      note: 'No clearance on file', recordedBy: 'Invigilator',
+    });
+    assert.equal(rejected.body.data.clearance, null);
+    assert.equal(rejected.body.data.admission.decision, 'rejected');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('re-granting exam clearance supersedes the previous one', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+
+  try {
+    await call('/api/functions/exam-clearance', {
+      action: 'grant', code: 'STU-2026-005', grantedBy: 'Bursar',
+    });
+    await call('/api/functions/exam-clearance', {
+      action: 'grant', code: 'STU-2026-005', grantedBy: 'Head Teacher',
+    });
+
+    const list = await call('/api/functions/exam-clearance', { action: 'list', code: 'STU-2026-005' });
+    const active = list.body.data.clearances.filter((row) => row.status === 'active');
+    assert.equal(active.length, 1, 'only one clearance is ever active');
+    assert.equal(active[0].granted_by, 'Head Teacher');
+  } finally {
+    await cleanup();
+  }
+});
+
+const seedStaff = async (runtime) => {
+  const make = async (email, name, role, designation) => {
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email, password: 'password123', displayName: name,
+    });
+    await runtime.database.query(
+      'UPDATE users SET role = $1, approval_status = $2 WHERE auth_email = $3',
+      [role, 'approved', email],
+    );
+    if (designation) {
+      await dispatch(runtime, 'POST', '/api/functions/auth', {
+        action: 'set_designation', email, designation,
+      });
+    }
+  };
+  await make('head@school.local', 'Head', 'admin', null);
+  await make('t1@school.local', 'Teacher One', 'teacher', null);
+  await make('t2@school.local', 'Teacher Two', 'teacher', null);
+  await make('askari@school.local', 'Askari', 'support_staff', 'askari');
+  await make('cook@school.local', 'Cook', 'support_staff', 'cook');
+};
+
+test('a staff message reaches one person, a group, or everybody', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (body) => dispatch(runtime, 'POST', '/api/functions/messages', body);
+  const unread = async (email) => (await call({ action: 'inbox', actorEmail: email })).body.data.unread;
+
+  try {
+    await seedStaff(runtime);
+
+    await call({
+      action: 'send', actorEmail: 'head@school.local', audienceKind: 'user',
+      recipientEmail: 't1@school.local', subject: 'About P5', body: 'See me at break.',
+    });
+    assert.equal(await unread('t1@school.local'), 1);
+    assert.equal(await unread('t2@school.local'), 0, 'a direct message reaches nobody else');
+
+    await call({
+      action: 'send', actorEmail: 'head@school.local', audienceKind: 'role',
+      audienceValue: 'teacher', subject: 'Staff meeting', body: 'Friday 4pm.',
+    });
+    assert.equal(await unread('t2@school.local'), 1);
+    assert.equal(await unread('askari@school.local'), 0, 'a role group stops at that role');
+
+    await call({
+      action: 'send', actorEmail: 'head@school.local', audienceKind: 'designation',
+      audienceValue: 'askari', subject: 'Gate duty', body: 'Cover the night shift.',
+    });
+    assert.equal(await unread('askari@school.local'), 1);
+    assert.equal(await unread('cook@school.local'), 0, 'a designation group stops at that job');
+
+    const before = await unread('t1@school.local');
+    await call({
+      action: 'send', actorEmail: 't1@school.local', audienceKind: 'all',
+      subject: 'Lost keys', body: 'Found a bunch of keys.',
+    });
+    assert.equal(await unread('cook@school.local'), 1);
+    // A broadcast should not ring its own author's bell.
+    assert.equal(await unread('t1@school.local'), before);
+
+    for (const bad of [
+      { audienceKind: 'all', body: 'x' },
+      { audienceKind: 'all', subject: 'x' },
+      { audienceKind: 'everyone', subject: 'x', body: 'y' },
+      { audienceKind: 'user', recipientEmail: 'nobody@school.local', subject: 'x', body: 'y' },
+    ]) {
+      const res = await call({ action: 'send', actorEmail: 'head@school.local', ...bad });
+      assert.equal(res.status, 400);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test('read state is per person and re-reading is idempotent', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (body) => dispatch(runtime, 'POST', '/api/functions/messages', body);
+
+  try {
+    await seedStaff(runtime);
+    await call({
+      action: 'send', actorEmail: 'head@school.local', audienceKind: 'all',
+      subject: 'Sports day', body: 'Saturday.',
+    });
+
+    const inbox = (await call({ action: 'inbox', actorEmail: 't1@school.local' })).body.data;
+    assert.equal(inbox.unread, 1);
+
+    const read = await call({
+      action: 'read', actorEmail: 't1@school.local', messageId: inbox.messages[0].id,
+    });
+    assert.equal(read.body.data.unread, 0);
+
+    // One row per reader per message, so opening it twice is not a second read.
+    const again = await call({
+      action: 'read', actorEmail: 't1@school.local', messageId: inbox.messages[0].id,
+    });
+    assert.equal(again.body.data.unread, 0);
+
+    // The same broadcast is still unread for everyone else.
+    const other = await call({ action: 'inbox', actorEmail: 't2@school.local' });
+    assert.equal(other.body.data.unread, 1);
+
+    const all = await call({ action: 'read_all', actorEmail: 't2@school.local' });
+    assert.equal(all.body.data.unread, 0);
+    assert.equal((await call({ action: 'inbox', actorEmail: 'cook@school.local' })).body.data.unread, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('gate and exam refusals raise an event for the office', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+  const inbox = async (email) =>
+    (await call('/api/functions/messages', { action: 'inbox', actorEmail: email })).body.data;
+
+  try {
+    await seedStaff(runtime);
+
+    await call('/api/functions/gate-pass', {
+      code: 'STU-2026-001', direction: 'out', decision: 'declined',
+      note: 'No slip', recordedBy: 'Askari',
+    });
+    const office = await inbox('head@school.local');
+    const gateEvent = office.messages.find((m) => m.category === 'event');
+    assert.ok(gateEvent, 'the office hears about a student turned back');
+    assert.equal(gateEvent.priority, 'high');
+    // The whole staff room does not need to know.
+    assert.equal((await inbox('t2@school.local')).messages.some((m) => m.category === 'event'), false);
+
+    // Granting a pass tells the gate a slip is coming before the student arrives.
+    await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-002', reason: 'Home',
+      destination: 'Jinja', grantedBy: 'Matron',
+    });
+    assert.ok((await inbox('askari@school.local')).messages
+      .some((m) => m.category === 'event' && /Gate pass for/.test(m.subject)));
+
+    await call('/api/functions/exam-clearance', {
+      action: 'admit', code: 'STU-2026-003', decision: 'rejected',
+      note: 'No clearance', recordedBy: 'Invigilator',
+    });
+    assert.ok((await inbox('head@school.local')).messages
+      .some((m) => /turned away from an exam/.test(m.subject)));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('generation keeps everything the model produced', async () => {
+  // Three things were being thrown away: questions past the requested count, answers and mark
+  // schemes written in prose, and the model's closing remarks. All of it is work already done.
+  const reply = [
+    'Sure! Below are five questions on trigonometry:',
+    '',
+    '1. State the three primary trigonometric ratios. [3 marks]',
+    'Answer: sine = opp/hyp, cosine = adj/hyp, tangent = opp/adj',
+    '- Names all three (2)',
+    '- Expresses each correctly (1)',
+    '',
+    '2. Which equals sin(30)? [1 mark]',
+    'A. 0.5',
+    'B. 0.866',
+    'Answer: A',
+    '',
+    '3. Prove sin^2(x) + cos^2(x) = 1. [5 marks]',
+    '',
+    '4. Define the unit circle. [2 marks]',
+    '',
+    '5. What is cos(0)? [1 mark]',
+    '',
+    '6. Convert 45 degrees to radians. [2 marks]',
+    '',
+    '7. State the sine rule. [2 marks]',
+    '',
+    'Let me know if you want these adapted for a different level.',
+  ].join('\n');
+
+  const httpClient = async (url) =>
+    url.endsWith('/api/chat')
+      ? new Response(JSON.stringify({ message: { content: reply } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      : new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+  const originalBaseUrl = process.env.OLLAMA_BASE_URL;
+  process.env.OLLAMA_BASE_URL = 'http://ollama.test';
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const result = await dispatch(runtime, 'POST', '/api/functions/digital-examiner', {
+      action: 'generate_questions',
+      requesterRole: 'teacher',
+      modelId: 'ollama-default',
+      subjectName: 'Mathematics',
+      topics: ['Trigonometry'],
+      count: 5,
+    });
+
+    assert.equal(result.status, 200);
+    const questions = result.body.data.questions;
+
+    // Asked for five, the model wrote seven — all seven are kept. `count` is a request, not a
+    // ceiling on what comes back.
+    assert.equal(questions.length, 7, 'questions past the requested count must not be dropped');
+
+    // Answers and mark schemes written in prose are captured, not blanked.
+    const [first] = questions;
+    assert.match(first.correct_answer, /sine = opp\/hyp/);
+    assert.equal(first.marking_scheme.length, 2);
+    assert.equal(first.marking_scheme[0].marks, 2);
+
+    const mcq = questions.find((question) => question.question_type === 'mcq');
+    assert.deepEqual(mcq.options, ['0.5', '0.866']);
+    assert.equal(mcq.correct_answer, 'A');
+
+    // The closing remark is kept as a note rather than glued onto the last question's stem.
+    const last = questions[questions.length - 1];
+    assert.match(last.stem, /State the sine rule/);
+    assert.ok(!/adapted for a different level/.test(last.stem), 'closing prose must not join the stem');
+    assert.match(last.review_notes, /adapted for a different level/);
+
+    // And the whole reply is returned regardless, so nothing is lost.
+    assert.match(result.body.data.rawReply, /Below are five questions/);
+    assert.match(result.body.data.rawReply, /adapted for a different level/);
+  } finally {
+    if (originalBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
+    else process.env.OLLAMA_BASE_URL = originalBaseUrl;
+    await cleanup();
+  }
+});
+
+test('a question labelled with its topic rather than the tool name is still banked', async () => {
+  // The reported bug, exactly as it came back: the model returned one good question as a fenced tool
+  // call, but put the *topic* in `name` and nested the question under `arguments`. Matching on the
+  // wrapper threw the whole thing away and told the teacher nothing could be read.
+  const payload = {
+    name: 'Nutrition in Plants',
+    arguments: {
+      topic: 'Nutrition in Plants',
+      questionType: 'mcq',
+      stem: 'Photosynthesis: word and balanced equations, raw materials, conditions and products.',
+      correctAnswer: 'The leaf as an organ adapted for photosynthesis.',
+      difficulty: 'moderate',
+      expectedTimeMinutes: 15,
+      markingScheme: [
+        { marks: 3, point: 'States the balanced equation' },
+        { marks: 2, point: 'Names the raw materials' },
+      ],
+      options: ['The leaf as an organ adapted for photosynthesis.', 'Testing a leaf for starch.'],
+    },
+  };
+
+  const httpClient = async () =>
+    new Response(
+      JSON.stringify({
+        message: { content: 'Here is the question.\n```json\n' + JSON.stringify(payload) + '\n```' },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+
+  const originalBaseUrl = process.env.OLLAMA_BASE_URL;
+  process.env.OLLAMA_BASE_URL = 'http://ollama.test';
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const result = await dispatch(runtime, 'POST', '/api/functions/digital-examiner', {
+      action: 'generate_questions',
+      requesterRole: 'teacher',
+      actorName: 'Grace Nakato',
+      modelId: 'ollama-default',
+      subjectName: 'Biology',
+      gradeLevel: 9,
+      topics: ['Nutrition in Plants'],
+      count: 1,
+    });
+
+    assert.equal(result.status, 200, 'a well-formed question must not be reported as a failure');
+    assert.equal(result.body.data.questions.length, 1);
+
+    const [question] = result.body.data.questions;
+    assert.match(question.stem, /Photosynthesis: word and balanced equations/);
+    assert.equal(question.question_type, 'mcq');
+    assert.equal(question.options.length, 2);
+    assert.match(question.correct_answer, /adapted for photosynthesis/);
+    assert.equal(question.marking_scheme.length, 2);
+    // Marks were not given explicitly, so they come from the mark scheme rather than defaulting to 1.
+    assert.equal(question.marks, 5);
+
+    // The editor opens on this, so it has to arrive with the response.
+    assert.match(result.body.data.markdown, /Photosynthesis: word and balanced equations/);
+    assert.match(result.body.data.markdown, new RegExp(`id:${question.id}`));
+  } finally {
+    if (originalBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
+    else process.env.OLLAMA_BASE_URL = originalBaseUrl;
+    await cleanup();
+  }
+});
+
+test('a question is recognised by its shape, whatever it is wrapped in', async () => {
+  const { extractQuestionsFromJsonBlocks } = await import('../server/services/question-parse.mjs');
+
+  const one = { stem: 'Define osmosis.', marks: 2 };
+  const two = { question: 'State two products of photosynthesis.', marks: 2 };
+
+  const shapes = {
+    'bare array': [one, two],
+    'questions key': { questions: [one, two] },
+    'nested under arguments': { name: 'submit_questions', arguments: { questions: [one, two] } },
+    'a single bare object': one,
+    'labelled with the topic': { name: 'Osmosis', arguments: one },
+  };
+
+  for (const [label, value] of Object.entries(shapes)) {
+    const parsed = extractQuestionsFromJsonBlocks('```json\n' + JSON.stringify(value) + '\n```');
+    assert.ok(parsed.length >= 1, `${label} should parse`);
+    assert.equal(parsed[0].stem, 'Define osmosis.', `${label} should keep the stem`);
+  }
+
+  // No stem key at all, but a type and an answer is signal enough.
+  const inferred = extractQuestionsFromJsonBlocks(
+    JSON.stringify({ type: 'short_answer', answer: 'Chlorophyll', prompt: 'Name the green pigment.' }),
+  );
+  assert.equal(inferred.length, 1);
+  assert.equal(inferred[0].correctAnswer, 'Chlorophyll');
+
+  // Prose with no JSON in it leaves the numbered reader to try instead.
+  assert.deepEqual(extractQuestionsFromJsonBlocks('Here are some questions for you.'), []);
+});
+
+test('several JSON objects in one block are all read, and the stem is found wherever it was put', async () => {
+  const { extractQuestionsFromJsonBlocks } = await import('../server/services/question-parse.mjs');
+
+  // What Ollama actually returns: three objects back to back inside a single fence, none of them
+  // carrying a `stem` — the question text is on the wrapper, under `description`. Reading the span
+  // from the first brace to the last is not valid JSON, which used to lose all three.
+  const question = (number) => ({
+    name: `Question ${number}`,
+    arguments: {
+      assessmentObjective: 'AO2 Handling Information and Problem Solving',
+      bloomLevel: 'moderate',
+      citationIndexes: [1],
+      commandWord: 'describe',
+      correctAnswer: 'Water and mineral salts move through the xylem.',
+      difficulty: 'medium',
+      markingScheme: [
+        { marks: 5, point: 'Names the xylem' },
+        { marks: 10, point: 'Explains transpiration pull' },
+      ],
+      options: ['Xylem', 'Phloem'],
+    },
+    description: `Describe transport in plants, part ${number}.`,
+  });
+
+  const reply =
+    '```json\n' + [1, 2, 3].map((number) => JSON.stringify(question(number), null, 2)).join('\n\n') + '\n```';
+
+  const parsed = extractQuestionsFromJsonBlocks(reply);
+  assert.equal(parsed.length, 3, 'every object in the block is a question the model wrote');
+  assert.equal(parsed[0].stem, 'Describe transport in plants, part 1.');
+  assert.equal(parsed[2].stem, 'Describe transport in plants, part 3.');
+  assert.equal(parsed[0].marks, 15, 'marks come from the scheme when none were given');
+  assert.deepEqual(parsed[1].options, ['Xylem', 'Phloem']);
+
+  // A reply cut off mid-object keeps everything that was complete before the cut.
+  const truncated = '```json\n' + JSON.stringify(question(1)) + '\n\n{ "name": "Question 2", "arguments": { "stem": "cut';
+  assert.equal(extractQuestionsFromJsonBlocks(truncated).length, 1);
+
+  // Trailing commas are the usual reason a model's JSON will not parse, and are worth one retry.
+  assert.equal(extractQuestionsFromJsonBlocks('{"questions":[{"stem":"Define osmosis.",},]}').length, 1);
+
+  // A question's own mark-scheme rows must not each be counted as questions.
+  const scored = extractQuestionsFromJsonBlocks(
+    '{"stem":"Describe transport in plants.","markingScheme":[{"marks":3,"point":"Names the xylem"},{"marks":2,"point":"Explains transpiration"}]}',
+  );
+  assert.equal(scored.length, 1, 'a scheme belongs to its question, it is not three questions');
+  assert.equal(scored[0].markingScheme.length, 2);
+});
+
+test('questions survive the round trip through the editable Markdown', async () => {
+  const { markdownToQuestions, questionsToMarkdown } = await import('../server/services/question-parse.mjs');
+
+  const questions = [
+    {
+      id: 'q-1',
+      stem: 'Which of these is a product of photosynthesis?',
+      topic: 'Nutrition in Plants',
+      questionType: 'mcq',
+      difficulty: 'easy',
+      bloomLevel: 'remember',
+      options: ['Oxygen', 'Nitrogen', 'Methane', 'Argon'],
+      correctAnswer: 'Oxygen',
+      markingScheme: [{ point: 'Names oxygen', marks: 1 }],
+      marks: 1,
+      assessmentObjective: 'AO1',
+      reviewNotes: 'Check the distractors.',
+    },
+    {
+      id: 'q-2',
+      stem: 'Explain how a leaf is adapted for photosynthesis.',
+      topic: 'Nutrition in Plants',
+      questionType: 'structured',
+      difficulty: 'moderate',
+      options: [],
+      correctAnswer: 'Broad and thin, with many chloroplasts.',
+      markingScheme: [
+        { point: 'Broad lamina for light capture', marks: 2 },
+        { point: 'Thin for short diffusion distance', marks: 1 },
+      ],
+      marks: 3,
+    },
+  ];
+
+  const markdown = questionsToMarkdown(questions);
+  const parsed = markdownToQuestions(markdown);
+
+  assert.equal(parsed.length, 2);
+  for (const [index, original] of questions.entries()) {
+    const round = parsed[index];
+    for (const field of ['id', 'stem', 'topic', 'questionType', 'difficulty', 'correctAnswer', 'marks']) {
+      assert.deepEqual(round[field], original[field], `${field} must survive the round trip`);
+    }
+    assert.deepEqual(round.options, original.options);
+    assert.deepEqual(round.markingScheme, original.markingScheme);
+  }
+
+  // A teacher who deletes the trailing marker is forking the question, not corrupting it.
+  const forked = markdownToQuestions(markdown.replace(/<!--[\s\S]*?-->/g, ''));
+  assert.equal(forked.length, 2);
+  assert.equal(forked[0].id, undefined, 'a question with no marker is treated as new');
+  assert.equal(forked[0].stem, questions[0].stem);
+});
+
+test('saving the edited draft updates the same questions instead of duplicating them', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const save = (body) =>
+      dispatch(runtime, 'POST', '/api/functions/digital-examiner', {
+        action: 'save_questions',
+        requesterRole: 'teacher',
+        actorName: 'Grace Nakato',
+        subjectName: 'Biology',
+        gradeLevel: 9,
+        ...body,
+      });
+
+    // First save: a draft typed in the editor, with no ids yet.
+    const created = await save({
+      markdown: [
+        '## 1. Define osmosis.  [2 marks]',
+        '',
+        '**Answer:** Movement of water across a partially permeable membrane.',
+        '',
+        '## 2. Which gas do plants take in?  [1 marks]',
+        '',
+        '- A. Carbon dioxide',
+        '- B. Nitrogen',
+        '',
+        '**Answer:** Carbon dioxide',
+      ].join('\n'),
+    });
+
+    assert.equal(created.status, 200);
+    assert.equal(created.body.data.created, 2);
+    assert.equal(created.body.data.updated, 0);
+    assert.equal(created.body.data.questions[0].status, 'draft', 'saved questions still need review');
+
+    // The response carries the questions back as Markdown, now with their ids, which is what the
+    // editor adopts — so the second save has to update rather than insert again.
+    const edited = created.body.data.markdown.replace('Define osmosis.', 'Define osmosis precisely.');
+    const updated = await save({ markdown: edited });
+
+    assert.equal(updated.status, 200);
+    assert.equal(updated.body.data.updated, 2, 'both questions should be recognised as existing');
+    assert.equal(updated.body.data.created, 0);
+
+    const banked = await dispatch(runtime, 'POST', '/api/functions/digital-examiner', {
+      action: 'list_questions',
+      requesterRole: 'teacher',
+    });
+    assert.equal(banked.body.data.questions.length, 2, 'editing must not duplicate the bank');
+    assert.ok(
+      banked.body.data.questions.some((question) => question.stem === 'Define osmosis precisely.'),
+      'the edit should be persisted',
+    );
+
+    // A question added by hand at the bottom joins the bank without disturbing the other two.
+    const grown = await save({
+      markdown: `${edited}\n\n## 3. Name the green pigment in leaves.  [1 marks]\n\n**Answer:** Chlorophyll\n`,
+    });
+    assert.equal(grown.body.data.created, 1);
+    assert.equal(grown.body.data.updated, 2);
+
+    // Nothing to read is reported rather than silently saving an empty question.
+    const empty = await save({ markdown: 'Just some notes with no numbered questions.' });
+    assert.equal(empty.status, 400);
+    assert.match(empty.body.error, /could be read as a question/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the monitoring view reports the day and who is still out', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+
+  try {
+    // One student leaves and stays out; another leaves and returns; a third is turned back.
+    await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-001', reason: 'Clinic',
+      destination: 'Mulago', grantedBy: 'Matron',
+    });
+    await call('/api/functions/gate-pass', { code: 'STU-2026-001', direction: 'out', recordedBy: 'Askari' });
+
+    await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-002', reason: 'Home', destination: 'Jinja', grantedBy: 'Teacher',
+    });
+    await call('/api/functions/gate-pass', { code: 'STU-2026-002', direction: 'out', recordedBy: 'Askari' });
+    await call('/api/functions/gate-pass', { code: 'STU-2026-002', direction: 'in', recordedBy: 'Askari' });
+
+    await call('/api/functions/gate-pass', {
+      code: 'STU-2026-003', direction: 'out', decision: 'declined',
+      note: 'No slip', recordedBy: 'Askari',
+    });
+
+    // A slip nobody has presented yet must still read as outstanding.
+    await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-005', reason: 'Dentist',
+      destination: 'Clinic', grantedBy: 'Matron',
+    });
+
+    await call('/api/functions/exam-clearance', {
+      action: 'grant', code: 'STU-2026-004', grantedBy: 'Bursar',
+    });
+    await call('/api/functions/exam-clearance', {
+      action: 'admit', code: 'STU-2026-004', decision: 'approved', recordedBy: 'Invigilator',
+    });
+    await call('/api/functions/exam-clearance', {
+      action: 'admit', code: 'STU-2026-006', decision: 'rejected',
+      note: 'No clearance', recordedBy: 'Invigilator',
+    });
+
+    await call('/api/functions/roll-call', { action: 'mark', code: 'STU-2026-001', status: 'present', markedBy: 'T' });
+    await call('/api/functions/roll-call', { action: 'mark', code: 'STU-2026-002', status: 'absent', markedBy: 'T' });
+    await call('/api/functions/meal-record', { code: 'STU-2026-001', meal: 'lunch', servedBy: 'Cook' });
+
+    const res = await call('/api/functions/monitoring', {});
+    assert.equal(res.status, 200);
+    const data = res.body.data;
+
+    assert.deepEqual(data.gate.counts, { out: 2, in: 1, declined: 1, total: 4 });
+
+    // Presence follows approved movements only, so the student turned back is not "out".
+    assert.equal(data.off_premises.length, 1);
+    assert.equal(data.off_premises[0].student_number, 'STU-2026-001');
+    assert.equal(data.off_premises[0].destination, 'Mulago');
+
+    // A spent slip is no longer outstanding; an unused one still is.
+    assert.equal(data.gate.active_permissions.length, 1);
+    assert.equal(data.gate.active_permissions[0].student_number, 'STU-2026-005');
+
+    assert.equal(data.exams.admitted, 1);
+    assert.equal(data.exams.rejected, 1);
+    assert.equal(data.exams.active_clearances, 1);
+
+    assert.equal(data.attendance.present, 1);
+    assert.equal(data.attendance.absent, 1);
+    assert.ok(data.attendance.by_class.length > 0);
+    assert.equal(data.meals.lunch, 1);
+
+    // A day with no traffic reads as empty rather than failing — but a student who is still
+    // out is still out, whichever day is being looked at.
+    const quiet = await call('/api/functions/monitoring', { date: '1999-01-01' });
+    assert.equal(quiet.status, 200);
+    assert.equal(quiet.body.data.gate.counts.total, 0);
+    assert.equal(quiet.body.data.attendance.marked, 0);
+    assert.equal(quiet.body.data.off_premises.length, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('platform administration fails closed and refuses a guessable token', async () => {
+  const { isPlatformOwner, isPlatformOwnerEnabled, platformOwnerRefusal } = await import(
+    '../server/auth/platform-owner.mjs'
+  );
+
+  const saved = process.env.PLATFORM_OWNER_TOKEN;
+  try {
+    // Unset: nothing is a valid owner, and the refusal says why rather than implying a bad token.
+    delete process.env.PLATFORM_OWNER_TOKEN;
+    assert.equal(isPlatformOwnerEnabled(), false);
+    assert.equal(isPlatformOwner({ authorization: 'Bearer anything' }), false);
+    assert.match(platformOwnerRefusal().error, /not enabled/);
+
+    // A short token looks like protection without being any. It is ignored rather than honoured,
+    // so a deployment that sets PLATFORM_OWNER_TOKEN=admin is closed, not wide open.
+    process.env.PLATFORM_OWNER_TOKEN = 'admin';
+    assert.equal(isPlatformOwnerEnabled(), false);
+    assert.equal(isPlatformOwner({ authorization: 'Bearer admin' }), false);
+
+    process.env.PLATFORM_OWNER_TOKEN = 'a-properly-long-operator-token-0123456789';
+    assert.equal(isPlatformOwnerEnabled(), true);
+    assert.equal(isPlatformOwner({ authorization: `Bearer ${process.env.PLATFORM_OWNER_TOKEN}` }), true);
+    assert.equal(isPlatformOwner({ Authorization: `Bearer ${process.env.PLATFORM_OWNER_TOKEN}` }), true);
+
+    // Near misses, and the shapes a client gets wrong.
+    assert.equal(isPlatformOwner({ authorization: `Bearer ${process.env.PLATFORM_OWNER_TOKEN}x` }), false);
+    assert.equal(isPlatformOwner({ authorization: process.env.PLATFORM_OWNER_TOKEN }), false);
+    assert.equal(isPlatformOwner({}), false);
+    assert.equal(platformOwnerRefusal().error, 'Unauthorized');
+  } finally {
+    if (saved === undefined) delete process.env.PLATFORM_OWNER_TOKEN;
+    else process.env.PLATFORM_OWNER_TOKEN = saved;
+  }
+});
+
+test('cross-origin access is limited to the platform own domains', async () => {
+  const { isAllowedOrigin, corsHeaders } = await import('../server/http/cors.mjs');
+
+  const saved = { root: process.env.TENANT_ROOT_DOMAIN, extra: process.env.CORS_EXTRA_ORIGINS };
+  try {
+    process.env.TENANT_ROOT_DOMAIN = 'eschool.ink';
+    delete process.env.CORS_EXTRA_ORIGINS;
+
+    assert.equal(isAllowedOrigin('https://kampala-high.eschool.ink', 'kampala-high.eschool.ink'), true);
+    assert.equal(isAllowedOrigin('https://eschool.ink', 'eschool.ink'), true);
+
+    // The attack this closes: any page on the internet naming a school and reading its data.
+    assert.equal(isAllowedOrigin('https://evil.example', 'kampala-high.eschool.ink'), false);
+    // A look-alike domain that merely ends with the same letters must not pass.
+    assert.equal(isAllowedOrigin('https://noteschool.ink', 'kampala-high.eschool.ink'), false);
+    // Plain HTTP is not one of ours in production.
+    assert.equal(isAllowedOrigin('http://kampala-high.eschool.ink', 'kampala-high.eschool.ink'), false);
+    assert.equal(isAllowedOrigin('', 'kampala-high.eschool.ink'), false);
+    assert.equal(isAllowedOrigin('not a url', 'kampala-high.eschool.ink'), false);
+
+    // Loopback is a developer convenience, and only when the server itself was reached on loopback.
+    assert.equal(isAllowedOrigin('http://localhost:8080', 'localhost:8787'), true);
+    assert.equal(isAllowedOrigin('http://localhost:8080', 'kampala-high.eschool.ink'), false);
+
+    process.env.CORS_EXTRA_ORIGINS = 'https://console.example';
+    assert.equal(isAllowedOrigin('https://console.example', 'eschool.ink'), true);
+
+    // The headers themselves: never a wildcard, always Vary, and credentials only for our own.
+    const allowed = corsHeaders({ req: { headers: { origin: 'https://kampala-high.eschool.ink', host: 'kampala-high.eschool.ink' } } });
+    assert.equal(allowed['Access-Control-Allow-Origin'], 'https://kampala-high.eschool.ink');
+    assert.equal(allowed['Access-Control-Allow-Credentials'], 'true');
+    assert.equal(allowed.Vary, 'Origin');
+
+    const refused = corsHeaders({ req: { headers: { origin: 'https://evil.example', host: 'kampala-high.eschool.ink' } } });
+    assert.equal(refused['Access-Control-Allow-Origin'], undefined);
+    assert.equal(refused.Vary, 'Origin', 'Vary must be set either way so nothing caches one answer for another origin');
+
+    // X-Tenant is advertised only where it is honoured, so the preflight cannot promise what the
+    // server will ignore.
+    const savedAllow = process.env.ALLOW_TENANT_HEADER;
+    delete process.env.ALLOW_TENANT_HEADER;
+    assert.ok(!allowed['Access-Control-Allow-Headers'].includes('X-Tenant'));
+    process.env.ALLOW_TENANT_HEADER = 'true';
+    const withHeader = corsHeaders({ req: { headers: { origin: 'https://eschool.ink', host: 'eschool.ink' } } });
+    assert.ok(withHeader['Access-Control-Allow-Headers'].includes('X-Tenant'));
+    if (savedAllow === undefined) delete process.env.ALLOW_TENANT_HEADER;
+    else process.env.ALLOW_TENANT_HEADER = savedAllow;
+  } finally {
+    if (saved.root === undefined) delete process.env.TENANT_ROOT_DOMAIN;
+    else process.env.TENANT_ROOT_DOMAIN = saved.root;
+    if (saved.extra === undefined) delete process.env.CORS_EXTRA_ORIGINS;
+    else process.env.CORS_EXTRA_ORIGINS = saved.extra;
+  }
+});
+
+test('each school gets its own search indexes, so one cannot overwrite or read another', async () => {
+  const { indexUidFor, INDEX_NAMES } = await import('../server/search/indexer.mjs');
+  const { DEFAULT_TENANT } = await import('../server/db/tenants.mjs');
+
+  // The naming rule. `__` cannot appear in a tenant id (a DNS label), so a-b__c is unambiguous.
+  assert.equal(indexUidFor('kampala-high', 'students'), 'kampala-high__students');
+  assert.equal(indexUidFor('kampala-high', 'lesson_plans'), 'kampala-high__lesson_plans');
+  // A single-school deployment keeps the bare names it already has, so upgrading needs no reindex.
+  assert.equal(indexUidFor(DEFAULT_TENANT, 'students'), 'students');
+  assert.equal(indexUidFor(undefined, 'students'), 'students');
+
+  // No two (tenant, index) pairs can collide, whatever the hyphens in the subdomains.
+  const uids = new Set();
+  for (const tenant of ['a', 'a-b', 'a-b-c', 'kampala-high', DEFAULT_TENANT]) {
+    for (const name of INDEX_NAMES) {
+      const uid = indexUidFor(tenant, name);
+      assert.equal(uids.has(uid), false, `${uid} was produced twice`);
+      uids.add(uid);
+    }
+  }
+
+  await withMeili(async () => {
+    const { runtime, cleanup } = await startTestRuntime();
+
+    try {
+      // The stub has to be the client the service actually uses, so the service is driven directly
+      // with an explicit one rather than through the runtime.
+      const { handleSearchFunction } = await import('../server/services/search.mjs');
+
+      const meiliA = createMeiliStub({
+        hitsByIndex: { 'kampala-high__students': [{ id: 's1', kind: 'student', full_name: 'Emma Johnson' }] },
+      });
+      const a = await handleSearchFunction(
+        runtime.database,
+        { action: 'query', requesterRole: 'teacher', query: 'emma' },
+        meiliA.httpClient,
+        { tenantId: 'kampala-high' },
+      );
+
+      const queriesA = meiliA.requests.filter((request) => request.url.endsWith('/multi-search')).at(-1).body.queries;
+      // Every index this school searches is its own.
+      assert.ok(queriesA.length > 0);
+      for (const query of queriesA) {
+        assert.match(query.indexUid, /^kampala-high__/, 'a school must only ever query its own indexes');
+        // The role filter is unchanged: tenancy decides which index, role decides which documents.
+        assert.equal(query.filter, 'roles = teacher');
+      }
+      // The school's prefix is an implementation detail and does not leak into the response.
+      assert.deepEqual(a.groups.map((group) => group.index), ['students']);
+
+      // The other school's indexes are untouched by the first one's query.
+      const meiliB = createMeiliStub({ hitsByIndex: {} });
+      await handleSearchFunction(
+        runtime.database,
+        { action: 'query', requesterRole: 'teacher', query: 'emma' },
+        meiliB.httpClient,
+        { tenantId: 'gulu-ss' },
+      );
+      const queriesB = meiliB.requests.filter((request) => request.url.endsWith('/multi-search')).at(-1).body.queries;
+      for (const query of queriesB) {
+        assert.match(query.indexUid, /^gulu-ss__/);
+      }
+      assert.equal(
+        queriesA.some((query) => queriesB.some((other) => other.indexUid === query.indexUid)),
+        false,
+        'two schools must not share a single index uid',
+      );
+
+      // A rebuild is the dangerous one: it clears before refilling. Confirm it only ever clears
+      // and writes uids belonging to the school that asked.
+      const meiliRebuild = createMeiliStub();
+      const rebuilt = await handleSearchFunction(
+        runtime.database,
+        { action: 'reindex', requesterRole: 'admin' },
+        meiliRebuild.httpClient,
+        { tenantId: 'kampala-high' },
+      );
+      assert.ok(rebuilt.counts, 'the rebuild should report what it indexed');
+
+      const touched = meiliRebuild.requests
+        .map((request) => request.url.match(/\/indexes\/([^/?]+)/)?.[1])
+        .filter(Boolean);
+      assert.ok(touched.length > 0, 'the rebuild must touch some indexes');
+      for (const uid of touched) {
+        assert.match(uid, /^kampala-high__/, `rebuilding one school touched ${uid}`);
+      }
+
+      // Writes go the same way: an attendance mark in one school refreshes only its own index.
+      const meiliWrite = createMeiliStub();
+      const { syncTable } = await import('../server/search/indexer.mjs');
+      await syncTable(runtime.database, 'attendance_records', {
+        httpClient: meiliWrite.httpClient,
+        tenantId: 'gulu-ss',
+      });
+      const written = meiliWrite.requests
+        .map((request) => request.url.match(/\/indexes\/([^/?]+)/)?.[1])
+        .filter(Boolean);
+      assert.ok(written.length > 0);
+      for (const uid of written) {
+        assert.equal(uid, 'gulu-ss__attendance');
+      }
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+test('a session proves identity, and the role comes from the database rather than the request', async () => {
+  const { issueSessionToken, verifySessionToken, sessionCookie, readCookie, SESSION_COOKIE } = await import(
+    '../server/auth/session.mjs'
+  );
+
+  const savedSecret = process.env.SESSION_SECRET;
+  process.env.SESSION_SECRET = 'a-test-signing-secret-long-enough-to-be-used';
+
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    // The founding account, created the ordinary way.
+    const signup = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup',
+      email: 'head@kampala-high.test',
+      password: 'password123',
+      displayName: 'Head Teacher',
+    });
+    assert.equal(signup.body.data.user.role, 'admin');
+
+    const teacherSignup = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup',
+      email: 'teacher@kampala-high.test',
+      password: 'password123',
+      displayName: 'Grace Nakato',
+    });
+    const teacherId = teacherSignup.body.data.user.id;
+    const approved = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'approve_account',
+      requesterRole: 'admin',
+      userId: teacherId,
+    });
+    assert.equal(approved.body.data.user.approval_status, 'approved');
+
+    const cookieFor = (userId, tenantId = 'default') => ({
+      cookie: `${SESSION_COOKIE}=${encodeURIComponent(issueSessionToken({ userId, tenantId }))}`,
+    });
+
+    const { authenticateRequest } = await import('../server/auth/actor.mjs');
+    const teacherActor = await authenticateRequest({
+      database: runtime.database,
+      headers: cookieFor(teacherId),
+      tenantId: 'default',
+    });
+    assert.equal(teacherActor.role, 'teacher');
+    assert.equal(teacherActor.id, teacherId);
+
+    // The whole point: the request body says admin, the session says teacher, and the session wins.
+    const refused = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/functions/fees',
+      body: { action: 'summary', requesterRole: 'admin' },
+      actor: teacherActor,
+    });
+    assert.equal(refused.status, 400);
+    assert.equal(refused.body.error, 'Unauthorized');
+
+    // No session at all is nobody, whatever the body claims.
+    const anonymous = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/functions/fees',
+      body: { action: 'summary', requesterRole: 'admin' },
+      actor: null,
+    });
+    assert.equal(anonymous.body.error, 'Unauthorized');
+
+    // A demoted account loses its powers on the very next request, not at token expiry — which is
+    // why the role is read from the users row rather than carried in the token.
+    const adminActor = await authenticateRequest({
+      database: runtime.database,
+      headers: cookieFor(signup.body.data.user.id),
+      tenantId: 'default',
+    });
+    assert.equal(adminActor.role, 'admin');
+
+    await runtime.database.query("UPDATE users SET role = 'teacher' WHERE id = $1", [signup.body.data.user.id]);
+    const demoted = await authenticateRequest({
+      database: runtime.database,
+      headers: cookieFor(signup.body.data.user.id),
+      tenantId: 'default',
+    });
+    assert.equal(demoted.role, 'teacher', 'the same cookie must now resolve to the new role');
+
+    // An account that is deleted or un-approved stops authenticating entirely.
+    await runtime.database.query("UPDATE users SET approval_status = 'pending' WHERE id = $1", [teacherId]);
+    assert.equal(
+      await authenticateRequest({ database: runtime.database, headers: cookieFor(teacherId), tenantId: 'default' }),
+      null,
+    );
+
+    // A token minted for one school is refused at another, even before the cookie's host-only scope
+    // is taken into account.
+    const forOtherSchool = issueSessionToken({ userId: teacherId, tenantId: 'gulu-ss' });
+    assert.equal(verifySessionToken(forOtherSchool, { tenantId: 'gulu-ss' })?.userId, teacherId);
+    assert.equal(verifySessionToken(forOtherSchool, { tenantId: 'kampala-high' }), null);
+    assert.equal(
+      await authenticateRequest({
+        database: runtime.database,
+        headers: { cookie: `${SESSION_COOKIE}=${encodeURIComponent(forOtherSchool)}` },
+        tenantId: 'kampala-high',
+      }),
+      null,
+    );
+
+    // Tampering and expiry.
+    const token = issueSessionToken({ userId: teacherId, tenantId: 'default' });
+    const [payload, signature] = token.split('.');
+    assert.equal(verifySessionToken(`${payload}x.${signature}`, { tenantId: 'default' }), null);
+    assert.equal(verifySessionToken(`${payload}.${signature}x`, { tenantId: 'default' }), null);
+    assert.equal(verifySessionToken('nonsense', { tenantId: 'default' }), null);
+    assert.equal(verifySessionToken('', { tenantId: 'default' }), null);
+    assert.equal(
+      verifySessionToken(issueSessionToken({ userId: teacherId, tenantId: 'default', ttlMs: -1 }), {
+        tenantId: 'default',
+      }),
+      null,
+    );
+
+    // A token signed with a different secret is not ours.
+    process.env.SESSION_SECRET = 'a-completely-different-secret-of-sufficient-length';
+    assert.equal(verifySessionToken(token, { tenantId: 'default' }), null);
+    process.env.SESSION_SECRET = 'a-test-signing-secret-long-enough-to-be-used';
+
+    // The cookie is host-only (no Domain), so a browser never sends one school's cookie to another.
+    const cookie = sessionCookie('abc', { secure: true });
+    assert.ok(cookie.includes('HttpOnly'));
+    assert.ok(cookie.includes('SameSite=Lax'), 'downloads are navigations and need Lax, not Strict');
+    assert.ok(cookie.includes('Secure'));
+    assert.ok(!/Domain=/i.test(cookie), 'a Domain attribute would send this school cookie to every school');
+    assert.ok(!sessionCookie('abc', { secure: false }).includes('Secure'));
+
+    assert.equal(readCookie({ cookie: 'other=1; eschool_session=wanted; more=2' }), 'wanted');
+    assert.equal(readCookie({ cookie: 'other=1' }), '');
+    assert.equal(readCookie({}), '');
+  } finally {
+    if (savedSecret === undefined) delete process.env.SESSION_SECRET;
+    else process.env.SESSION_SECRET = savedSecret;
+    await cleanup();
+  }
+});
+
+test('signing in issues a session cookie, and signing out clears it', async () => {
+  const savedSecret = process.env.SESSION_SECRET;
+  process.env.SESSION_SECRET = 'a-test-signing-secret-long-enough-to-be-used';
+
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const signup = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup',
+      email: 'head@school.test',
+      password: 'password123',
+      displayName: 'Head Teacher',
+    });
+    // The founding account is approved on the spot, so it is signed in and gets a cookie.
+    assert.match(signup.headers['Set-Cookie'], /^eschool_session=/);
+    assert.ok(signup.headers['Set-Cookie'].includes('HttpOnly'));
+    // The token never reaches the response body, only the cookie.
+    assert.equal(signup.body.data.setCookie, undefined);
+
+    const signin = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signin',
+      email: 'head@school.test',
+      password: 'password123',
+    });
+    assert.match(signin.headers['Set-Cookie'], /^eschool_session=/);
+
+    // The cookie is the credential, so the server can answer "who am I?" for itself.
+    const { authenticateRequest } = await import('../server/auth/actor.mjs');
+    const cookie = signin.headers['Set-Cookie'].split(';')[0];
+    const actor = await authenticateRequest({ database: runtime.database, headers: { cookie }, tenantId: 'default' });
+    assert.equal(actor.email, 'head@school.test');
+
+    const session = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/functions/auth',
+      body: { action: 'session' },
+      actor,
+    });
+    assert.equal(session.body.data.user.auth_email, 'head@school.test');
+    assert.equal(session.body.data.user.password_hash, undefined);
+
+    // Anonymous: the server says nobody, rather than believing a stored profile.
+    const anonymous = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/functions/auth',
+      body: { action: 'session' },
+      actor: null,
+    });
+    assert.equal(anonymous.body.data.user, null);
+
+    const signout = await dispatch(runtime, 'POST', '/api/functions/auth', { action: 'signout' });
+    assert.match(signout.headers['Set-Cookie'], /Max-Age=0/);
+
+    // A pending account gets no session: it has no access until an administrator approves it.
+    const pending = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup',
+      email: 'new@school.test',
+      password: 'password123',
+      displayName: 'New Teacher',
+    });
+    assert.equal(pending.body.data.pending, true);
+    assert.equal(pending.headers?.['Set-Cookie'], undefined, 'an unapproved account must not be signed in');
+  } finally {
+    if (savedSecret === undefined) delete process.env.SESSION_SECRET;
+    else process.env.SESSION_SECRET = savedSecret;
+    await cleanup();
+  }
+});
+
+test('the generic data endpoint refuses tables a signed-in role may not touch', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const query = (table, actor) =>
+      runtime.dispatch({
+        method: 'POST',
+        pathname: '/api/db',
+        body: { table, operation: 'select', columns: '*', filters: [], limit: 1 },
+        actor,
+      });
+
+    const admin = { id: 'a', role: 'admin', email: 'admin@school.test', name: 'Admin' };
+    const teacher = { id: 't', role: 'teacher', email: 'teacher@school.test', name: 'Teacher' };
+    const support = { id: 's', role: 'support_staff', email: 'gate@school.test', name: 'Askari' };
+
+    // This endpoint had no role check at all: anyone who could reach it could read every invoice
+    // and payment in the school.
+    assert.equal((await query('invoices', admin)).status, 200);
+    assert.equal((await query('invoices', teacher)).status, 403);
+    assert.equal((await query('payments', teacher)).status, 403);
+    assert.equal((await query('receipts', teacher)).status, 403);
+    assert.equal((await query('portal_accounts', teacher)).status, 403);
+
+    // Teaching work is unaffected.
+    assert.equal((await query('students', teacher)).status, 200);
+    assert.equal((await query('attendance_records', teacher)).status, 200);
+    assert.equal((await query('gradebook_entries', teacher)).status, 200);
+
+    // Support staff reach the database through no table at all; they have the fee-status endpoint.
+    assert.equal((await query('students', support)).status, 403);
+    assert.equal((await query('invoices', support)).status, 403);
+
+    // No session is nobody.
+    assert.equal((await query('students', null)).status, 403);
+
+    // An internal caller — a test, or the server calling itself — is not a request and is not
+    // checked, which is what keeps the rest of this suite driving dispatch directly.
+    assert.equal((await query('students', undefined)).status, 200);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the deployment carries every setting a production tenant needs', async () => {
+  // The gap this guards: the server grew sessions, a platform-owner token and multi-tenancy, and
+  // docker-compose.yml passed none of it through. Nothing failed loudly — the app just generated a
+  // session key at boot (signing everyone out on each restart), refused every platform action, and
+  // stayed single-tenant no matter what .env.production said.
+  const { readFile } = await import('node:fs/promises');
+  const compose = await readFile(new URL('../docker-compose.yml', import.meta.url), 'utf8');
+  const example = await readFile(new URL('../.env.production.example', import.meta.url), 'utf8');
+
+  // Settings whose absence breaks or silently weakens a real deployment. Tuning knobs with working
+  // defaults are deliberately not listed — this is the set that has to be handed in.
+  const REQUIRED = [
+    // Without these two the app is either amnesiac or unadministrable.
+    'SESSION_SECRET',
+    'PLATFORM_OWNER_TOKEN',
+    // Decides which origins may call the API, and the link in a school's activation email.
+    'TENANT_ROOT_DOMAIN',
+    // Multi-tenancy itself.
+    'TENANTS',
+    'CONTROL_DATABASE_URL',
+    'PROVISION_ADMIN_DATABASE_URL',
+    'TENANT_DB_URL_TEMPLATE',
+    // Money: unset SUBSCRIPTION_AMOUNT refuses signup, unset webhook secret accepts forged payments.
+    'SUBSCRIPTION_AMOUNT',
+    'PAYMENT_WEBHOOK_SECRET',
+    // A provisioned school is told where it lives by email, or not at all.
+    'EMAIL_MODE',
+    'EMAIL_FROM',
+  ];
+
+  const missingFromCompose = REQUIRED.filter((name) => !compose.includes(`${name}:`));
+  assert.deepEqual(missingFromCompose, [], 'docker-compose.yml must pass these to the app container');
+
+  const missingFromExample = REQUIRED.filter((name) => !example.includes(name));
+  assert.deepEqual(missingFromExample, [], '.env.production.example must document these');
+
+  // The app is reached through the reverse proxy, so its own port stays on loopback by default.
+  assert.match(compose, /\$\{APP_BIND:-127\.0\.0\.1\}/, 'the app port must not default to 0.0.0.0');
+  // Meilisearch holds a copy of every student and invoice and is never talked to by a browser.
+  assert.ok(
+    /127\.0\.0\.1:\$\{MEILI_PORT/.test(compose),
+    'Meilisearch must not be published on every interface',
+  );
+
+  // Both proxies must preserve the Host header, because that is what chooses the school. Rewriting
+  // it sends every school to the default tenant, which serves the wrong data rather than erroring.
+  const nginxHost = await readFile(new URL('../deploy/nginx/docker.conf', import.meta.url), 'utf8');
+  assert.match(nginxHost, /proxy_set_header Host\s+\$host;/);
+  assert.match(nginxHost, /proxy_set_header X-Forwarded-Proto \$scheme;/);
+  assert.match(nginxHost, /proxy_set_header X-Tenant "";/, 'a client must not be able to name a school');
+
+  const site = await readFile(new URL('../deploy/nginx/eschool.ink.conf', import.meta.url), 'utf8');
+  assert.match(site, /proxy_set_header Host\s+\$host;/);
+  assert.match(site, /client_max_body_size/, 'base64 photos and logos exceed the 1MB default');
+
+  const caddyfile = await readFile(new URL('../deploy/caddy/Caddyfile', import.meta.url), 'utf8');
+  assert.match(caddyfile, /reverse_proxy app:8787/);
+  assert.match(caddyfile, /header_up -X-Tenant/);
+});
+
+test('student records are not readable without a session, whatever the URL says', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const students = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students',
+      operation: 'select',
+      columns: '*',
+      filters: [],
+      limit: 1,
+    });
+    const studentId = students.body.data[0].id;
+
+    const get = (pathname, actor, params = {}) =>
+      runtime.dispatch({ method: 'GET', pathname, searchParams: new URLSearchParams(params), actor });
+
+    const teacher = { id: 't', role: 'teacher', email: 'teacher@school.test', name: 'Teacher' };
+    const support = { id: 's', role: 'support_staff', designation: 'askari', email: 'gate@school.test', name: 'Askari' };
+
+    // These two routes had no gate of any kind: the id in the URL was the whole of the security.
+    for (const pathname of [`/api/report-cards/${studentId}.pdf`, `/api/id-cards/${studentId}.pdf`, '/api/id-cards.pdf']) {
+      assert.equal((await get(pathname, null)).status, 403, `${pathname} must refuse an anonymous request`);
+      assert.equal((await get(pathname, support)).status, 403, `${pathname} must refuse support staff`);
+      assert.equal((await get(pathname, teacher)).status, 200, `${pathname} must still work for a teacher`);
+    }
+
+    // The QR image on an ID card leaks the student number, so it is gated with the card itself.
+    assert.equal((await get(`/api/id-cards/${studentId}.png`, null)).status, 403);
+    assert.equal((await get(`/api/id-cards/${studentId}.png`, teacher)).status, 200);
+
+    // Passing a role in the query string is no longer a way in.
+    assert.equal((await get(`/api/report-cards/${studentId}.pdf`, null, { requesterRole: 'admin' })).status, 403);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a scan shows the sections the scanner actually holds, not the ones they ask for', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const students = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students',
+      operation: 'select',
+      columns: '*',
+      filters: [],
+      limit: 1,
+    });
+    const code = students.body.data[0].student_id;
+
+    const scan = (body, actor) =>
+      runtime.dispatch({ method: 'POST', pathname: '/api/functions/student-card', body, actor });
+
+    const askari = { id: 's', role: 'support_staff', designation: 'askari', email: 'gate@school.test', name: 'Askari' };
+    const bursar = { id: 'b', role: 'admin', designation: 'bursar', email: 'bursar@school.test', name: 'Bursar' };
+
+    // The gate keeper asks for the bursar's view. The profile comes from their session, so what
+    // comes back is the gate keeper's — this used to be decided by two fields in the request body.
+    const overreach = await scan({ code, role: 'admin', designation: 'bursar' }, askari);
+    assert.equal(overreach.body.data.profile.role, 'support_staff');
+    assert.equal(overreach.body.data.profile.designation, 'askari');
+    assert.ok(!overreach.body.data.sections.includes('fees'), 'an askari must not be handed fee data');
+
+    // The bursar, signed in as themselves, does see fees.
+    const real = await scan({ code }, bursar);
+    assert.equal(real.body.data.profile.role, 'admin');
+    assert.ok(real.body.data.sections.includes('fees'));
+
+    // No session, no scan.
+    assert.equal((await scan({ code }, null)).body.error, 'Unauthorized');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a school can bring its own AI key, and it never leaves the server in the clear', async () => {
+  const savedSecret = process.env.SECRETS_KEY;
+  const savedPlatformKey = process.env.ANTHROPIC_API_KEY;
+  process.env.SECRETS_KEY = 'a-test-encryption-key-of-sufficient-length';
+  process.env.ANTHROPIC_API_KEY = 'platform-key';
+
+  const { runtime, cleanup } = await startTestRuntime();
+  const { credentialFor, withCredentials } = await import('../server/services/credential-store.mjs');
+  const { loadCredentialOverrides, encryptSecret, decryptSecret } = await import(
+    '../server/services/provider-credentials.mjs'
+  );
+
+  try {
+    const settings = (body, actor) =>
+      runtime.dispatch({ method: 'POST', pathname: '/api/functions/settings', body, actor });
+
+    const admin = { id: 'a', role: 'admin', email: 'head@school.test', name: 'Head' };
+    const teacher = { id: 't', role: 'teacher', email: 'teacher@school.test', name: 'Teacher' };
+
+    // Provider keys are an administrator's business, and a teacher cannot read or set them.
+    assert.equal((await settings({ action: 'list_provider_keys' }, teacher)).body.error, 'Unauthorized');
+    assert.equal((await settings({ action: 'save_provider_key', provider: 'anthropic', apiKey: 'x' }, teacher)).body.error, 'Unauthorized');
+
+    // Before the school sets anything, every provider is inherited from the platform.
+    const before = await settings({ action: 'list_provider_keys' }, admin);
+    const anthropicBefore = before.body.data.providers.find((entry) => entry.provider === 'anthropic');
+    assert.equal(anthropicBefore.source, 'platform');
+    assert.equal(anthropicBefore.platformHasKey, true);
+    assert.equal(anthropicBefore.keyPreview, '');
+
+    const saved = await settings(
+      { action: 'save_provider_key', provider: 'anthropic', apiKey: 'sk-school-secret-key-1234' },
+      admin,
+    );
+    const anthropicAfter = saved.body.data.providers.find((entry) => entry.provider === 'anthropic');
+    assert.equal(anthropicAfter.source, 'school');
+    // Masked, never returned: enough to recognise, not enough to use.
+    assert.equal(anthropicAfter.keyPreview, '••••••••1234');
+    assert.ok(!JSON.stringify(saved.body).includes('sk-school-secret-key-1234'), 'the key must not be echoed back');
+
+    // Encrypted at rest, not merely hidden by the API — a database dump is a normal artefact.
+    const stored = (await runtime.database.query("SELECT api_key FROM provider_credentials WHERE provider = 'anthropic'")).rows[0];
+    assert.ok(stored.api_key.startsWith('v1:'));
+    assert.ok(!stored.api_key.includes('sk-school-secret-key-1234'));
+    assert.equal(decryptSecret(stored.api_key), 'sk-school-secret-key-1234');
+
+    // The override is what the model layer actually reads.
+    const overrides = await loadCredentialOverrides(runtime.database);
+    assert.equal(overrides.ANTHROPIC_API_KEY, 'sk-school-secret-key-1234');
+    assert.equal(credentialFor('ANTHROPIC_API_KEY'), 'platform-key', 'outside a request, the platform key applies');
+    await withCredentials(overrides, async () => {
+      assert.equal(credentialFor('ANTHROPIC_API_KEY'), 'sk-school-secret-key-1234');
+      // A provider the school has not overridden still falls through to the platform.
+      assert.equal(credentialFor('OPENAI_API_KEY'), process.env.OPENAI_API_KEY);
+    });
+    // The scope really is a scope.
+    assert.equal(credentialFor('ANTHROPIC_API_KEY'), 'platform-key');
+
+    // An address-only provider (Ollama has no key) is set by base URL.
+    await settings({ action: 'save_provider_key', provider: 'ollama', baseUrl: 'http://school-box:11434' }, admin);
+    assert.equal((await loadCredentialOverrides(runtime.database)).OLLAMA_BASE_URL, 'http://school-box:11434');
+    assert.match(
+      (await settings({ action: 'save_provider_key', provider: 'ollama', apiKey: 'nope' }, admin)).body.error,
+      /does not use an API key/,
+    );
+    assert.match(
+      (await settings({ action: 'save_provider_key', provider: 'nonsense', apiKey: 'x' }, admin)).body.error,
+      /Unknown AI provider/,
+    );
+
+    // Removing the override hands the school back to the platform.
+    const removed = await settings({ action: 'delete_provider_key', provider: 'anthropic' }, admin);
+    assert.equal(removed.body.data.providers.find((entry) => entry.provider === 'anthropic').source, 'platform');
+    assert.equal((await loadCredentialOverrides(runtime.database)).ANTHROPIC_API_KEY, undefined);
+
+    // A key written under a SECRETS_KEY that has since been rotated away is unreadable. The school
+    // falls back to the platform rather than its chat window throwing, and the row stays visible so
+    // an administrator can re-enter it.
+    await settings({ action: 'save_provider_key', provider: 'openai', apiKey: 'sk-openai-school-key' }, admin);
+    process.env.SECRETS_KEY = 'a-completely-different-encryption-key-value';
+    const rotated = await settings({ action: 'list_provider_keys' }, admin);
+    const openai = rotated.body.data.providers.find((entry) => entry.provider === 'openai');
+    assert.equal(openai.keyUnreadable, true);
+    assert.equal((await loadCredentialOverrides(runtime.database)).OPENAI_API_KEY, undefined);
+
+    // With no SECRETS_KEY at all, storing a key is refused rather than silently written in clear.
+    delete process.env.SECRETS_KEY;
+    const refused = await settings({ action: 'save_provider_key', provider: 'groq', apiKey: 'sk-groq' }, admin);
+    assert.match(refused.body.error, /SECRETS_KEY is not configured/);
+    assert.throws(() => encryptSecret('anything'), /SECRETS_KEY/);
+  } finally {
+    if (savedSecret === undefined) delete process.env.SECRETS_KEY;
+    else process.env.SECRETS_KEY = savedSecret;
+    if (savedPlatformKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = savedPlatformKey;
+    await cleanup();
+  }
+});
+
+test('money paid before an invoice exists comes off that invoice when it is raised', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const fees = (body) =>
+    dispatch(runtime, 'POST', '/api/functions/fees', { requesterRole: 'admin', actorName: 'Bursar', ...body });
+
+  try {
+    const students = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students', operation: 'select', columns: '*', filters: [], limit: 2,
+    });
+    const [alice, bob] = students.body.data;
+
+    const structure = await fees({
+      action: 'save_fee_structure',
+      name: 'Term 1 Tuition',
+      amount: 500000,
+      gradeLevel: alice.grade_level,
+      term: 'Term 1',
+      academicYear: '2026',
+      dueDate: '2026-02-01',
+    });
+    const structureId = structure.body.data.structure.id;
+
+    // A family pays a deposit at admission, before anyone has billed them. There is no invoice for
+    // this money to settle, so it sits as credit.
+    const deposit = await fees({
+      action: 'record_payment',
+      studentId: alice.id,
+      amount: 200000,
+      paymentMethod: 'cash',
+    });
+    assert.equal(deposit.body.data.allocations.length, 0, 'there is nothing to allocate against yet');
+    assert.equal(deposit.body.data.creditAmount, 200000);
+
+    // Now the bill goes out. It must arrive already reduced by the deposit.
+    const billed = await fees({ action: 'bill_student', studentId: alice.id, feeStructureId: structureId });
+    assert.equal(billed.body.data.amount, 500000, 'the invoice is still for the full fee');
+    assert.equal(billed.body.data.credit_applied, 200000);
+    assert.equal(billed.body.data.balance_due, 300000, 'the family owes the difference, not the whole fee');
+    assert.equal(billed.body.data.invoice.status, 'partial');
+
+    // A student who paid nothing is billed in full — the credit is per student, not pooled.
+    const bobBilled = await fees({ action: 'bill_student', studentId: bob.id, feeStructureId: structureId });
+    assert.equal(bobBilled.body.data.credit_applied, 0);
+    assert.equal(bobBilled.body.data.balance_due, 500000);
+
+    // The ledger agrees: paid 200000, owing 300000, and no double-counting.
+    const ledger = await fees({ action: 'student_ledger', studentId: alice.id });
+    assert.equal(ledger.body.data.summary.total_paid, 200000);
+    assert.equal(ledger.body.data.summary.balance_due, 300000);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a prepayment larger than the bill settles it and the rest stays as credit', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const fees = (body) =>
+    dispatch(runtime, 'POST', '/api/functions/fees', { requesterRole: 'admin', actorName: 'Bursar', ...body });
+
+  try {
+    const students = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students', operation: 'select', columns: '*', filters: [], limit: 1,
+    });
+    const [student] = students.body.data;
+
+    const first = await fees({
+      action: 'save_fee_structure',
+      name: 'Term 1',
+      amount: 100000,
+      gradeLevel: student.grade_level,
+      term: 'Term 1',
+      academicYear: '2026',
+      dueDate: '2026-02-01',
+    });
+    const second = await fees({
+      action: 'save_fee_structure',
+      name: 'Term 2',
+      amount: 100000,
+      gradeLevel: student.grade_level,
+      term: 'Term 2',
+      academicYear: '2026',
+      dueDate: '2026-06-01',
+    });
+
+    // A parent pays a whole year up front.
+    await fees({ action: 'record_payment', studentId: student.id, amount: 250000, paymentMethod: 'bank' });
+
+    const term1 = await fees({
+      action: 'bill_student', studentId: student.id, feeStructureId: first.body.data.structure.id,
+    });
+    assert.equal(term1.body.data.credit_applied, 100000);
+    assert.equal(term1.body.data.balance_due, 0);
+    assert.equal(term1.body.data.invoice.status, 'paid', 'a fully prepaid invoice is not left open');
+
+    // The remaining 150,000 is still theirs, and settles the next term too.
+    const term2 = await fees({
+      action: 'bill_student', studentId: student.id, feeStructureId: second.body.data.structure.id,
+    });
+    assert.equal(term2.body.data.credit_applied, 100000);
+    assert.equal(term2.body.data.balance_due, 0);
+
+    // 50,000 left over, and it is not conjured twice: a third bill takes only what remains.
+    const third = await fees({
+      action: 'save_fee_structure',
+      name: 'Term 3', amount: 100000, gradeLevel: student.grade_level,
+      term: 'Term 3', academicYear: '2026', dueDate: '2026-09-01',
+    });
+    const term3 = await fees({
+      action: 'bill_student', studentId: student.id, feeStructureId: third.body.data.structure.id,
+    });
+    assert.equal(term3.body.data.credit_applied, 50000, 'only the credit that is actually left');
+    assert.equal(term3.body.data.balance_due, 50000);
+
+    const ledger = await fees({ action: 'student_ledger', studentId: student.id });
+    assert.equal(ledger.body.data.summary.total_paid, 250000, 'still exactly what was paid, once');
+    assert.equal(ledger.body.data.summary.balance_due, 50000);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a billing run credits each student only what that student paid', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const fees = (body) =>
+    dispatch(runtime, 'POST', '/api/functions/fees', { requesterRole: 'admin', actorName: 'Bursar', ...body });
+
+  try {
+    const students = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students', operation: 'select', columns: '*', filters: [], limit: 50,
+    });
+    const grade = students.body.data[0].grade_level;
+    const cohort = students.body.data.filter((s) => s.grade_level === grade);
+    assert.ok(cohort.length >= 2, 'need at least two students in one grade for this to mean anything');
+
+    const structure = await fees({
+      action: 'save_fee_structure',
+      name: 'Bulk term', amount: 400000, gradeLevel: grade,
+      term: 'Term 1', academicYear: '2026', dueDate: '2026-02-01',
+    });
+
+    // One student in the cohort paid early; the others did not.
+    await fees({ action: 'record_payment', studentId: cohort[0].id, amount: 150000, paymentMethod: 'momo' });
+
+    const run = await fees({ action: 'run_billing', confirm: true, feeStructureId: structure.body.data.structure.id });
+    assert.equal(run.body.data.credit_applied, 150000, 'the run reports what it absorbed');
+
+    const byStudent = new Map(run.body.data.invoices.map((invoice) => [invoice.student_id, invoice]));
+    assert.equal(Number(byStudent.get(cohort[0].id).balance_due), 250000);
+    assert.equal(Number(byStudent.get(cohort[1].id).balance_due), 400000, 'nobody else is credited');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('live events reach only the people in the school they were sent to', async () => {
+  const { publish, subscribe, presence, reset, subscribers } = await import('../server/events/bus.mjs');
+  const { messageEvent, reaches } = await import('../server/events/audience.mjs');
+
+  try {
+    const seen = [];
+    const add = (tenant, user) =>
+      subscribe(tenant, { user, deliver: (event) => seen.push({ tenant, user: user.id, event }) });
+
+    const teacherA = { id: 'a-teacher', role: 'teacher', designation: null, name: 'A' };
+    const askariA = { id: 'a-askari', role: 'support_staff', designation: 'askari', name: 'Gate' };
+    const teacherB = { id: 'b-teacher', role: 'teacher', designation: null, name: 'B' };
+
+    add('kampala-high', teacherA);
+    add('kampala-high', askariA);
+    const dropB = add('gulu-ss', teacherB);
+
+    const row = (over) => ({
+      id: `m-${seen.length}-${Math.random()}`,
+      subject: 's', body: 'b', category: 'message', priority: 'normal', sender_name: 'Head',
+      student_id: null, created_at: new Date().toISOString(),
+      audience_kind: 'all', audience_value: '', recipient_user_id: null, sender_user_id: 'head',
+      ...over,
+    });
+
+    // The test that matters: one process serves every school, so a broadcast must not cross.
+    publish('kampala-high', messageEvent(row({ audience_kind: 'all' })));
+    assert.equal(seen.length, 2, 'both people in that school');
+    assert.ok(seen.every((entry) => entry.tenant === 'kampala-high'), 'and nobody in the other');
+
+    seen.length = 0;
+    publish('kampala-high', messageEvent(row({ audience_kind: 'role', audience_value: 'teacher' })));
+    assert.deepEqual(seen.map((e) => e.user), ['a-teacher']);
+
+    seen.length = 0;
+    publish('kampala-high', messageEvent(row({ audience_kind: 'designation', audience_value: 'askari' })));
+    assert.deepEqual(seen.map((e) => e.user), ['a-askari'], 'a teacher has no designation to match');
+
+    seen.length = 0;
+    publish('kampala-high', messageEvent(row({ audience_kind: 'user', recipient_user_id: 'a-teacher' })));
+    assert.deepEqual(seen.map((e) => e.user), ['a-teacher']);
+
+    // A broadcast is invisible to its own author, exactly as the SQL clause has it.
+    seen.length = 0;
+    publish('kampala-high', messageEvent(row({ audience_kind: 'all', sender_user_id: 'a-teacher' })));
+    assert.deepEqual(seen.map((e) => e.user), ['a-askari']);
+
+    // The system is nobody, so a system event reaches everyone including whoever triggered it.
+    seen.length = 0;
+    publish('kampala-high', messageEvent(row({ audience_kind: 'all', sender_user_id: null })));
+    assert.equal(seen.length, 2);
+
+    // Presence is per school and counts people, not connections.
+    add('kampala-high', teacherA);
+    assert.equal(presence('kampala-high').length, 2, 'two people, three connections');
+    assert.equal(presence('kampala-high').find((p) => p.id === 'a-teacher').connections, 2);
+    assert.equal(presence('gulu-ss').length, 1);
+
+    // Unsubscribing removes exactly one, and an empty school leaves nothing behind.
+    dropB();
+    assert.equal(subscribers('gulu-ss').length, 0);
+
+    // A subscriber whose transport has died does not stop the others being served.
+    seen.length = 0;
+    subscribe('kampala-high', { user: { id: 'broken', role: 'teacher' }, deliver: () => { throw new Error('socket gone'); } });
+    const delivered = publish('kampala-high', messageEvent(row({ audience_kind: 'all' })));
+    assert.equal(delivered, 3, 'the three healthy connections still received it');
+
+    // The pure rule, checked directly.
+    assert.equal(reaches(messageEvent(row({ audience_kind: 'all' })), { id: 'x', role: 'teacher' }), true);
+    assert.equal(reaches(messageEvent(row({ audience_kind: 'designation', audience_value: 'cook' })), { id: 'x', role: 'support_staff', designation: null }), false);
+    assert.equal(reaches(null, { id: 'x' }), false);
+    assert.equal(reaches(messageEvent(row({})), null), false);
+  } finally {
+    reset();
+  }
+});
+
+test('a reconnecting client replays exactly what it missed, and nothing from another school', async () => {
+  const { replayMessages, encodeCursor, decodeCursor } = await import('../server/events/replay.mjs');
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const send = (body) =>
+    dispatch(runtime, 'POST', '/api/functions/messages', { actorEmail: 'head@school.test', ...body });
+
+  try {
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email: 'head@school.test', password: 'password123', displayName: 'Head',
+    });
+    const teacher = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email: 'teach@school.test', password: 'password123', displayName: 'Grace',
+    });
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'approve_account', requesterRole: 'admin', userId: teacher.body.data.user.id,
+    });
+
+    for (const subject of ['First', 'Second', 'Third']) {
+      await send({ action: 'send', audienceKind: 'all', subject, body: subject });
+    }
+
+    const inbox = await dispatch(runtime, 'POST', '/api/functions/messages', {
+      action: 'inbox', actorEmail: 'teach@school.test',
+    });
+    const all = inbox.body.data.messages;
+    assert.equal(all.length, 3);
+
+    // The reader is the same shape authenticateRequest returns.
+    const me = { id: teacher.body.data.user.id, role: 'teacher', designation: null };
+    const { audienceClause } = await import('../server/local-backend.mjs').then((m) => ({
+      // Not exported; rebuild the same predicate the inbox uses.
+      audienceClause: (user, i) => ({
+        sql: `((m.audience_kind = 'all')
+               OR (m.audience_kind = 'role' AND m.audience_value = $${i})
+               OR (m.audience_kind = 'designation' AND m.audience_value = $${i + 1})
+               OR (m.audience_kind = 'user' AND m.recipient_user_id = $${i + 2}))
+              AND (m.sender_user_id IS NULL OR m.sender_user_id <> $${i + 2})`,
+        values: [user.role, user.designation || null, user.id],
+      }),
+    }));
+
+    // Oldest first in the inbox listing is newest-first, so the last entry is the first sent.
+    const oldest = all[all.length - 1];
+    const cursor = encodeCursor(oldest.created_at, oldest.id);
+
+    const replayed = await replayMessages(runtime.database, me, { cursor, audienceClause });
+    assert.deepEqual(
+      replayed.events.map((event) => event.message.subject),
+      ['Second', 'Third'],
+      'everything after the cursor, in order, and not the one already seen',
+    );
+    assert.equal(replayed.truncated, false);
+
+    // A cursor at the newest message replays nothing.
+    const newest = all[0];
+    const none = await replayMessages(runtime.database, me, {
+      cursor: encodeCursor(newest.created_at, newest.id),
+      audienceClause,
+    });
+    assert.equal(none.events.length, 0);
+
+    // No cursor is not an invitation to replay the entire history.
+    assert.deepEqual(await replayMessages(runtime.database, me, { audienceClause }), { events: [], truncated: false });
+    assert.deepEqual(await replayMessages(runtime.database, me, { cursor: 'rubbish', audienceClause }), { events: [], truncated: false });
+
+    // Being told there is more to come is what lets a long-absent client reload instead of guessing.
+    const capped = await replayMessages(runtime.database, me, { cursor, audienceClause, limit: 1 });
+    assert.equal(capped.events.length, 1);
+    assert.equal(capped.truncated, true);
+
+    // The cursor round-trips.
+    assert.equal(decodeCursor(encodeCursor(oldest.created_at, oldest.id)).id, oldest.id);
+    assert.equal(decodeCursor('no-pipe'), null);
+    assert.equal(decodeCursor(''), null);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a mobile client authenticates with a bearer token instead of a cookie', async () => {
+  const saved = process.env.SESSION_SECRET;
+  process.env.SESSION_SECRET = 'a-test-signing-secret-long-enough-to-be-used';
+
+  const { runtime, cleanup } = await startTestRuntime();
+  const { authenticateRequest } = await import('../server/auth/actor.mjs');
+  const { issueSessionToken } = await import('../server/auth/session.mjs');
+
+  try {
+    const signup = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email: 'head@school.test', password: 'password123', displayName: 'Head',
+    });
+    const userId = signup.body.data.user.id;
+
+    // Signing in only hands back the token when the client asks — a browser never does, so the
+    // token stays out of reach of anything running on the page.
+    const browser = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signin', email: 'head@school.test', password: 'password123',
+    });
+    assert.equal(browser.body.data.token, undefined);
+    assert.match(browser.headers['Set-Cookie'], /^eschool_session=/);
+
+    const mobile = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signin', email: 'head@school.test', password: 'password123', issueToken: true,
+    });
+    assert.ok(mobile.body.data.token, 'a client that asks is given one');
+    assert.equal(typeof mobile.body.data.expiresIn, 'number');
+    // The cookie is still set, so the same call serves a hybrid client.
+    assert.match(mobile.headers['Set-Cookie'], /^eschool_session=/);
+
+    const bearer = { authorization: `Bearer ${mobile.body.data.token}` };
+    const actor = await authenticateRequest({ database: runtime.database, headers: bearer, tenantId: 'default' });
+    assert.equal(actor.id, userId);
+    assert.equal(actor.role, 'admin');
+
+    // Everything a cookie is refused for, a bearer token is refused for too.
+    const wrongTenant = { authorization: `Bearer ${issueSessionToken({ userId, tenantId: 'gulu-ss' })}` };
+    assert.equal(await authenticateRequest({ database: runtime.database, headers: wrongTenant, tenantId: 'default' }), null);
+    assert.equal(await authenticateRequest({ database: runtime.database, headers: { authorization: 'Bearer nonsense' }, tenantId: 'default' }), null);
+    assert.equal(await authenticateRequest({ database: runtime.database, headers: { authorization: mobile.body.data.token }, tenantId: 'default' }), null, 'the Bearer prefix is required');
+    assert.equal(await authenticateRequest({ database: runtime.database, headers: {}, tenantId: 'default' }), null);
+
+    // A cookie wins over a header, so nothing on a page can override a real browser session.
+    const both = {
+      cookie: browser.headers['Set-Cookie'].split(';')[0],
+      authorization: `Bearer ${issueSessionToken({ userId: 'someone-else', tenantId: 'default' })}`,
+    };
+    assert.equal((await authenticateRequest({ database: runtime.database, headers: both, tenantId: 'default' })).id, userId);
+  } finally {
+    if (saved === undefined) delete process.env.SESSION_SECRET;
+    else process.env.SESSION_SECRET = saved;
+    await cleanup();
+  }
+});
+
+test('the unread badge is right past the inbox page limit, and re-reading is idempotent', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const asHead = (body) =>
+    dispatch(runtime, 'POST', '/api/functions/messages', { actorEmail: 'head@school.test', ...body });
+  const asTeacher = (body) =>
+    dispatch(runtime, 'POST', '/api/functions/messages', { actorEmail: 'teach@school.test', ...body });
+
+  try {
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email: 'head@school.test', password: 'password123', displayName: 'Head',
+    });
+    const teacher = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email: 'teach@school.test', password: 'password123', displayName: 'Grace',
+    });
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'approve_account', requesterRole: 'admin', userId: teacher.body.data.user.id,
+    });
+
+    // More than the inbox's 50-row page, which is where the JS count silently under-reported.
+    for (let index = 0; index < 60; index += 1) {
+      await asHead({ action: 'send', audienceKind: 'all', subject: `Notice ${index}`, body: 'x' });
+    }
+
+    const inbox = await asTeacher({ action: 'inbox' });
+    assert.equal(inbox.body.data.messages.length, 50, 'the page is still capped');
+    assert.equal(inbox.body.data.unread, 50, 'and its own count is capped with it');
+
+    const count = await asTeacher({ action: 'unread_count' });
+    assert.equal(count.body.data.unread, 60, 'the badge counts everything, not just the page');
+
+    // Reading the same message twice must not raise a unique violation, which the old
+    // SELECT-then-INSERT did under two devices at once.
+    const first = inbox.body.data.messages[0].id;
+    const once = await asTeacher({ action: 'read', messageId: first });
+    assert.equal(once.status, 200);
+    const twice = await asTeacher({ action: 'read', messageId: first });
+    assert.equal(twice.status, 200, 're-reading is a no-op, not an error');
+
+    assert.equal((await asTeacher({ action: 'unread_count' })).body.data.unread, 59);
+
+    await asTeacher({ action: 'read_all' });
+    assert.equal((await asTeacher({ action: 'unread_count' })).body.data.unread, 10, 'read_all clears the page it can see');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the gate can list the permissions waiting for it, and close the one it names', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const permission = (body) => dispatch(runtime, 'POST', '/api/functions/gate-permission', body);
+  const pass = (body) => dispatch(runtime, 'POST', '/api/functions/gate-pass', body);
+  const pending = async () => (await permission({ action: 'pending' })).body.data.pending;
+
+  const grant = async (code, reason, destination, grantedBy) => {
+    const res = await permission({ action: 'grant', code, reason, destination, grantedBy });
+    assert.ok(res.body.data?.permission, `grant failed: ${JSON.stringify(res.body)}`);
+    return res.body.data.permission;
+  };
+
+  try {
+    assert.deepEqual(await pending(), [], 'nothing is waiting before anything is granted');
+
+    // The gate keeper's list is what a teacher's grant lands in.
+    const slip = await grant('STU-2026-011', 'Dental appointment', 'Mulago', 'Class Teacher');
+    const waiting = await pending();
+    assert.equal(waiting.length, 1);
+    assert.equal(waiting[0].id, slip.id);
+    assert.equal(waiting[0].destination, 'Mulago');
+    assert.equal(waiting[0].granted_by, 'Class Teacher');
+    assert.ok(waiting[0].full_name, 'the row carries a name the gate can read off the screen');
+    assert.ok(waiting[0].student_number, 'and the number the gate posts back to decide it');
+
+    // Approving spends the slip, and the response must describe the row as it now stands —
+    // returning the pre-update copy would report `active` for a permission just closed.
+    const approved = await pass({
+      code: waiting[0].student_number, direction: 'out',
+      decision: 'approved', recordedBy: 'Gate Keeper',
+    });
+    assert.equal(approved.body.data.pass.decision, 'approved');
+    assert.equal(approved.body.data.permission.status, 'used');
+    assert.equal(approved.body.data.permission.closed_by, 'Gate Keeper');
+    assert.equal(approved.body.data.on_premises, false);
+    assert.deepEqual(await pending(), [], 'a spent slip leaves the list');
+
+    // A refusal closes the slip too, with the gate's reason, and leaves the student inside.
+    await grant('STU-2026-012', 'Home visit', 'Ntinda', 'Matron');
+    const declined = await pass({
+      code: 'STU-2026-012', direction: 'out', decision: 'declined',
+      note: 'No uniform', recordedBy: 'Gate Keeper',
+    });
+    assert.equal(declined.body.data.permission.status, 'declined');
+    assert.equal(declined.body.data.permission.decline_reason, 'No uniform');
+    assert.equal(declined.body.data.on_premises, true, 'a student turned back never left');
+    assert.deepEqual(await pending(), [], 'a refused slip cannot be presented again');
+
+    /* Two open slips for one student: deciding without naming one closes whichever is newest and
+       strands the other as `active` forever, with nothing able to clear it off the gate's list. */
+    const first = await grant('STU-2026-013', 'First', 'Clinic', 'Teacher A');
+    const second = await grant('STU-2026-013', 'Second', 'Library', 'Teacher B');
+    assert.equal((await pending()).length, 2);
+
+    const named = await pass({
+      code: 'STU-2026-013', direction: 'out', decision: 'approved',
+      recordedBy: 'Gate Keeper', permissionId: first.id,
+    });
+    assert.equal(named.body.data.permission.id, first.id, 'the named slip is the one closed');
+    assert.equal(named.body.data.permission.reason, 'First');
+
+    const left = await pending();
+    assert.equal(left.length, 1, 'the other slip is still waiting, not orphaned');
+    assert.equal(left[0].id, second.id);
+
+    // An id that is closed, or belongs to somebody else, is refused rather than silently ignored.
+    const stale = await pass({
+      code: 'STU-2026-013', direction: 'out', decision: 'approved',
+      recordedBy: 'Gate Keeper', permissionId: first.id,
+    });
+    assert.match(stale.body.error, /not open for this student/);
+
+    const foreign = await pass({
+      code: 'STU-2026-014', direction: 'out', decision: 'approved',
+      recordedBy: 'Gate Keeper', permissionId: second.id,
+    });
+    assert.match(foreign.body.error, /not open for this student/);
+    assert.equal((await pending()).length, 1, 'a refused decision writes nothing');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('teacher performance attributes work through allocations, and refuses to cross between teachers', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const perf = (body) => dispatch(runtime, 'POST', '/api/functions/teacher-performance', body);
+  const asAdmin = (body) => perf({ requesterRole: 'admin', ...body });
+  const db = (body) => dispatch(runtime, 'POST', '/api/db', body);
+
+  const signup = async (email, name) => {
+    const res = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email, password: 'test1234', displayName: name,
+    });
+    const id = res.body.data.user.id;
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'approve_account', requesterRole: 'admin', userId: id,
+    });
+    return id;
+  };
+
+  try {
+    await signup('head-perf@kps.ac.ug', 'Head');           // first account is the admin
+    const taught = await signup('taught@kps.ac.ug', 'Allocated Teacher');
+    const untaught = await signup('untaught@kps.ac.ug', 'Unallocated Teacher');
+
+    const students = (await db({ table: 'students', operation: 'select', columns: 'id,grade_level,class_section' })).body.data;
+    const group = students.filter(
+      (s) => s.grade_level === students[0].grade_level && s.class_section === students[0].class_section,
+    );
+
+    // Nothing links a login to a teacher record until they are given something to teach.
+    const before = (await asAdmin({ action: 'staff' })).body.data.staff;
+    assert.equal(before.find((row) => row.auth_email === 'taught@kps.ac.ug').teacher_id, null);
+
+    const allocated = await asAdmin({
+      action: 'allocate', userId: taught, subject: 'Biology',
+      gradeLevel: group[0].grade_level, classSection: group[0].class_section,
+      academicYear: '2026', term: 'Term 2',
+    });
+    assert.equal(allocated.body.data.allocated.students, group.length,
+      'one allocation row per student in the class');
+
+    const after = (await asAdmin({ action: 'staff' })).body.data.staff
+      .find((row) => row.auth_email === 'taught@kps.ac.ug');
+    assert.ok(after.teacher_id, 'allocating creates the teacher record and links the login');
+    assert.equal(after.allocation_rows, group.length);
+
+    // Allocating the same class again replaces it, so a class list can be corrected.
+    await asAdmin({
+      action: 'allocate', userId: taught, subject: 'Biology',
+      gradeLevel: group[0].grade_level, classSection: group[0].class_section,
+      academicYear: '2026', term: 'Term 2',
+    });
+    const repeated = (await asAdmin({ action: 'staff' })).body.data.staff
+      .find((row) => row.auth_email === 'taught@kps.ac.ug');
+    assert.equal(repeated.allocation_rows, group.length, 're-allocating replaces rather than doubles');
+
+    const subjectId = (await db({ table: 'subjects_catalog', operation: 'select', columns: 'id,name' }))
+      .body.data.find((row) => row.name === 'Biology').id;
+
+    // Alternating clear passes and clear fails, so the split is a fact rather than a guess.
+    let index = 0;
+    for (const student of group) {
+      await db({ table: 'gradebook_entries', operation: 'insert', payload: {
+        id: `gb-perf-${index}`, student_id: student.id, subject_id: subjectId,
+        score: index % 2 === 0 ? 80 : 30, max_score: 100 } });
+      await db({ table: 'attendance_records', operation: 'insert', payload: {
+        id: `att-perf-${index}`, student_id: student.id, attendance_date: '2026-08-20',
+        status: index % 2 === 0 ? 'present' : 'absent', marked_by: 'Allocated Teacher' } });
+      index += 1;
+    }
+    const passes = group.filter((_, n) => n % 2 === 0).length;
+
+    const summary = (await asAdmin({ action: 'summary', userId: taught })).body.data;
+    assert.equal(summary.results.source, 'allocated');
+    assert.equal(summary.results.passed, passes);
+    assert.equal(summary.results.failed, group.length - passes);
+    assert.equal(summary.attendance.total, group.length, 'the register is read for the allocated students');
+    assert.equal(summary.classes.length, 1);
+    assert.deepEqual(summary.classes[0].subjects, ['Biology']);
+
+    // The pass mark is a question the reader asks, not a constant baked into the figures.
+    assert.equal((await asAdmin({ action: 'summary', userId: taught, passMark: 95 })).body.data.results.passed, 0);
+    assert.equal((await asAdmin({ action: 'summary', userId: taught, passMark: 10 })).body.data.results.failed, 0);
+
+    /* With no allocation there is no defensible way to say which marks are whose, so none are
+       claimed — an empty result is honest where an inferred one would be a guess. */
+    const none = (await asAdmin({ action: 'summary', userId: untaught })).body.data;
+    assert.equal(none.teacher.allocated, false);
+    assert.equal(none.results.source, 'none');
+    assert.equal(none.results.entries, 0);
+    assert.equal(none.attendance.source, 'inferred');
+
+    // A teacher may read themselves and nobody else.
+    const own = await perf({ requesterRole: 'teacher', actorId: taught, action: 'summary', userId: taught });
+    assert.equal(own.body.data.teacher.id, taught);
+
+    const other = await perf({ requesterRole: 'teacher', actorId: taught, action: 'summary', userId: untaught });
+    assert.equal(other.body.error, 'Unauthorized', 'one teacher cannot read another by changing an id');
+
+    const escalate = await perf({ requesterRole: 'teacher', actorId: taught, action: 'allocate', userId: taught, subject: 'Physics', gradeLevel: 10, classSection: 'A', academicYear: '2026', term: 'Term 2' });
+    assert.equal(escalate.body.error, 'Unauthorized', 'and cannot allocate themselves work');
+
+    const stranger = await perf({ requesterRole: 'support_staff', action: 'staff' });
+    assert.equal(stranger.body.error, 'Unauthorized', 'non-teaching staff have no business here');
   } finally {
     await cleanup();
   }

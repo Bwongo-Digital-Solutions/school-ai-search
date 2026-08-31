@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { createSeedStudents } from './seed-data.mjs';
+import { ensureCurriculumSeeded } from '../rag/seed-corpus.mjs';
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS students (
@@ -69,6 +70,16 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS approval_status TEXT NOT NULL DEFAULT
 ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
 ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin', 'teacher', 'support_staff'));
 
+-- A staff member's specialisation within their role, which decides what a student ID scan
+-- reveals to them: an admin may keep the books (bursar), and support staff split into the
+-- gate (askari), the dormitories (matron) and the kitchen (cook). NULL means the role carries
+-- no specialisation, which is how every account created before this migration reads.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS designation TEXT;
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_designation_check;
+ALTER TABLE users ADD CONSTRAINT users_designation_check
+  CHECK (designation IS NULL OR designation IN ('bursar', 'askari', 'matron', 'cook'));
+
+
 -- The school's global identity: one row (id = 'default'), edited by an admin under Settings and
 -- read by every document (report cards, ID cards, receipts, statements, finance reports) and the
 -- app header. In a multi-tenant deployment each tenant database carries its own row.
@@ -85,6 +96,22 @@ CREATE TABLE IF NOT EXISTS school_settings (
   updated_by TEXT NOT NULL DEFAULT ''
 );
 
+-- The school's academic level, set once by an administrator, which decides the grading system every
+-- report card uses: development descriptors for the early years, PLE/UCE aggregate points and
+-- divisions for primary and O-Level, principal letter grades for A-Level, and a GPA for tertiary.
+-- 'secondary' resolves to two different scales depending on the student's own grade, because one
+-- secondary school runs both O-Level and A-Level. Defaults to 'secondary' so an existing database
+-- keeps grading exactly as it did before this column existed.
+ALTER TABLE school_settings ADD COLUMN IF NOT EXISTS school_level TEXT NOT NULL DEFAULT 'secondary';
+ALTER TABLE school_settings DROP CONSTRAINT IF EXISTS school_settings_level_check;
+ALTER TABLE school_settings ADD CONSTRAINT school_settings_level_check
+  CHECK (school_level IN ('pre_school', 'kindergarten', 'primary', 'secondary', 'technical', 'tertiary'));
+
+-- Which national examination system the level maps onto. Uganda schools grade on UNEB scales;
+-- international schools and institutions report a GPA. Kept separate from school_level because the
+-- two are independent: an international primary school and a Ugandan one are both 'primary'.
+ALTER TABLE school_settings ADD COLUMN IF NOT EXISTS grading_country TEXT NOT NULL DEFAULT 'uganda';
+
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
@@ -100,6 +127,83 @@ CREATE TABLE IF NOT EXISTS messages (
   attachments JSONB NOT NULL DEFAULT '[]'::jsonb,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- The curriculum corpus that grounds the Lesson Planner and the Digital Examiner. A document is
+-- either one of the bundled topic outlines (source_type 'seed'), a file a teacher uploaded, or
+-- something pulled in over MCP. content_hash makes re-ingesting idempotent: an unchanged upload is
+-- recognised and skipped rather than duplicating every chunk.
+CREATE TABLE IF NOT EXISTS curriculum_documents (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  curriculum TEXT NOT NULL DEFAULT '',
+  subject TEXT NOT NULL DEFAULT '',
+  grade_level INTEGER,
+  academic_year TEXT NOT NULL DEFAULT '',
+  term TEXT NOT NULL DEFAULT '',
+  source_type TEXT NOT NULL DEFAULT 'upload' CHECK (source_type IN ('seed', 'upload', 'mcp')),
+  source_uri TEXT NOT NULL DEFAULT '',
+  mime_type TEXT NOT NULL DEFAULT 'text/markdown',
+  content_hash TEXT NOT NULL DEFAULT '',
+  uploaded_by TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- One retrievable passage. curriculum/subject/grade_level are denormalised from the parent so the
+-- metadata filter runs without a join, and embedding holds a plain JSONB float array rather than a
+-- pgvector column: pg-mem backs both the test suite and the Vercel demo and supports no extensions,
+-- and a single school's corpus is small enough to rank in Node. embedding is NULL when no embedding
+-- provider is configured, which is the normal case — retrieval then falls back to BM25.
+CREATE TABLE IF NOT EXISTS curriculum_chunks (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL REFERENCES curriculum_documents(id) ON DELETE CASCADE,
+  chunk_index INTEGER NOT NULL DEFAULT 0,
+  heading TEXT NOT NULL DEFAULT '',
+  content TEXT NOT NULL,
+  token_count INTEGER NOT NULL DEFAULT 0,
+  embedding JSONB,
+  embedding_model TEXT,
+  curriculum TEXT NOT NULL DEFAULT '',
+  subject TEXT NOT NULL DEFAULT '',
+  grade_level INTEGER,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- External MCP servers an admin has registered. auth_token is stored plaintext, the same posture as
+-- the provider API keys that already live in the environment, but it is never returned to the
+-- browser: the settings handler masks it on every read and only overwrites it when a new value is
+-- supplied. discovered_tools caches the last successful tools/list so the chat can render the tool
+-- menu without a round trip to the server on every page load.
+-- A school's own AI provider credentials, overriding the platform's for that school only.
+--
+-- One deployment now serves many schools, and the provider keys were process-global: every school
+-- spent the operator's Anthropic budget and could not bring its own. A row here overrides the
+-- environment for one school; no row means it inherits the platform's.
+--
+-- api_key is stored encrypted (AES-256-GCM under SECRETS_KEY), not merely masked on read: a tenant
+-- database dump is a normal operational artefact — backups, a support copy — and it must not hand
+-- over the school's key. base_url is not secret and is stored plainly.
+CREATE TABLE IF NOT EXISTS provider_credentials (
+  provider TEXT PRIMARY KEY,
+  api_key TEXT NOT NULL DEFAULT '',
+  base_url TEXT NOT NULL DEFAULT '',
+  updated_by TEXT NOT NULL DEFAULT '',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS mcp_servers (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  url TEXT NOT NULL,
+  auth_token TEXT NOT NULL DEFAULT '',
+  transport TEXT NOT NULL DEFAULT 'http' CHECK (transport IN ('http')),
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  last_connected_at TIMESTAMPTZ,
+  last_error TEXT NOT NULL DEFAULT '',
+  discovered_tools JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -155,6 +259,11 @@ CREATE TABLE IF NOT EXISTS teachers (
   department TEXT
 );
 
+-- Which staff record this login teaches under. A login and a teacher record were previously
+-- joinable only by hoping auth_email and teachers.email matched, which nothing checked and nothing
+-- maintained; this makes the link a real one. NULL until the account is given something to teach.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS teacher_id TEXT REFERENCES teachers(id) ON DELETE SET NULL;
+
 CREATE TABLE IF NOT EXISTS subject_allocations (
   id TEXT PRIMARY KEY,
   subject_id TEXT REFERENCES subjects_catalog(id) ON DELETE SET NULL,
@@ -164,6 +273,13 @@ CREATE TABLE IF NOT EXISTS subject_allocations (
   academic_year TEXT NOT NULL,
   term TEXT NOT NULL
 );
+
+-- A class here is the (grade, section) pair the register already works in — the same definition
+-- roll call uses, taken off the students themselves. The classes table is the other, unpopulated
+-- notion of a class; class_id stays available for schools that fill it, but nothing has to for an
+-- allocation to be complete.
+ALTER TABLE subject_allocations ADD COLUMN IF NOT EXISTS grade_level INTEGER;
+ALTER TABLE subject_allocations ADD COLUMN IF NOT EXISTS class_section TEXT;
 
 CREATE TABLE IF NOT EXISTS timetables (
   id TEXT PRIMARY KEY,
@@ -220,6 +336,131 @@ CREATE TABLE IF NOT EXISTS exam_schedules (
   start_time TEXT NOT NULL,
   end_time TEXT NOT NULL,
   room TEXT
+);
+
+-- Lesson Planner. One row per lesson a teacher plans, generated against the curriculum corpus and
+-- then edited freely — the generated version is a first draft, not a finished artefact, so every
+-- field stays editable, and refs records which syllabus passages the draft came from.
+-- activities holds the lesson's shape: [{stage, minutes, teacher_activity, learner_activity}].
+CREATE TABLE IF NOT EXISTS lesson_plans (
+  id TEXT PRIMARY KEY,
+  teacher_id TEXT REFERENCES teachers(id) ON DELETE SET NULL,
+  subject_id TEXT REFERENCES subjects_catalog(id) ON DELETE SET NULL,
+  subject_name TEXT NOT NULL DEFAULT '',
+  class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
+  curriculum TEXT NOT NULL DEFAULT '',
+  academic_year TEXT NOT NULL DEFAULT '',
+  term TEXT NOT NULL DEFAULT '',
+  grade_level INTEGER,
+  topic TEXT NOT NULL DEFAULT '',
+  subtopic TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL,
+  duration_minutes INTEGER NOT NULL DEFAULT 40,
+  lesson_date DATE,
+  period TEXT NOT NULL DEFAULT '',
+  competencies JSONB NOT NULL DEFAULT '[]'::jsonb,
+  learning_outcomes JSONB NOT NULL DEFAULT '[]'::jsonb,
+  materials JSONB NOT NULL DEFAULT '[]'::jsonb,
+  activities JSONB NOT NULL DEFAULT '[]'::jsonb,
+  assessment JSONB NOT NULL DEFAULT '[]'::jsonb,
+  differentiation TEXT NOT NULL DEFAULT '',
+  homework TEXT NOT NULL DEFAULT '',
+  -- The retrieval citations this plan was grounded in. Named refs, not references, because
+  -- REFERENCES is a SQL reserved word and would need quoting at every single use site.
+  refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved', 'delivered')),
+  generated_by JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Digital Examiner. A blueprint is the teacher's fine-tuning object: it fixes the curriculum, the
+-- year, subject and grade, and the shape of the paper (how marks split across topics, difficulty,
+-- Bloom levels and question types). Generation reads it; nothing else does.
+CREATE TABLE IF NOT EXISTS exam_blueprints (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  curriculum TEXT NOT NULL DEFAULT '',
+  subject_id TEXT REFERENCES subjects_catalog(id) ON DELETE SET NULL,
+  subject_name TEXT NOT NULL DEFAULT '',
+  grade_level INTEGER,
+  academic_year TEXT NOT NULL DEFAULT '',
+  term TEXT NOT NULL DEFAULT '',
+  paper_label TEXT NOT NULL DEFAULT '',
+  assessment_type TEXT NOT NULL DEFAULT 'exam'
+    CHECK (assessment_type IN ('quiz', 'assignment', 'test', 'exam', 'mock')),
+  duration_minutes INTEGER NOT NULL DEFAULT 90,
+  total_marks INTEGER NOT NULL DEFAULT 100,
+  topic_weights JSONB NOT NULL DEFAULT '[]'::jsonb,
+  difficulty_mix JSONB NOT NULL DEFAULT '{}'::jsonb,
+  bloom_mix JSONB NOT NULL DEFAULT '{}'::jsonb,
+  question_type_mix JSONB NOT NULL DEFAULT '{}'::jsonb,
+  sections JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- The reusable question bank. Questions outlive the paper they were generated for, so a blueprint
+-- can be deleted without losing them, and a teacher can approve once and reuse for years.
+-- source_references holds the retrieval citations the question was grounded in, which is what makes
+-- a generated question auditable against the syllabus rather than taken on trust.
+CREATE TABLE IF NOT EXISTS exam_questions (
+  id TEXT PRIMARY KEY,
+  blueprint_id TEXT REFERENCES exam_blueprints(id) ON DELETE SET NULL,
+  curriculum TEXT NOT NULL DEFAULT '',
+  subject_id TEXT REFERENCES subjects_catalog(id) ON DELETE SET NULL,
+  subject_name TEXT NOT NULL DEFAULT '',
+  grade_level INTEGER,
+  topic TEXT NOT NULL DEFAULT '',
+  subtopic TEXT NOT NULL DEFAULT '',
+  question_type TEXT NOT NULL DEFAULT 'short_answer',
+  difficulty TEXT NOT NULL DEFAULT 'moderate' CHECK (difficulty IN ('easy', 'moderate', 'challenging')),
+  bloom_level TEXT NOT NULL DEFAULT 'understand',
+  command_word TEXT NOT NULL DEFAULT '',
+  stem TEXT NOT NULL,
+  options JSONB NOT NULL DEFAULT '[]'::jsonb,
+  correct_answer TEXT NOT NULL DEFAULT '',
+  marking_scheme JSONB NOT NULL DEFAULT '[]'::jsonb,
+  marks INTEGER NOT NULL DEFAULT 1,
+  expected_time_minutes INTEGER NOT NULL DEFAULT 2,
+  assessment_objective TEXT NOT NULL DEFAULT '',
+  source_references JSONB NOT NULL DEFAULT '[]'::jsonb,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved', 'retired')),
+  review_notes TEXT NOT NULL DEFAULT '',
+  generated_by JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- An assembled paper. exam_id is NULL until it is published, at which point a real row is written
+-- into exams (and exam_schedules) so the rest of the school system — timetabling, the gradebook,
+-- report cards — sees it as any other exam. ON DELETE SET NULL so removing the exam leaves the
+-- paper itself intact as a draft.
+CREATE TABLE IF NOT EXISTS generated_papers (
+  id TEXT PRIMARY KEY,
+  blueprint_id TEXT REFERENCES exam_blueprints(id) ON DELETE SET NULL,
+  exam_id TEXT REFERENCES exams(id) ON DELETE SET NULL,
+  title TEXT NOT NULL,
+  curriculum TEXT NOT NULL DEFAULT '',
+  subject_id TEXT REFERENCES subjects_catalog(id) ON DELETE SET NULL,
+  subject_name TEXT NOT NULL DEFAULT '',
+  grade_level INTEGER,
+  academic_year TEXT NOT NULL DEFAULT '',
+  term TEXT NOT NULL DEFAULT '',
+  assessment_type TEXT NOT NULL DEFAULT 'exam',
+  duration_minutes INTEGER NOT NULL DEFAULT 90,
+  total_marks INTEGER NOT NULL DEFAULT 100,
+  instructions TEXT NOT NULL DEFAULT '',
+  question_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+  sections JSONB NOT NULL DEFAULT '[]'::jsonb,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'published')),
+  published_at TIMESTAMPTZ,
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS gradebook_entries (
@@ -441,6 +682,31 @@ CREATE TABLE IF NOT EXISTS internal_messages (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Who a message is for. It was one named recipient; a staff room also needs "every teacher",
+-- "the gate" and "everybody", so the audience is a kind and a value: 'user' with the
+-- recipient_user_id above, 'role' or 'designation' with the group named in audience_value, or
+-- 'all'. Existing rows are direct messages, which is what the defaults say.
+ALTER TABLE internal_messages ADD COLUMN IF NOT EXISTS audience_kind TEXT NOT NULL DEFAULT 'user';
+ALTER TABLE internal_messages DROP CONSTRAINT IF EXISTS internal_messages_audience_check;
+ALTER TABLE internal_messages ADD CONSTRAINT internal_messages_audience_check
+  CHECK (audience_kind IN ('user', 'role', 'designation', 'all'));
+ALTER TABLE internal_messages ADD COLUMN IF NOT EXISTS audience_value TEXT NOT NULL DEFAULT '';
+-- Denormalised so a message still says who sent it after the account is deleted.
+ALTER TABLE internal_messages ADD COLUMN IF NOT EXISTS sender_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE internal_messages ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'normal';
+-- 'message' is staff writing to each other; 'event' is the system reporting something that
+-- happened. They share a feed because the bell is one bell.
+ALTER TABLE internal_messages ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'message';
+
+-- Read state per person, because one message now reaches many. The row on
+-- internal_messages could only ever describe a single reader.
+CREATE TABLE IF NOT EXISTS internal_message_reads (
+  id TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL REFERENCES internal_messages(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  read_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS library_books (
   id TEXT PRIMARY KEY,
   isbn TEXT,
@@ -497,6 +763,98 @@ CREATE TABLE IF NOT EXISTS hostel_assignments (
   end_date DATE,
   status TEXT NOT NULL DEFAULT 'active'
 );
+
+-- One row per movement through the school gate, written when the askari scans an ID card.
+-- The authoriser is the person who permitted the movement (a parent, the matron, a teacher)
+-- and is recorded as free text, because that person is often not a system user.
+CREATE TABLE IF NOT EXISTS gate_passes (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  direction TEXT NOT NULL CHECK (direction IN ('out', 'in')),
+  authorised_by TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  recorded_by TEXT NOT NULL DEFAULT '',
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Permission for a student to leave, granted ahead of time by a teacher, the matron or an
+-- administrator. The gate does not grant permission, it checks one: the askari scans the card,
+-- reads who allowed the trip and where the student is going, and then approves or declines.
+-- Separating the two means the person at the gate is never the person authorising the exit.
+CREATE TABLE IF NOT EXISTS gate_permissions (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  reason TEXT NOT NULL DEFAULT '',
+  destination TEXT NOT NULL DEFAULT '',
+  granted_by TEXT NOT NULL DEFAULT '',
+  granted_by_email TEXT NOT NULL DEFAULT '',
+  granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  valid_until TIMESTAMPTZ,
+  expected_return DATE,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'used', 'declined', 'cancelled')),
+  closed_at TIMESTAMPTZ,
+  closed_by TEXT NOT NULL DEFAULT '',
+  decline_reason TEXT NOT NULL DEFAULT ''
+);
+
+-- The gate's own verdict on a movement. A declined attempt is still recorded — a student turned
+-- back at the gate is exactly the event a security log exists to capture — so presence is read
+-- from approved movements only. Defaults to 'approved' so movements written before the gate
+-- could decline continue to read as approved.
+ALTER TABLE gate_passes ADD COLUMN IF NOT EXISTS decision TEXT NOT NULL DEFAULT 'approved';
+ALTER TABLE gate_passes DROP CONSTRAINT IF EXISTS gate_passes_decision_check;
+ALTER TABLE gate_passes ADD CONSTRAINT gate_passes_decision_check
+  CHECK (decision IN ('approved', 'declined'));
+ALTER TABLE gate_passes ADD COLUMN IF NOT EXISTS permission_id TEXT
+  REFERENCES gate_permissions(id) ON DELETE SET NULL;
+ALTER TABLE gate_passes ADD COLUMN IF NOT EXISTS destination TEXT NOT NULL DEFAULT '';
+ALTER TABLE gate_passes ADD COLUMN IF NOT EXISTS note TEXT NOT NULL DEFAULT '';
+
+-- Permission to sit an examination, granted by the bursar or an administrator once the
+-- student's obligations are settled. The invigilator does not grant clearance, they check
+-- one: they scan at the exam room door and admit or turn the student away.
+CREATE TABLE IF NOT EXISTS exam_clearances (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  exam_id TEXT REFERENCES exams(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
+  note TEXT NOT NULL DEFAULT '',
+  granted_by TEXT NOT NULL DEFAULT '',
+  granted_by_email TEXT NOT NULL DEFAULT '',
+  granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  valid_until TIMESTAMPTZ,
+  revoked_at TIMESTAMPTZ,
+  revoked_by TEXT NOT NULL DEFAULT ''
+);
+
+-- The invigilator's verdict at the exam room door. A rejection is recorded rather than
+-- dropped, so a student turned away can be accounted for afterwards.
+CREATE TABLE IF NOT EXISTS exam_admissions (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  exam_id TEXT REFERENCES exams(id) ON DELETE SET NULL,
+  clearance_id TEXT REFERENCES exam_clearances(id) ON DELETE SET NULL,
+  decision TEXT NOT NULL CHECK (decision IN ('approved', 'rejected')),
+  note TEXT NOT NULL DEFAULT '',
+  recorded_by TEXT NOT NULL DEFAULT '',
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- One row per meal a student has actually been served, written when the cook scans an ID
+-- card at the serving point. The absence of a row is what "has not eaten" means, so the
+-- unique index is what stops a second helping being recorded as a first.
+CREATE TABLE IF NOT EXISTS meal_records (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  meal_date DATE NOT NULL,
+  meal TEXT NOT NULL CHECK (meal IN ('breakfast', 'lunch', 'supper')),
+  served_by TEXT NOT NULL DEFAULT '',
+  served_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS meal_records_student_meal_idx
+  ON meal_records (student_id, meal_date, meal);
 
 CREATE TABLE IF NOT EXISTS inventory_items (
   id TEXT PRIMARY KEY,
@@ -567,6 +925,21 @@ CREATE INDEX IF NOT EXISTS idx_payments_invoice ON payments(invoice_id);
 CREATE INDEX IF NOT EXISTS idx_receipts_payment ON receipts(payment_id);
 CREATE INDEX IF NOT EXISTS idx_fee_bursaries_student_status ON fee_bursaries(student_id, status);
 CREATE INDEX IF NOT EXISTS idx_student_fee_standings_student ON student_fee_standings(student_id, status);
+-- The gate polls its pending list every minute and only ever wants the active slips.
+CREATE INDEX IF NOT EXISTS idx_gate_permissions_status ON gate_permissions(status, granted_at DESC);
+-- Backs the metadata narrowing that retrieval does before it ranks anything in Node.
+CREATE INDEX IF NOT EXISTS idx_curriculum_chunks_filter ON curriculum_chunks(curriculum, subject, grade_level);
+CREATE INDEX IF NOT EXISTS idx_curriculum_chunks_document ON curriculum_chunks(document_id, chunk_index);
+CREATE INDEX IF NOT EXISTS idx_curriculum_documents_lookup ON curriculum_documents(curriculum, subject);
+-- Backs the question bank's default listing: "approved questions for this subject and grade".
+CREATE INDEX IF NOT EXISTS idx_exam_questions_bank ON exam_questions(subject_id, grade_level, status);
+CREATE INDEX IF NOT EXISTS idx_exam_questions_topic ON exam_questions(curriculum, topic);
+CREATE INDEX IF NOT EXISTS idx_exam_questions_blueprint ON exam_questions(blueprint_id);
+CREATE INDEX IF NOT EXISTS idx_generated_papers_status ON generated_papers(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_exam_blueprints_subject ON exam_blueprints(subject_id, grade_level);
+-- Backs a teacher's "my plans" listing and the scheme-of-work sequence for a term.
+CREATE INDEX IF NOT EXISTS idx_lesson_plans_owner ON lesson_plans(created_by, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_lesson_plans_scope ON lesson_plans(subject_id, grade_level, academic_year, term);
 `;
 
 const STUDENT_COLUMNS = [
@@ -592,25 +965,113 @@ const STUDENT_COLUMNS = [
   'notes',
 ];
 
-export const initializeDatabase = async (database) => {
+export const initializeDatabase = async (database, { httpClient = fetch } = {}) => {
   await database.query(SCHEMA_SQL);
   await ensureStudentsSeeded(database);
   await ensureSchoolSettingsSeeded(database);
   await ensureAttendanceUniqueness(database);
+  await ensureMessageReadUniqueness(database);
+  await ensureMessageIndexes(database);
+  await seedCurriculumCorpus(database, httpClient);
 };
 
-// One attendance record per student per day. Created here (not in SCHEMA_SQL) and guarded, so a
-// database that already holds duplicate rows logs a warning and keeps booting instead of failing;
-// the write path also upserts, so new duplicates cannot be created.
+// The bundled curriculum outlines. Guarded rather than awaited bare, because seeding may reach an
+// embedding provider: a network failure there must not stop the server from booting, and the
+// corpus still works lexically with no embeddings at all.
+const seedCurriculumCorpus = async (database, httpClient) => {
+  try {
+    await ensureCurriculumSeeded(database, { httpClient });
+  } catch (error) {
+    console.warn(
+      'Skipped seeding the curriculum corpus; the Lesson Planner and Digital Examiner will start empty:',
+      error instanceof Error ? error.message : error,
+    );
+  }
+};
+
+/**
+ * One attendance record per student per day.
+ *
+ * Created here rather than in SCHEMA_SQL and guarded, so a database that already holds duplicate
+ * rows logs a warning and keeps booting instead of failing outright. The write path upserts on the
+ * same key (see `conflictTarget` on attendance_records in local-backend.mjs), which is what stops
+ * new duplicates — but that upsert needs this index to exist, so a database with duplicates cannot
+ * record attendance until they are cleaned up. The warning says so.
+ */
+/** One read per person per message; re-reading is a no-op rather than a duplicate row. */
+const ensureMessageReadUniqueness = async (database) => {
+  try {
+    await database.query(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_message_read_unique ON internal_message_reads(message_id, user_id)',
+    );
+  } catch (error) {
+    console.warn(
+      'Could not create the unique index on internal_message_reads:',
+      error instanceof Error ? error.message : error,
+    );
+  }
+};
+
+/**
+ * `internal_messages` had no index at all, which was survivable while the only reader was a rare
+ * inbox query. It is not survivable now: a reconnecting client replays by `created_at`, and a phone
+ * on a bad network reconnects often enough to make a sequential scan of every message a school has
+ * ever sent into the hottest query in the app.
+ */
+const ensureMessageIndexes = async (database) => {
+  for (const statement of [
+    // Replay, and the inbox's own ORDER BY created_at DESC.
+    'CREATE INDEX IF NOT EXISTS idx_internal_messages_created_at ON internal_messages(created_at)',
+    // The `audience_kind = 'user'` arm of the audience predicate.
+    'CREATE INDEX IF NOT EXISTS idx_internal_messages_recipient ON internal_messages(recipient_user_id)',
+  ]) {
+    try {
+      await database.query(statement);
+    } catch (error) {
+      console.warn(
+        'Could not create a message index:',
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+};
+
 const ensureAttendanceUniqueness = async (database) => {
   try {
     await database.query(
       'CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_unique ON attendance_records(student_id, attendance_date)',
     );
+
+    // idx_attendance_student_date covers the same two columns, so the unique index above fully
+    // subsumes it — keeping both would cost an extra write on every attendance record for nothing.
+    // It is dropped only once the unique index exists, so a database still carrying duplicates
+    // keeps its index and its query performance until it is cleaned up.
+    //
+    // This also works around a pg-mem limitation that would otherwise break the upsert on the test
+    // and demo databases: with a non-unique index present on the same columns, pg-mem matches that
+    // one for ON CONFLICT and rejects the statement, never finding the unique index beside it.
+    await database.query('DROP INDEX IF EXISTS idx_attendance_student_date');
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const isDuplicateData = error?.code === '23505' || /could not create unique index|duplicate key/i.test(message);
+
+    if (!isDuplicateData) {
+      // Not a uniqueness problem — say what it actually was rather than misdiagnosing it.
+      console.warn('Could not create the unique attendance index:', message);
+      return;
+    }
+
     console.warn(
-      'Skipped the unique attendance index — duplicate (student, date) rows exist. Clean them up to enforce it:',
-      error instanceof Error ? error.message : error,
+      [
+        'Skipped the unique attendance index — duplicate (student, date) rows exist.',
+        // Postgres names the offending key in DETAIL; without it this message is a dead end.
+        error?.detail ? `  ${error.detail}` : null,
+        '  Attendance saves will fail until these are cleaned up. To inspect and fix:',
+        '    node scripts/dedupe-attendance.mjs           # dry run, shows what it would remove',
+        '    node scripts/dedupe-attendance.mjs --apply   # collapse duplicates and add the index',
+      ]
+        .filter(Boolean)
+        .join('\n'),
     );
   }
 };

@@ -24,6 +24,7 @@ import {
   toIsoDate,
 } from './fee-math.mjs';
 import { issueReceipt, nextInvoiceNumbers } from './fee-documents.mjs';
+import { requireRole, resolveActor } from '../auth/actor.mjs';
 
 const DEFAULT_CURRENCY = process.env.PAYMENT_CURRENCY || 'UGX';
 
@@ -34,6 +35,74 @@ const trimmed = (value) => String(value ?? '').trim();
 const positiveAmount = (value) => {
   const amount = Number(value);
   return Number.isFinite(amount) && amount > 0 ? amount : null;
+};
+
+/**
+ * Money a student has paid that no invoice has yet absorbed.
+ *
+ * Families pay before they are billed — a deposit at admission, a parent settling next term early,
+ * a mobile-money transfer that arrives before the bursar has run the billing. Until now that money
+ * sat in `payments` doing nothing: `recordPayment` spreads a payment over *open* invoices, and when
+ * there are none the remainder was simply left over. The next invoice then went out for its full
+ * amount as though nothing had been paid, and the family was chased for money already in the bank.
+ *
+ * Credit is derived, not stored:
+ *
+ *     credit = (everything paid) - (everything an invoice actually absorbed)
+ *
+ * where the second term is `total_amount - balance_due` summed over the student's invoices. Nothing
+ * to keep in sync, nothing that can disagree with the ledger, and it stays correct if an invoice is
+ * later voided or adjusted.
+ *
+ * Summed in JavaScript rather than with SUM over an expression: a student has a handful of invoices,
+ * and pg-mem — which backs the test suite and the demo — is unreliable with aggregates over
+ * arithmetic, exactly the kind of difference that passes here and fails against real Postgres.
+ */
+const unallocatedCredit = async (executor, studentId) => {
+  const [payments, invoices] = await Promise.all([
+    executor.query('SELECT amount FROM payments WHERE student_id = $1', [studentId]),
+    executor.query('SELECT total_amount, balance_due FROM invoices WHERE student_id = $1', [studentId]),
+  ]);
+
+  const paid = payments.rows.reduce((sum, row) => sum + toAmount(row.amount), 0);
+  const absorbed = invoices.rows.reduce(
+    (sum, row) => sum + (toAmount(row.total_amount) - toAmount(row.balance_due)),
+    0,
+  );
+
+  // Never negative: an invoice written down below what was paid against it is a discount, not a debt
+  // owed back to the school.
+  return roundMoney(Math.max(0, paid - absorbed));
+};
+
+/**
+ * Settles a freshly created invoice against money the student had already paid.
+ *
+ * Called inside the same transaction that created the invoice, so a family that paid first is never
+ * billed for money the school is already holding — not even for the instant between the two writes.
+ */
+const applyCreditToInvoice = async (executor, invoice) => {
+  const credit = await unallocatedCredit(executor, invoice.student_id);
+  if (credit <= 0) return { invoice, creditApplied: 0 };
+
+  const balance = toAmount(invoice.balance_due);
+  const applied = roundMoney(Math.min(balance, credit));
+  if (applied <= 0) return { invoice, creditApplied: 0 };
+
+  const newBalance = roundMoney(balance - applied);
+  // Status computed here rather than in SQL: reusing one parameter as both a numeric assignment and
+  // an integer comparison makes real Postgres reject the statement, as recordPayment notes.
+  const { rows } = await executor.query(
+    `
+      UPDATE invoices
+      SET balance_due = $1, status = $2
+      WHERE id = $3
+      RETURNING *
+    `,
+    [newBalance, newBalance <= 0 ? 'paid' : 'partial', invoice.id],
+  );
+
+  return { invoice: rows[0] || invoice, creditApplied: applied };
 };
 
 const identity = (student) => ({
@@ -337,7 +406,7 @@ const runBilling = async ({ database, body, actor }) => {
 
   const { feeStructure, rows, issueDate, dueDate } = preview;
 
-  const { created: invoices, skippedRows } = await withTransaction(database, async (executor) => {
+  const { created: invoices, skippedRows, creditApplied } = await withTransaction(database, async (executor) => {
     // Re-read what has already been billed from inside the transaction rather than trusting the
     // preview. Two admins can press Bill at the same moment, and this is what makes the retry
     // after a billing_key collision converge on "skip" instead of colliding all over again.
@@ -356,6 +425,8 @@ const runBilling = async ({ database, body, actor }) => {
 
     const numbers = await nextInvoiceNumbers(executor, issueDate, billable.length);
     const created = [];
+    // Across the whole run, so the summary can say how much of the billing was already covered.
+    let creditApplied = 0;
 
     for (const [index, row] of billable.entries()) {
       const { rows: inserted } = await executor.query(
@@ -383,7 +454,9 @@ const runBilling = async ({ database, body, actor }) => {
           billingKeyFor(feeStructure.id, row.student_id),
         ],
       );
-      created.push(inserted[0]);
+      const settled = await applyCreditToInvoice(executor, inserted[0]);
+      if (settled.creditApplied > 0) creditApplied += settled.creditApplied;
+      created.push(settled.invoice);
     }
 
     await writeAudit(executor, actor, {
@@ -397,13 +470,21 @@ const runBilling = async ({ database, body, actor }) => {
         total_billed: roundMoney(billable.reduce((sum, row) => sum + row.net, 0)),
         currency: feeStructure.currency,
         due_date: dueDate,
+        ...(creditApplied > 0 ? { credit_applied: roundMoney(creditApplied) } : {}),
       },
     });
 
-    return { created, skippedRows: skipped };
+    return { created, skippedRows: skipped, creditApplied: roundMoney(creditApplied) };
   });
 
-  return { created: invoices.length, skipped: skippedRows.length, invoices, skippedRows };
+  return {
+    created: invoices.length,
+    skipped: skippedRows.length,
+    invoices,
+    skippedRows,
+    // How much of this run was already covered by money paid before the bills went out.
+    credit_applied: creditApplied,
+  };
 };
 
 // Finds the fee structure to bill one student with: an explicit one, or the best active match for
@@ -516,17 +597,35 @@ const billStudent = async ({ database, body, actor }) => {
         billingKey,
       ],
     );
+    // Money already paid settles the new invoice immediately, in the same transaction that created
+    // it, so a family that paid ahead is never billed for what the school is already holding.
+    const settled = await applyCreditToInvoice(executor, rows[0]);
+
     await writeAudit(executor, actor, {
       action: body.onAdmission ? 'billed_on_admission' : 'student_billed',
       entityType: 'invoice',
       entityId: rows[0].id,
       entityName: `${student.first_name} ${student.last_name}`,
-      changes: { invoice_number: number, amount: applied.net, fee_structure: structure.name },
+      changes: {
+        invoice_number: number,
+        amount: applied.net,
+        fee_structure: structure.name,
+        ...(settled.creditApplied > 0 ? { credit_applied: settled.creditApplied } : {}),
+      },
     });
-    return rows[0];
+    return settled;
   });
 
-  return { invoice, feeStructure: structure, amount: applied.net, currency: structure.currency, alreadyBilled: false };
+  return {
+    invoice: invoice.invoice,
+    feeStructure: structure,
+    amount: applied.net,
+    currency: structure.currency,
+    alreadyBilled: false,
+    // What an earlier payment took off this bill, so the bursar sees why it is not the full amount.
+    credit_applied: invoice.creditApplied,
+    balance_due: toAmount(invoice.invoice.balance_due),
+  };
 };
 
 /* -------------------------------------------------------------------------- */
@@ -569,6 +668,9 @@ const recordPayment = async ({ database, body, actor }) => {
 
     let remaining = roundMoney(amount);
     const allocations = [];
+    // Whatever no invoice absorbs stays as credit against the student, and the next invoice raised
+    // is reduced by it automatically (applyCreditToInvoice). Reported below so a bursar taking an
+    // early payment can see it landed, rather than wondering where the money went.
 
     for (const invoice of open.rows) {
       if (remaining <= 0) break;
@@ -658,15 +760,28 @@ const recordPayment = async ({ database, body, actor }) => {
 /* Ledger and arrears                                                          */
 /* -------------------------------------------------------------------------- */
 
-const studentLedger = async ({ database, body }) => {
+/**
+ * One student's complete fee history. Exported because the chat's read-only payment-history tool
+ * needs it: handleFeesFunction below gates every action to admins because it also performs billing,
+ * but reading a single student's history is not a billing operation and teaching staff are meant to
+ * be able to do it.
+ */
+export const studentLedger = async ({ database, body }) => {
   const student = await loadStudent(database, body.studentId);
   if (!student) return { error: 'Student not found' };
 
-  const [invoices, payments, receipts, bursaries] = await Promise.all([
+  const [invoices, payments, receipts, bursaries, transactions] = await Promise.all([
     database.query('SELECT * FROM invoices WHERE student_id = $1 ORDER BY issued_at ASC', [student.id]),
     database.query('SELECT * FROM payments WHERE student_id = $1 ORDER BY paid_at ASC', [student.id]),
     database.query('SELECT * FROM receipts WHERE student_id = $1 ORDER BY issued_at ASC', [student.id]),
     database.query('SELECT * FROM fee_bursaries WHERE student_id = $1 ORDER BY created_at DESC', [student.id]),
+    // Every mobile-money and bank attempt, settled or not. These are kept apart from the running
+    // balance below: a pending or failed MoMo request moves no money, so folding it into the ledger
+    // would misstate what is owed. It is what answers "I paid by MoMo, where is it?", which is the
+    // usual reason a statement gets disputed.
+    database
+      .query('SELECT * FROM payment_transactions WHERE student_id = $1 ORDER BY created_at ASC', [student.id])
+      .catch(() => ({ rows: [] })),
   ]);
 
   const receiptByPayment = new Map(receipts.rows.map((receipt) => [receipt.payment_id, receipt]));
@@ -705,6 +820,19 @@ const studentLedger = async ({ database, body }) => {
     payments: payments.rows,
     receipts: receipts.rows,
     bursaries: bursaries.rows,
+    transactions: transactions.rows.map((row) => ({
+      date: toIsoDate(row.created_at),
+      provider: row.provider,
+      amount: toAmount(row.amount),
+      currency: row.currency,
+      status: row.status,
+      reference: row.provider_reference || row.external_reference,
+      phone_number: row.phone_number,
+      status_reason: row.status_reason,
+      // A settled attempt already appears in the ledger above as a payment; saying so stops a
+      // reader counting the same money twice.
+      settled: row.status === 'successful' || row.status === 'succeeded',
+    })),
     entries,
     summary: {
       currency: invoices.rows[0]?.currency || DEFAULT_CURRENCY,
@@ -1153,20 +1281,16 @@ export const FEES_ACTIONS = Object.keys(ACTIONS);
  * Single entry point for every fees action.
  *
  * The role check sits here, ahead of the action table, so no handler can be reached without
- * passing it. Note that requesterRole is supplied by the browser: this matches the existing
- * update_role convention and is a deployment-perimeter assumption, not an auth control.
+ * passing it. The role comes from the requester's session — resolveActor reads it from the users
+ * row the session cookie points at, not from anything the browser put in the request.
  */
-export const handleFeesFunction = async (database, body = {}) => {
-  if (body.requesterRole !== 'admin') return { error: 'Unauthorized' };
+export const handleFeesFunction = async (database, body = {}, { actor: authenticated, tenantId } = {}) => {
+  const actor = resolveActor(authenticated, body);
+  const refusal = requireRole(actor, ['admin']);
+  if (refusal) return refusal;
 
   const handler = ACTIONS[body.action];
   if (!handler) return { error: `Unsupported fees action: ${body.action}` };
 
-  const actor = {
-    email: String(body.actorEmail || ''),
-    name: String(body.actorName || ''),
-    role: body.requesterRole,
-  };
-
-  return handler({ database, body, actor });
+  return handler({ database, body, actor, tenantId });
 };

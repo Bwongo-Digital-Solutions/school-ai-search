@@ -9,7 +9,39 @@ const formatStudentTable = (students) => {
   return [header, divider, ...rows].join('\n');
 };
 
-const formatStudentProfile = (student) =>
+const FEE_STATUS_LABELS = {
+  paid: 'Fully paid',
+  partial: 'Partly paid',
+  overdue: 'Overdue',
+  pending: 'Awaiting payment',
+  no_invoices: 'No invoices raised',
+};
+
+const money = (amount, currency = 'UGX') =>
+  `${currency} ${Number(amount || 0).toLocaleString('en-UG', { maximumFractionDigits: 0 })}`;
+
+/**
+ * The fee lines on a student profile. Returns [] when no fee record exists, so a school that does
+ * not use the billing module sees the profile exactly as before.
+ */
+const formatFeeLines = (fees) => {
+  if (!fees) return [];
+
+  return [
+    '',
+    '### School fees',
+    `- Status: ${FEE_STATUS_LABELS[fees.status] || fees.status}`,
+    `- Invoiced: ${money(fees.total_invoiced, fees.currency)} across ${fees.invoice_count} invoice(s)`,
+    `- Paid: ${money(fees.total_paid, fees.currency)}`,
+    `- Balance: ${money(fees.balance_due, fees.currency)}`,
+    fees.next_due_date ? `- Next due: ${String(fees.next_due_date).slice(0, 10)}` : null,
+    fees.last_payment_at ? `- Last payment: ${String(fees.last_payment_at).slice(0, 10)}` : null,
+    '',
+    'Ask for the full statement to see every invoice, receipt and mobile money transaction.',
+  ].filter((line) => line !== null);
+};
+
+const formatStudentProfile = (student, fees) =>
   [
     `## ${student.first_name} ${student.last_name}`,
     '',
@@ -21,6 +53,7 @@ const formatStudentProfile = (student) =>
     `- Subjects: ${student.subjects.join(', ')}`,
     `- Parent / Guardian: ${student.parent_name || 'Not provided'}`,
     student.notes ? `- Notes: ${student.notes}` : '- Notes: None',
+    ...formatFeeLines(fees),
   ].join('\n');
 
 const extractNumber = (text, fallback) => {
@@ -70,7 +103,11 @@ const findStudentMatches = (students, query) => {
   return partialMatches;
 };
 
-export const generateAssistantReply = ({ message, students, hasImage }) => {
+/**
+ * `feeSummaries` is a Map of student id to the same per-student fee summary the fee-status endpoint
+ * produces. Optional: without it the profile omits the fee section entirely rather than guessing.
+ */
+export const generateAssistantReply = ({ message, students, hasImage, feeSummaries = null }) => {
   const trimmed = (message || '').trim();
   const normalized = trimmed.toLowerCase();
 
@@ -89,7 +126,7 @@ export const generateAssistantReply = ({ message, students, hasImage }) => {
   const nameMatches = findStudentMatches(students, normalized);
   if (nameMatches.length === 1) {
     return {
-      message: formatStudentProfile(nameMatches[0]),
+      message: formatStudentProfile(nameMatches[0], feeSummaries?.get(nameMatches[0].id)),
       studentsFound: 1,
     };
   }

@@ -1,6 +1,6 @@
 # School AI Search Technical Overview
 
-School AI Search is a school administration and student-search application. It combines a React/Vite frontend, a local Node HTTP backend, PostgreSQL persistence, rule-based student analysis, audit logging, and PDF report-card generation.
+School AI Search is a school administration, teaching and student-search application. It combines a React/Vite frontend, a local Node HTTP backend, PostgreSQL persistence, rule-based student analysis, a retrieval-grounded AI agent with Model Context Protocol support, audit logging, and PDF generation for report cards, exam papers and lesson plans.
 
 ## What the Project Does
 
@@ -16,8 +16,12 @@ School AI Search is a school administration and student-search application. It c
 - Supports portal accounts, notices, and internal school messages.
 - Tracks ancillary services: library loans, transport routes, hostel rooms, and store inventory.
 - Stores compliance reports and analytics snapshots for performance and financial reporting.
-- Provides a chat interface for student search and analysis questions.
-- Persists conversations and chat messages.
+- Provides a chat interface for student search and analysis questions, which can run as a bounded tool-calling agent with curriculum retrieval (RAG) and tools drawn from connected MCP servers.
+- Persists conversations and chat messages, including the tool trace and the syllabus citations behind each answer.
+- **Lesson Planner:** drafts individual lesson plans and whole schemes of work from the school's curriculum library, and exports them as printable PDFs.
+- **Digital Examiner:** writes test questions, assignments and exams against the Uganda syllabus (NCDC/UNEB) and International GCSE standards, fine-tuned by year, subject, topic and grade. Questions bank for reuse, get reviewed, assemble into papers, and publish into the school's real exam records.
+- Maintains a curriculum library: bundled Uganda and Cambridge IGCSE topic outlines plus syllabus documents teachers upload, chunked and indexed for retrieval.
+- Acts as an MCP client (drawing tools from external MCP servers an admin registers) and an MCP server (exposing its own tools to Claude Desktop, Claude Code and other MCP clients).
 - Records audit log entries for administrative actions.
 - Generates formal PDF report cards (with student photo and school branding), QR ID cards, fee receipts, fee statements, and a school-wide financial report.
 - Full admin fee management: fee structures, bulk and per-student invoicing, payment capture with numbered receipts, ledgers, arrears ageing, bursaries, and a computed payment rating with admin overrides.
@@ -32,6 +36,8 @@ School AI Search is a school administration and student-search application. It c
 - Frontend: React 18, TypeScript, Vite, Tailwind CSS, shadcn/ui-style components, Radix UI primitives.
 - Backend: Node.js HTTP server using native `http` APIs.
 - Database: PostgreSQL through `pg`; tests can run against `pg-mem`.
+- AI: multi-provider tool calling over raw `fetch` (no vendor SDK), a bounded agent loop, and hybrid retrieval (embeddings with a BM25 fallback).
+- Interoperability: Model Context Protocol over JSON-RPC 2.0, in both directions.
 - PDF generation: `pdf-lib`.
 - Containerization: Dockerfile plus production and development Docker Compose files.
 
@@ -41,8 +47,10 @@ School AI Search is a school administration and student-search application. It c
 2. App-level providers manage auth, chat, theme, and shared state.
 3. Chat and management screens call local backend endpoints.
 4. The backend initializes the database schema on startup and seeds students when the student table is empty.
-5. Student search requests are handled by a rule-based service that reads student records and formats Markdown responses.
-6. Report-card requests load a student record and return a generated PDF.
+5. Student search requests are handled by a rule-based service that reads student records and formats Markdown responses, or by a selected AI model.
+6. In agent mode, the backend runs a bounded tool-calling loop: the model calls school tools (student search, gradebook aggregation, curriculum retrieval) plus any MCP tools the teacher enabled, and each step is recorded and returned for display.
+7. Lesson-plan and question generation retrieve syllabus passages first, then have the model return structured output by calling a submit tool whose schema is the output contract.
+8. Report-card, exam-paper and lesson-plan requests load the relevant records and return a generated PDF.
 
 ## Backend Functions and Endpoints
 
@@ -52,10 +60,19 @@ The local backend lives in `server/local-backend.mjs`.
 | --- | --- | --- |
 | `/api/health` | `GET` | Health check with student count. |
 | `/api/db` | `POST` | Generic database operations for allowed tables. |
-| `/api/functions/auth` | `POST` | Sign up, sign in, audit-log read/write, user listing, role change, and account approve/reject. The first account becomes an approved admin; later sign-ups are `pending` and cannot sign in until an admin approves them (rejection deletes the account). |
+| `/api/functions/auth` | `POST` | Sign up, sign in, audit-log read/write, user listing, role change, account approve/reject, and account edit/delete (`update_account`, `delete_account` — admin-only and audited; the last approved administrator and the account you are signed in as cannot be deleted). The first account becomes an approved admin; later sign-ups are `pending` and cannot sign in until an admin approves them (rejection deletes the account). |
 | `/api/functions/fee-status` | `POST` | Per-student school fees payment status only; the sole student-facing endpoint the `support_staff` role reads. An optional `code` (scanned ID card payload) narrows the response to one student. |
-| `/api/functions/ai-chat` | `POST` | Creates chat messages and returns a student-search response. |
+| `/api/functions/ai-chat` | `POST` | Creates chat messages and returns a student-search response. Requires `requesterRole` of `admin` or `teacher`. Accepts `mode` (`direct` or `agent`), `useRag`, and `mcpServerIds`; returns the tool trace and citations alongside the answer. |
 | `/api/functions/ai-models` | `POST` | Lists selectable AI search models and provider configuration state. |
+| `/api/functions/lesson-planner` | `POST` | Lesson planning, dispatched by an `action` field: `list`, `get`, `generate`, `scheme_of_work`, `save`, `set_status`, `duplicate`, `delete`. Requires `requesterRole` of `admin` or `teacher`. |
+| `/api/functions/digital-examiner` | `POST` | Question and paper authoring, dispatched by an `action` field: blueprint CRUD, `generate_questions`, question-bank CRUD and review, `assemble_paper`, `publish_paper`, and paper listing/deletion. Requires `requesterRole` of `admin` or `teacher`. |
+| `/api/functions/curriculum` | `POST` | Curriculum library, dispatched by an `action` field: `list_documents`, `upload_document`, `delete_document`, `search`, `reindex`, `frameworks`. Teaching staff only; deleting a bundled outline is admin-only. |
+| `/api/functions/chat-report` | `POST` | Emails a chat conversation as a PDF attachment (`action: "send"` with `recipient` and an optional `note`). Teaching staff only. Reports plainly when email is unconfigured rather than claiming a delivery. |
+| `/api/chat-reports/:conversationId.pdf` | `GET` | A conversation as a branded PDF for download or print, carrying the citations and tool trace behind each answer. Teaching staff only. |
+| `/api/functions/search` | `POST` | Global search across students, curriculum, lesson plans, exam questions, fees and attendance (`query`), plus `reindex` (admin) and `status`. Teaching staff only. Results are scoped to the requester's role server-side. |
+| `/api/functions/mcp` | `POST` | External MCP server registry, dispatched by an `action` field: `list`, `save`, `delete`, `test`. Admin-only. Stored auth tokens are masked on every read and never returned to the browser. |
+| `/api/mcp` | `POST` | SchoolBot's own MCP server, speaking JSON-RPC 2.0 (`initialize`, `tools/list`, `tools/call`). Gated on a `Bearer` token matching `MCP_SERVER_TOKEN`; disabled (404) when that variable is unset. |
+| `/api/curriculum-frameworks` | `GET` | The examination frameworks the deployment supports, with year labels, question types, command words, assessment objectives and paper structures. |
 | `/api/functions/voice-to-text` | `POST` | Placeholder voice transcription response. |
 | `/api/functions/payments` | `POST` | Initiates MTN MoMo, Airtel Money, or bank payment requests; checks status; records callbacks. The `callback` action is a signed webhook (see Payment Webhooks). |
 | `/api/functions/fees` | `POST` | Admin-only fee administration, dispatched by an `action` field: fee-structure CRUD, billing preview and run, payment capture, student ledger, arrears aging, bursary CRUD, and payment-standing overrides. Every action requires `requesterRole: "admin"`. |
@@ -67,8 +84,12 @@ The local backend lives in `server/local-backend.mjs`.
 | `/api/id-cards.pdf` | `GET` | Batch ID cards, optionally filtered by `grade` and `section`. |
 | `/api/id-cards/:studentId.png` | `GET` | The bare QR image, for on-screen preview and scan testing. |
 | `/api/fees/receipts/:paymentId.pdf` | `GET` | Printable receipt for one payment. Requires `requesterRole=admin` in the query string. |
-| `/api/fees/statements/:studentId.pdf` | `GET` | Full fee statement with running balance, optionally bounded by `from` and `to`. Requires `requesterRole=admin`. |
+| `/api/fees/statements/:studentId.pdf` | `GET` | Full fee statement with running balance, optionally bounded by `from` and `to`, plus a Gateway Transactions section listing every mobile-money and bank attempt including pending and failed ones. Requires `requesterRole` of `admin` or `teacher` — one student's history, unlike the school-wide report below. |
 | `/api/fees/report.pdf` | `GET` | School-wide financial report (collections, payment-standing distribution, arrears ageing). Requires `requesterRole=admin`. |
+| `/api/papers/:paperId.pdf` | `GET` | The question paper a learner sits. Requires `requesterRole` of `admin` or `teacher`. |
+| `/api/papers/:paperId/marking-scheme.pdf` | `GET` | The marking scheme, with the expected answer, mark-by-mark award points, and the syllabus passages each question was generated from. Same role gate. |
+| `/api/lesson-plans/:planId.pdf` | `GET` | A printable lesson plan. Requires `requesterRole` of `admin` or `teacher`. |
+| `/api/chat-reports/:conversationId.pdf` | `GET` | A saved AI conversation as a branded, printable report, including the sources and tools behind each answer. Requires `requesterRole` of `admin` or `teacher` — the same gate as the chat, since the transcript holds whatever student data was discussed. |
 | Static files | `GET` | Serves the built frontend from `dist` in production mode. |
 
 ## Functional Coverage
@@ -80,7 +101,11 @@ The requested school-management areas are represented as backend database resour
 | Student Information Management | `students` for profiles/lifecycle/medical/emergency data, plus `admissions` for applications and document metadata. |
 | Academic & Curriculum Management | `classes`, `subjects_catalog`, `teachers`, `subject_allocations`, and `timetables`. |
 | Attendance Tracking | `attendance_records` and `attendance_alerts`. |
-| Examination & Gradebooks | `exams`, `exam_schedules`, `gradebook_entries`, and PDF report-card generation. |
+| Examination & Gradebooks | `exams`, `exam_schedules`, `gradebook_entries`, and PDF report-card generation. Publishing a Digital Examiner paper writes real `exams` and `exam_schedules` rows, so generated assessments appear to the gradebook and timetable like any other exam. |
+| Lesson Planning | `lesson_plans`. Individual lessons and term-long schemes of work, generated against the curriculum library and exported as PDFs. |
+| Assessment Authoring | `exam_blueprints`, `exam_questions`, and `generated_papers`. Blueprints fix the mark spread; questions bank for reuse across terms; papers assemble, print with a marking scheme, and publish into `exams`. |
+| Curriculum Library | `curriculum_documents` and `curriculum_chunks`. Bundled Uganda and IGCSE topic outlines plus teacher uploads, chunked and ranked for retrieval. |
+| AI Interoperability | `mcp_servers`. External MCP servers an admin has connected, whose tools teachers can bring into a chat message. |
 | Student Conduct & Lifecycle | `discipline_records`, `student_promotions`, and `student_transfers` for behavior, promotion/graduation, transfer, and withdrawal history. |
 | Financial Management | `fee_structures`, `invoices`, `payments`, `receipts`, and `fee_bursaries`. Admin fee management covers fee-structure CRUD, bulk invoicing, payment capture with numbered receipts, per-student ledgers, arrears aging, and bursaries. |
 | Payment Rating | `student_fee_standings`. A reliability score computed from payment history, which an admin may override with a manual standing. |
@@ -117,7 +142,7 @@ Schema creation is handled by `server/db/schema.mjs`.
 | `payments` | Tuition, transport, lab, or other payment records. |
 | `invoices` | Student invoices with balances and line items. |
 | `receipts` | Issued receipts linked to payments, numbered `RCT-<year>-<sequence>`. |
-| `school_settings` | The school's global branding (name, tagline, address, logo, theme colour, contacts). One row per database, edited under Settings and read by every document and the app header. |
+| `school_settings` | The school's global branding (name, tagline, address, logo, theme colour, contacts), plus `school_level` and `grading_country` — the two fields that decide the grading system. One row per database, edited under Settings and read by every document and the app header. |
 | `fee_bursaries` | Scholarships, sponsorships, and discounts. A blank fee structure, academic year, or term is a wildcard that matches every invoice. |
 | `student_fee_standings` | Admin overrides of the computed payment rating, kept as an event log. A partial unique index allows only one `active` row per student; superseded rows remain as history. |
 | `payment_transactions` | Gateway transaction tracking for MTN MoMo, Airtel Money, and bank collections. |
@@ -134,8 +159,15 @@ Schema creation is handled by `server/db/schema.mjs`.
 | `inventory_transactions` | Stock-in, stock-out, and adjustment history. |
 | `compliance_reports` | Ministry/regulatory reporting payloads and status. |
 | `analytics_snapshots` | Performance, attendance, and financial analytics metrics. |
+| `curriculum_documents` | Syllabus documents in the curriculum library: bundled topic outlines (`source_type` `seed`), teacher uploads, or material pulled in over MCP. A content hash makes re-ingesting idempotent, so re-uploading a corrected document replaces its chunks rather than duplicating them. |
+| `curriculum_chunks` | One retrievable passage each, with curriculum/subject/grade denormalised from the parent for filtering without a join. `embedding` holds a plain JSONB float array, not a pgvector column — see Retrieval below. |
+| `lesson_plans` | Generated and hand-written lesson plans: outcomes, competencies, materials, the stage-by-stage sequence, assessment, differentiation and homework, plus the syllabus passages the draft came from (`refs`). |
+| `exam_blueprints` | The Digital Examiner's fine-tuning object: curriculum, year, subject and grade, plus how marks spread across topics, difficulty, Bloom levels and question types. |
+| `exam_questions` | The reusable question bank. Each row carries its stem, options, expected answer, mark-by-mark scheme, tags, review status, and `source_references` — the citations it was generated from. Questions outlive the blueprint and the paper they were written for. |
+| `generated_papers` | Assembled papers. `exam_id` is NULL until published, at which point a real `exams` row is written and linked. |
+| `mcp_servers` | External MCP servers an admin has registered. `auth_token` is stored plaintext but never returned to the browser; `discovered_tools` caches the last successful `tools/list`. |
 
-Important indexes are added for student names, grade searches, conversation ordering, message lookups, and audit-log ordering.
+Important indexes are added for student names, grade searches, conversation ordering, message lookups, audit-log ordering, curriculum retrieval filters (curriculum/subject/grade), question-bank lookups, and lesson-plan listings.
 
 ## Student Chat Capabilities
 
@@ -166,11 +198,247 @@ Local Rules can answer prompts for:
 Image uploads are stored with the conversation metadata, but OCR/image understanding is still a placeholder.
 Remote multimodal models can be added to the catalog, but the default prompt currently sends text student context only.
 
+### Chat modes
+
+Chat orchestration lives in `server/agent/chat.mjs`, which picks one of three modes:
+
+| Mode | What runs |
+| --- | --- |
+| `local` | The rule-based engine. No network, no keys. |
+| `direct` | One model call with the roster (and any retrieved passages) in the prompt. |
+| `agent` | A bounded tool-calling loop with the school tool registry plus any MCP servers the teacher enabled for that message. |
+
+The teacher picks per message in the composer: an **Agent** toggle, a **Curriculum** (RAG) toggle, and an **MCP** multi-select. A provider that cannot call tools — Ollama, or the rules engine — falls back to a direct call with the retrieved context and says so in the reply, rather than silently doing nothing.
+
+Conversation history is replayed (the last `AI_HISTORY_TURNS` turns, default 8). The inlined roster is capped at `AI_ROSTER_INLINE_LIMIT` students (default 50); past that the prompt states it is showing a subset, so the model reports "not in the records I can see" rather than "no such student".
+
+## Global Search (Meilisearch)
+
+Optional, and additive. With `MEILISEARCH_HOST` unset — the default — search falls back to the SQL
+student-name query the app already used and reports `engine: 'postgres'`, so no existing deployment
+changes behaviour by upgrading.
+
+`server/search/meili.mjs` is a small REST client over raw `fetch` with an injectable `httpClient`,
+matching the LLM and MCP layers. No new dependency. `server/search/indexer.mjs` defines six indexes
+and builds their documents from Postgres, which stays the system of record.
+
+| Index | Searchable | Visible to |
+| --- | --- | --- |
+| `students` | name, student number, email, parent name, subjects, notes | admin, teacher |
+| `curriculum` | title, heading, passage text | admin, teacher |
+| `lesson_plans` | title, topic, outcomes, competencies | admin, teacher |
+| `exam_questions` | stem, topic, subject, command word | admin, teacher |
+| `fees` | student name, invoice/receipt number, reference | **admin only** |
+| `attendance` | student name, reason, status | admin, teacher |
+
+### The role filter is the security boundary
+
+Copying student, fee and attendance data into a second store means the index has to enforce the same
+access rules the database does, or search becomes a way around them. Three things hold that:
+
+- **Every document carries a `roles` array**, and `services/search.mjs` injects
+  `filter: roles = <requesterRole>` into every query. A caller cannot widen it — naming an index the
+  role may not see strips it from the request rather than honouring it.
+- **The role also decides which indexes are queried at all**, so a teacher's request never reaches
+  the `fees` index. Both layers matter: the index list is the coarse gate, the filter the fine one.
+- **The browser never talks to Meilisearch.** The usual pattern is a public search key queried
+  straight from the client, which is faster — but it cannot enforce per-role filtering, and with fees
+  indexed that would expose the ledger. No key or host is exposed to the client.
+
+Support staff appear in no `roles` array anywhere: their access is fee *status* through
+`/api/functions/fee-status`, and search would be a way past it.
+
+### Keeping the index current
+
+`handleDbQuery` fires a sync after every insert, update and delete on an indexed table, and deletes
+are mirrored so a removed student leaves the index. The sync is **deliberately not awaited and never
+throws** — a search index falling behind must not fail or delay the payment or attendance mark that
+triggered it. A full `reindex` from Settings is the backstop and rebuilds every index from Postgres.
+
+## LibreChat
+
+**LibreChat consumes AI providers; it does not expose one.** There is no endpoint for another
+application to call, so it cannot be an entry in the model catalogue beside OpenAI and Anthropic.
+
+What it does support is **MCP servers over streamable HTTP with bearer auth**, which is exactly what
+this app already serves at `POST /api/mcp`. The integration therefore runs inward: LibreChat
+connects to SchoolBot, and its users get student records, fees, curriculum and the gradebook as
+tools. Settings → **Search & LibreChat** generates the `librechat.yaml` block; `librechat.yaml` in
+the repo root is a working starting point, used by the optional compose profile.
+
+`MCP_SERVER_TOKENS` maps a token to a role (`{"tok-admin":"admin","tok-teacher":"teacher"}`), so the
+tools a LibreChat user sees match who they are. `buildToolRegistry()` already filters by role, so
+this is a lookup rather than a second gate. `MCP_SERVER_TOKEN` + `MCP_SERVER_ROLE` remain supported.
+
+Both services ship as opt-in compose profiles, so `docker compose up` is unchanged for anyone not
+using them:
+
+```bash
+docker compose --profile search up -d      # Meilisearch only
+docker compose --profile librechat up -d   # LibreChat, its MongoDB, and Meilisearch
+```
+
+## AI Agent, Retrieval, and MCP
+
+### Tool registry and the agent loop
+
+`server/agent/tools.mjs` defines the school tools as provider-neutral `{name, description, input_schema, roles, handler}` records — the same `{action → handler}` shape the fees and settings services already use, with a JSON schema attached:
+
+`search_students`, `get_student_profile`, `class_performance`, `search_curriculum`, `list_curriculum_frameworks`, `describe_curriculum_year`, `get_timetable`.
+
+**Roles are enforced in the registry, not in the prompt.** `buildToolRegistry()` filters by the caller's role before the definitions are serialised, so a model working for a teacher is never told an out-of-scope tool exists and cannot be talked into calling one. Non-teaching staff get an empty registry.
+
+`server/agent/loop.mjs` runs the loop, bounded by `AI_AGENT_MAX_STEPS` (default 6). Parallel tool calls execute concurrently and all results return in one message. A failing tool becomes a readable error result the model can recover from rather than aborting the turn. Every step is recorded — tool, input, output, duration — and persisted on the assistant message, so reopening a past conversation still shows what the assistant did.
+
+### Provider adapters
+
+`server/agent/providers.mjs` translates the loop's normalised message shape into each provider's wire format and back:
+
+| Family | Mechanism |
+| --- | --- |
+| Anthropic | `tools` with `input_schema`; `tool_use` blocks answered with `tool_result`. The assistant's raw content blocks are replayed verbatim, which is what keeps thinking blocks intact across a tool loop. |
+| OpenAI-compatible (`openai`, `groq`, `mistral`, `openrouter`) | `tools` of type `function`; `tool_calls` answered with `role: "tool"` messages. |
+| Google | `functionDeclarations`; `functionCall` answered with `functionResponse` parts. Annotation keywords Gemini rejects are stripped from the schema. |
+| Ollama | `tools` of type `function` on `/api/chat`; results returned as `{role:'tool', tool_name, content}`. Ollama matches a result to its call by **name** — it has no `tool_call_id`, so omitting `tool_name` leaves parallel results ambiguous. A call the model writes into its message text as fenced JSON is recovered, which is how small local models usually emit one. |
+| `local_rules` | Not a model, so no tools. Retrieval is folded into the prompt instead. |
+
+Claude 4.6 and later removed the sampling parameters, so `temperature` is omitted for that family via a targeted deny-list; older pinned Claude models still receive it.
+
+### Retrieval (RAG)
+
+`server/rag/` holds chunking, embeddings, lexical ranking and the retriever.
+
+Ranking is hybrid and deliberately filtered first: curriculum, subject and grade narrow the candidate set in SQL, and only then does scoring run in Node. Where embeddings exist, cosine similarity and BM25 are fused by reciprocal rank; where they do not, BM25 alone answers.
+
+**Embeddings are stored as JSONB float arrays, not pgvector.** `pg-mem` backs both the test suite and the Vercel demo and supports no extensions, and one school's corpus is small enough to rank in Node. Embedding providers are OpenAI, Google, Mistral and Ollama, selected by `EMBEDDING_MODEL_ID` or by whichever has credentials. Anthropic is absent because the Messages API has no embeddings endpoint.
+
+Retrieval works with **no embedding provider configured at all** — that is the normal case, and BM25 handles the exact topic names teachers actually search for well. Seeding deliberately does not embed: doing so would cost an API call per chunk on every fresh database, including each newly provisioned tenant. The `reindex` action backfills vectors later, a batch at a time, if a school configures a provider.
+
+Citations are numbered once and that numbering is what the model is shown, what gets persisted, and what the UI renders — so `[2]` in an answer always resolves to the source the reader sees.
+
+### Model Context Protocol
+
+Both directions are supported.
+
+**As a client** (`server/agent/mcp-client.mjs`): a minimal Streamable HTTP client speaking `initialize` → `tools/list` → `tools/call`. Discovered tools are namespaced `mcp__<server>__<tool>` so they cannot shadow a built-in, and merge into the same registry. One unreachable server does not take down the others or fail the chat — its failure is reported alongside the answer.
+
+**As a server** (`server/mcp/server.mjs`, route `POST /api/mcp`): exposes the same tool registry to external MCP clients. Because the registry is shared, a tool added for the chat is automatically available here. Auth is a bearer token; **an unset `MCP_SERVER_TOKEN` means disabled, not open**, since these tools read student records.
+
+## Lesson Planner
+
+`server/services/lesson-planner.mjs`, reached through `POST /api/functions/lesson-planner`.
+
+Generation retrieves syllabus passages for the topic first, then runs the agent loop with a `submit_lesson_plan` tool whose schema *is* the plan. That is the provider-neutral way to get structured JSON: every provider family supports tool schemas, whereas each has a different (or absent) native JSON mode.
+
+A generated plan saves as `draft` with every field editable — it is a first draft a teacher adapts, not something to accept or discard whole — and records the passages it came from in `refs`.
+
+`scheme_of_work` plans a term by running one generation per topic rather than asking for the whole term at once, which would overrun output limits and degrade every plan in it. A topic that fails is reported on its own; the rest still produce plans.
+
+PDFs come from `server/reports/lesson-plan.mjs`.
+
+## Digital Examiner
+
+`server/services/digital-examiner.mjs`, reached through `POST /api/functions/digital-examiner`.
+
+A **blueprint** is the fine-tuning object: curriculum, academic year, subject, grade and assessment type, plus `topic_weights`, `difficulty_mix`, `bloom_mix` and `question_type_mix`. Anything the teacher leaves unset is filled from the curriculum framework, so a blueprint with only a subject and a grade is still an examiner-shaped paper.
+
+`generate_questions` retrieves first, then runs the agent loop with a `submit_questions` tool whose schema is the question array. With `targetWeakTopics`, it aggregates `gradebook_entries` for the cohort and weights the paper towards the topics they scored lowest on. Every generated question carries `source_references`.
+
+### Reading what the model produced
+
+`server/services/question-parse.mjs` is the single reader, used both by the recovery path and by the editor's save, so the two cannot drift.
+
+The rule is **recognise a question by its shape, not by its wrapper**. Models nest the payload differently on every run — a bare array, `{questions: […]}`, `{name: …, arguments: {…}}` labelled with the *topic* rather than the tool name, or several objects back to back in one fenced block. `extractQuestions` walks any parsed value and collects everything question-shaped: a stem under any of its usual names (`stem`, `question`, `text`, `prompt`, `description`), or two other marks of a question — a mark scheme beside options, a difficulty beside a command word. Scalars on a wrapper are carried down onto what it wraps, because a model that puts the fields under `arguments` often leaves the question text beside it in `description`. Marks default to the mark scheme's total; the stem falls back to the scheme's first point.
+
+`jsonValuesIn` scans for *balanced* JSON values rather than taking the span from the first brace to the last, which is what allows several concatenated objects to be read, and lets a reply truncated mid-object keep everything complete that came before the cut. Trailing commas get one repair attempt. Only when no JSON parses does the numbered-prose reader run.
+
+`questionsToMarkdown` / `markdownToQuestions` are the round trip behind the editor. Each question ends with an HTML comment carrying the fields prose has no place for — `id`, topic, type, difficulty, Bloom level, objective. **The `id` is what makes Save an update rather than a duplicate**; delete the comment and that question is banked as new, which is a reasonable way to fork one. The round trip being lossless is a tested property.
+
+`save_questions` takes the whole edited document in one call — `markdown` or a `questions` array, both read through the same parser — and returns `{ questions, markdown, saved, created, updated }`. The returned Markdown is the saved rows re-rendered, so the editor adopts the new ids and a second save updates the same rows. A row whose id no longer exists is inserted rather than dropped: a save must not lose the teacher's work. The editor itself is `src/components/chat/examiner/QuestionEditor.tsx` — a plain `textarea` driven through `selectionStart`/`selectionEnd`, with its own undo history because programmatic edits clear the browser's, and a preview that escapes HTML and strips the meta comments before rendering.
+
+Questions save as `draft`. **A paper refuses to publish while any of its questions is unreviewed**, and a retired question cannot reach a paper at all. Paper totals are summed from the questions themselves rather than trusted from the client, so the printed total always matches what is on the page.
+
+`publish_paper` writes a real `exams` row (and an `exam_schedules` row when a date and class are supplied) inside a transaction, and audits the action. Publishing twice is refused.
+
+`server/reports/exam-paper.mjs` produces two documents from the same data — the question paper and the marking scheme — so they cannot drift apart. The question paper leaves writing space proportional to the marks; the marking scheme carries the expected answer, the mark-by-mark award points, the question's tags, and the syllabus source, which is what makes a generated paper auditable rather than taken on trust.
+
+## Curriculum Frameworks
+
+`server/services/curriculum-frameworks.mjs` holds the *structure* of an examination system — never syllabus prose, which lives in the RAG corpus.
+
+Shipped frameworks: `uganda-cbc-lower-secondary` (S1–S4, UCE), `uganda-uace` (S5–S6), `uganda-primary` (P1–P7, PLE), `cambridge-igcse`, and `edexcel-international-gcse`. Each declares its year labels, `startGrade`, permitted question types, examiner command words, assessment objectives, paper structures and mark conventions.
+
+`startGrade` is declared per framework rather than inferred: a UK "Year 10" *is* grade 10, while Uganda's S1 begins at grade 8, so the same stored `grade_level` reads differently under each. `SCHOOL_CURRICULUM_FRAMEWORKS` adds or overrides frameworks as JSON, matching the pattern `SCHOOL_GRADING_SCHEMES` already uses.
+
+## School Level and Grading
+
+An administrator sets the school's level once under Settings, and the grading system follows from
+it — nobody picks a scale per report card. `school_settings.school_level` stores the choice and
+`school_settings.grading_country` stores which national examination system it maps onto.
+
+| School level | Uganda (UNEB) | International |
+| --- | --- | --- |
+| Pre-school | Development descriptors, no marks | Development descriptors |
+| Kindergarten / Nursery | Development descriptors | Development descriptors |
+| Primary | PLE: subject points 1–9, aggregate over 4 subjects, Divisions 1–4 / U | Letter grades |
+| Secondary, S1–S4 | **UCE aggregate points**: D1–F9 worth 1–9, aggregate over the best 8 subjects, Divisions 1–4 / 9 | Letter grades |
+| Secondary, S5–S6 | **UACE principal grades**: letters A–F worth 6–0, principal points over 3 subjects (max 18) | Letter grades |
+| Technical / Vocational | Distinction / Credit / Pass (UBTEB) | Distinction / Merit / Pass |
+| Tertiary / University | **GPA** on the 5.0 scale, with degree classification | **GPA** on the 4.0 scale |
+
+**One school level can resolve to two scales.** A secondary school runs both O-Level and A-Level, so
+`academicLevelFor(schoolLevel, gradeLevel)` uses the student's own grade to choose: S1–S4 sit at
+grade levels 8–11 and S5–S6 at 12–13, matching the P1–P7 = grades 1–7 convention the rest of the app
+assumes. Everything else maps on the level alone.
+
+Bands follow UNEB practice as documented at
+<https://www.scholaro.com/db/countries/Uganda/Grading-System>. UNEB awards on subject points and
+division bands rather than flat percentage cut-offs, so the percentage thresholds in
+`server/reports/grading-config.mjs` are indicative — the points, divisions and letters are the parts
+that matter, and `SCHOOL_GRADING_SCHEMES` overrides the whole table.
+
+### Aggregates
+
+`gradeScore(score, scheme)` returns `{grade, remark}`, plus `points` on scales that award them.
+`summariseResults(results, scheme)` rolls the subject results into the one headline figure the
+system calls for, and returns `null` where there is no such concept (the early years), so the report
+card omits the row rather than printing a meaningless zero.
+
+Three aggregate kinds are supported:
+
+- `points-total` / `lower-better` — PLE and UCE. Sums the best N subjects and maps the total onto a
+  division band.
+- `points-total` / `higher-better` — UACE. Sums principal points and reports them out of the maximum.
+- `gpa` — mean of the per-subject grade points, with an optional classification band.
+
+**A partial aggregate is never given a division.** An aggregate of 8 across five subjects is not a
+Division 1, so when fewer than the required subjects are recorded the summary reports
+`complete: false`, the band is withheld, and the report card prints "Provisional — N subject(s)
+recorded" instead.
+
+Resolution never returns null: `resolveGradingScheme` falls back through related levels
+(`secondary-o` → `secondary`, `tertiary` → `university`, and so on), then the default country, so a
+misconfigured school still produces a report card. An explicit `academicLevel` on a request still
+overrides the school setting, which is what lets a one-off report card be graded on something else.
+
+## AI Chat Reports
+
+`server/reports/chat-report.mjs`, exposed at `GET /api/chat-reports/:conversationId.pdf`.
+
+Built server-side from the persisted messages rather than from what the browser has on screen, so
+the report carries `metadata.citations` and `metadata.steps` — the sources and tools behind each
+answer — which is what makes a printed answer checkable rather than something to take on trust.
+
+The assistant replies in Markdown, so the builder renders headings, bullet lists and pipe tables
+properly instead of printing the raw syntax; a table of student GPAs as pipes and dashes would
+defeat the purpose. Table columns are sized to their widest cell and truncated rather than wrapped,
+because these are scan-and-compare tables and ragged row heights read worse.
+
 ## Report Cards
 
 Report cards are generated by `server/reports/report-card.mjs` and exposed through `GET /api/report-cards/:studentId.pdf`.
 
-Each PDF includes the school identity (name, tagline, address, logo and theme colour from the global settings), term information, student details, GPA, attendance, subject rows, teacher comments, and notes. The student's stored photo is shown in the header. Grades come from the selected grading scheme, including Uganda's competency-based `uganda-cbc` scale. The generator accepts a `POST` body (so uploaded images and a per-card theme override can be sent); values not supplied fall back to the global settings and the student's record.
+Each PDF includes the school identity (name, tagline, address, logo and theme colour from the global settings), term information, student details, GPA, attendance, subject rows, teacher comments, and notes. The student's stored photo is shown in the header. Grades come from the scheme the school's level resolves to (see School Level and Grading above), including Uganda's competency-based `uganda-cbc` scale. Where the scheme awards points, a `Pts` column appears beside each subject and the aggregate, principal points or GPA is printed under the table with its division or classification; on scales without points the layout is unchanged. The generator accepts a `POST` body (so uploaded images and a per-card theme override can be sent); values not supplied fall back to the global settings and the student's record.
 
 ## Student ID Cards
 
@@ -196,7 +464,8 @@ Use the root helper script:
 ```
 
 The script opens an interactive menu where you choose the environment and then select numbered actions for build, start, stop, restart, delete, status, and logs.
-It also includes an endpoints option that shows where to find the frontend, backend API, backend health check, and database connection after containers are running.
+It also includes an endpoints option that shows where to find the frontend, backend API, backend health check, and database connection after containers are running — and, when a reverse proxy is selected, the HTTPS addresses schools actually use.
+Options 10–14 cover the reverse proxy and its TLS certificate.
 
 You can also run commands directly:
 
@@ -206,6 +475,7 @@ You can also run commands directly:
 ./containers.sh stop
 ./containers.sh delete
 ./containers.sh endpoints
+./containers.sh cert-status
 ```
 
 By default the script targets the production stack in `docker-compose.yml`. Pass `dev` as the second argument to use `docker-compose.dev.yml`:
@@ -218,7 +488,8 @@ By default the script targets the production stack in `docker-compose.yml`. Pass
 
 Production defaults:
 
-- App: `http://127.0.0.1:8787`
+- App: `http://127.0.0.1:8787` — **loopback only**, because a reverse proxy is meant to be the way
+  in. Set `APP_BIND=0.0.0.0` to publish it directly.
 - Database: internal `db` service
 
 Development defaults:
@@ -227,10 +498,62 @@ Development defaults:
 - Backend API: `http://127.0.0.1:8787`
 - PostgreSQL: `127.0.0.1:5432`
 
+### Which Compose the script uses
+
+`containers.sh` detects it on first use: `docker compose` (the v2 CLI plugin) if present, otherwise
+the `docker-compose` standalone, and a clear install message if neither is. Both take the same flags
+for everything the script does. This matters because a missing plugin fails obscurely — the Docker
+CLI stops recognising `compose` as a command and reads the next argument as one of its own, which is
+where `unknown shorthand flag: 'p' in -p` comes from.
+
+### The reverse proxy
+
+nginx and Caddy are each a compose profile, selected by `PROXY` (or menu option 10, or a third
+argument). The script sets `COMPOSE_PROFILES` rather than passing `--profile`, because the v1
+standalone reads the variable but does not accept the flag.
+
+```bash
+PROXY=nginx ./containers.sh start        # TLS with a certificate you issue
+PROXY=caddy ./containers.sh start        # TLS with a certificate Caddy issues and renews itself
+./containers.sh start prod nginx         # the same, for a deploy script or a cron line
+```
+
+Selecting a proxy in development is refused and reset to `none`: `docker-compose.dev.yml` has no
+proxy services, and Vite serves the frontend directly.
+
+### Certificates
+
+Every school is a subdomain, so the certificate must be a **wildcard** — and a wildcard cannot be
+issued over the HTTP-01 challenge, because there is no single host for the ACME server to fetch a
+file from. It has to be **DNS-01**, which means certbot needs an API token for the domain's DNS.
+
+```bash
+./containers.sh cert-status              # what is installed, when it expires, what it covers
+PROXY=nginx ./containers.sh cert-issue   # certbot certonly --dns-<plugin>, then install + reload
+PROXY=nginx ./containers.sh cert-renew   # certbot renew, then install + reload — safe on a cron
+PROXY=nginx ./containers.sh proxy-reload # nginx -t, then reload only if it passes
+```
+
+`cert-install` copies with `cp -L`, because certbot's `live/` entries are symlinks into `archive/`
+and the container mounts only `deploy/nginx/certs` — a copied symlink would dangle inside it. The
+plugin and credentials path default to Cloudflare and are overridable with `CERTBOT_DNS_PLUGIN` and
+`CERTBOT_DNS_CREDENTIALS`; the domain comes from `TENANT_ROOT_DOMAIN`, read from `.env.production`,
+then `.env`, then the environment.
+
+Under the Caddy profile these commands do nothing except explain that Caddy manages its own
+certificate, given `ACME_EMAIL` and a DNS API token.
+
 ## Environment Variables
 
 | Variable | Purpose |
 | --- | --- |
+| `SESSION_SECRET` | **Set this in production.** Signs every session cookie. Unset, a key is generated at startup: everyone is signed out on each restart and sessions break across replicas. `openssl rand -hex 32`. |
+| `SESSION_TTL_HOURS` | Session lifetime. Default `12`, re-issued past the halfway mark so an active user is never signed out mid-task. |
+| `PLATFORM_OWNER_TOKEN` | **Set this to host more than one school.** The operator's credential for `/owner` and the platform actions on `/api/provision`, sent as `Authorization: Bearer …`. Fails closed when unset, and refuses a token under 24 characters. |
+| `TENANT_ROOT_DOMAIN` | The root domain (`eschool.ink`). Decides which origins may call the API cross-origin, and builds a school's link in its activation email. |
+| `CORS_EXTRA_ORIGINS` | Comma-separated origins allowed cross-origin beyond `https://*.<root>`. For a separately hosted frontend. |
+| `ALLOW_TENANT_HEADER` | Local testing only. `true` lets an `X-Tenant` header override the `Host` and choose the school. Never set it in production. |
+| `HSTS_MAX_AGE` | `Strict-Transport-Security` max-age, sent only over HTTPS. Default 180 days. |
 | `DATABASE_URL` | PostgreSQL connection string. |
 | `DATABASE_SSL` | Enables PostgreSQL SSL when set to `true`. |
 | `DATABASE_SSL_REJECT_UNAUTHORIZED` | Controls SSL certificate verification. |
@@ -253,14 +576,15 @@ Development defaults:
 | `SUBSCRIPTION_CURRENCY` | Subscription currency. Default `UGX`. |
 | `SUBSCRIPTION_PERIOD_DAYS` | Length of a paid period. Default `120` (a term). |
 | `SUBSCRIPTION_GRACE_DAYS` | Grace window after a period lapses before a school is suspended. Default `14`. |
-| `TENANT_ROOT_DOMAIN` | Root domain used to build a school's link in the activation email. Default `eschool.app`. |
+| `TENANT_ROOT_DOMAIN` | Root domain used to build a school's link in the activation email. Default `eschool.ink`. |
 | `VITE_TENANT_ROOT_DOMAIN` | Frontend build-time root domain for the public sign-up page. |
 | `PAYMENT_WEBHOOK_SECRET` | If set, payment/subscription `callback` requests must carry `x-webhook-signature` = HMAC-SHA256(rawBody). Unset disables verification (mock/dev). |
 | `EMAIL_MODE` | `mock` (default, no send) or `http` for the activation email. |
 | `EMAIL_API_URL` | Email provider endpoint (Resend-compatible JSON API). Default `https://api.resend.com/emails`. |
 | `EMAIL_API_KEY` | Bearer key for the email provider. |
 | `EMAIL_FROM` | From address for the activation email. |
-| `SCHOOL_GRADING_COUNTRY` / `SCHOOL_ACADEMIC_LEVEL` / `SCHOOL_GRADING_SCHEMES` | Default grading scheme, and optional JSON to add/override grading schemes (e.g. Uganda competency-based `uganda-cbc`). |
+| `SCHOOL_GRADING_COUNTRY` / `SCHOOL_ACADEMIC_LEVEL` / `SCHOOL_GRADING_SCHEMES` | Fallback grading scheme, and optional JSON to add/override grading schemes (e.g. Uganda competency-based `uganda-cbc`). The stored `school_settings.school_level` and `grading_country` take precedence over these. |
+| `SCHOOL_LEVEL` | Fallback school level for a database whose settings row predates the column. |
 | `ID_CARD_QR_BASE_URL` | If set, ID-card QR encodes `<base>/<student number>` (a scannable URL) instead of the bare number. |
 | `SCHOOL_TAGLINE` | Report-card and school branding tagline. |
 | `APP_PORT` | Host port for the production Docker app. |
@@ -268,9 +592,38 @@ Development defaults:
 | `DEV_API_PORT` | Host port for the development API. |
 | `DEV_DB_PORT` | Host port for the development database. |
 | `AI_DEFAULT_MODEL_ID` | Default model selected by the backend, default `local-rules`. |
-| `AI_MODEL_CATALOG` | Optional JSON array that replaces the built-in model catalog. |
-| `AI_TEMPERATURE` | LLM sampling temperature, default `0.2`. |
-| `AI_MAX_TOKENS` | Maximum response tokens for remote providers, default `900`. |
+| `AI_MODEL_CATALOG` | Optional JSON array that **replaces** the built-in model catalogue. Prefer `AI_EXTRA_MODELS` — setting this drops Local Rules and any provider you do not restate. |
+| `AI_EXTRA_MODELS` | Optional JSON array **added to** the built-in catalogue. An entry whose `id` matches a built-in replaces just that one. This is how you offer a local Ollama model and an Ollama cloud model side by side. |
+| `AI_TEMPERATURE` | LLM sampling temperature, default `0.2`. Ignored for Claude 4.6 and later, which reject sampling parameters. |
+| `AI_MAX_TOKENS` | Maximum response tokens for ordinary chat replies, default `900`. |
+| `AI_AGENT_MAX_TOKENS` | Maximum response tokens for the agent loop and the two generators, default `16000`. A full exam paper does not fit in the chat default. |
+| `AI_AGENT_MAX_STEPS` | Tool steps the agent may take before it stops and returns what it has, default `6`. |
+| `AI_HISTORY_TURNS` | Prior conversation turns replayed into a chat request, default `8`. |
+| `AI_ROSTER_INLINE_LIMIT` | Students inlined into the chat prompt before it switches to a stated subset, default `50`. |
+| `AI_TOOL_RESULT_MAX_CHARS` | Truncation ceiling for a single tool result fed back to the model, default `12000`. |
+| `EMBEDDING_MODEL_ID` | Embedding provider to use — `openai`, `google`, `mistral` or `ollama`. Unset picks the first with credentials; none configured means retrieval stays keyword-only, which is fully supported. |
+| `OPENAI_EMBEDDING_MODEL` | OpenAI embedding model, default `text-embedding-3-small`. |
+| `GOOGLE_EMBEDDING_MODEL` | Google embedding model, default `text-embedding-004`. |
+| `MISTRAL_EMBEDDING_MODEL` | Mistral embedding model, default `mistral-embed`. |
+| `OLLAMA_EMBEDDING_MODEL` | Ollama embedding model, default `nomic-embed-text`. |
+| `EMBEDDING_BATCH_SIZE` | Texts per embedding request, default `64`. |
+| `RAG_CHUNK_TOKENS` / `RAG_CHUNK_OVERLAP_TOKENS` | Target chunk size and overlap when indexing a document, defaults `800` and `100`. |
+| `RAG_RETRIEVE_LIMIT` | Passages returned per retrieval, default `8`. |
+| `RAG_CANDIDATE_LIMIT` | Ceiling on rows pulled into Node for scoring, default `600`. |
+| `RAG_MAX_DOCUMENT_CHARS` | Largest single upload that will be indexed, default `2000000`. |
+| `SCHOOL_CURRICULUM` | Default curriculum framework id when a request does not name one. |
+| `SCHOOL_CURRICULUM_FRAMEWORKS` | Optional JSON to add or override examination frameworks, mirroring `SCHOOL_GRADING_SCHEMES`. |
+| `EXAMINER_MAX_QUESTIONS` | Questions one generation request may produce, default `40`. |
+| `PLANNER_MAX_SCHEME_LESSONS` | Lessons one scheme-of-work request may produce, default `20`. |
+| `MCP_SERVER_TOKEN` | Bearer token for SchoolBot's own MCP server. **Unset disables the server rather than opening it.** |
+| `MCP_SERVER_ROLE` | Role the single `MCP_SERVER_TOKEN` acts as, default `teacher`. |
+| `MCP_SERVER_TOKENS` | JSON map of token to role, e.g. `{"tok-admin":"admin","tok-teacher":"teacher"}`, so different clients get different tool surfaces. Takes precedence alongside the single-token form. |
+| `MEILISEARCH_HOST` | Meilisearch base URL. **Unset means global search falls back to the basic student query** — the feature is additive. |
+| `MEILISEARCH_API_KEY` | Meilisearch master or admin key. |
+| `MEILISEARCH_TIMEOUT_MS` | Per-request timeout, default `10000`. |
+| `MEILISEARCH_BATCH` | Documents per indexing batch, default `500`. |
+| `SEARCH_HIT_LIMIT` | Results returned per category, default `5`. |
+| `MCP_TIMEOUT_MS` | Timeout for a call to an external MCP server, default `20000`. |
 | `OPENAI_API_KEY` | OpenAI API key. |
 | `OPENAI_MODEL` | OpenAI model name, default `gpt-4o-mini`. |
 | `OPENAI_BASE_URL` | OpenAI-compatible base URL for OpenAI. |
@@ -293,7 +646,7 @@ Development defaults:
 | `OPENROUTER_HTTP_REFERER` | Optional OpenRouter referer header. |
 | `OPENROUTER_APP_TITLE` | Optional OpenRouter title header. |
 | `OLLAMA_BASE_URL` | Ollama base URL, default points to host machine in Docker. |
-| `OLLAMA_MODEL` | Ollama local model name, default `qwen3.5:2b`. |
+| `OLLAMA_MODEL` | Ollama model name for the built-in entry, default `qwen3.5:2b`. Ollama serves local and cloud models through the same endpoint — a `-cloud` suffixed model runs on Ollama Cloud after `ollama signin`, so both kinds can be listed together via `AI_EXTRA_MODELS`. |
 | `PAYMENT_GATEWAY_MODE` | `mock` for local simulation or live mode for configured providers. |
 | `PAYMENT_CURRENCY` | Default payment currency, usually `UGX`. |
 | `PAYMENT_CALLBACK_URL` | Public callback URL registered with payment providers. |
@@ -310,6 +663,20 @@ Development defaults:
 | `AIRTEL_MONEY_COLLECTION_PATH` | Airtel Money collection request path. |
 | `BANK_PAYMENT_GATEWAY_URL` | Bank or aggregator endpoint for bank payment collection requests. |
 | `BANK_PAYMENT_API_KEY` | API key for the bank payment gateway. |
+
+## Fee Credit
+
+A family that pays before it is billed used to be billed again in full. `recordPayment` spreads a payment across *open* invoices; with none open the remainder sat in `payments` doing nothing, and the next invoice went out for its whole amount as though the money had never arrived.
+
+Credit is derived, never stored:
+
+```
+credit = (everything paid) - (everything an invoice absorbed)
+```
+
+where the second term is `total_amount - balance_due` summed over the student's invoices (`unallocatedCredit` in `server/services/fees.mjs`). Nothing to keep in sync, nothing that can disagree with the ledger, and it stays correct if an invoice is later adjusted. It is summed in JavaScript rather than with `SUM` over an expression — a student has a handful of invoices, and pg-mem is unreliable with aggregates over arithmetic, exactly the kind of difference that passes in tests and fails against real Postgres.
+
+`applyCreditToInvoice` runs **inside the transaction that creates the invoice**, on both the single-student and bulk billing paths, so a family that paid first is never billed for money the school is already holding — not even for the instant between the two writes. The credit applied is reported on the response and recorded in the audit entry, so a bursar can see why a bill is not the full amount.
 
 ## Payment Gateway Flow
 
@@ -361,7 +728,7 @@ The system can serve many schools from one deployment, each with an **isolated d
 
 `server/db/tenants.mjs` resolves each request to a tenant:
 
-1. `resolveTenantId(host, xTenant)` extracts the first subdomain label of the `Host` header (`kampala-high.eschool.app` → `kampala-high`). Apex, `www`, `localhost` and IPs map to the `default` tenant. An `X-Tenant` header overrides (used for local testing; allowed via CORS).
+1. `resolveTenantId(host, xTenant)` extracts the first subdomain label of the `Host` header (`kampala-high.eschool.ink` → `kampala-high`). Apex, `www`, `localhost` and IPs map to the `default` tenant. An `X-Tenant` header can override it, but **only when `ALLOW_TENANT_HEADER=true`** — it is a local-testing convenience, and honouring it in production would let any page on the internet name whichever school it liked. The `Host` header is set by the browser from the address bar and cannot be forged cross-origin, which is why it is the one that decides.
 2. The registry returns that tenant's database URL and subscription `status` — from the static `TENANTS` env, or dynamically from the control database. Each tenant's connection pool is created and cached lazily on first use, and its schema self-builds via `initializeDatabase`.
 3. The HTTP layer (`server/local-backend.mjs`) passes the resolved database into `dispatch`. An unknown subdomain returns `404`; a **suspended** school (lapsed subscription) returns `402` with a renewal notice.
 
@@ -387,12 +754,87 @@ Implemented in `server/services/provisioning.mjs`, driven by `POST /api/provisio
 
 `sweep` (run by cron or the admin endpoint) moves schools whose paid period has ended from `active` → `past_due`, then `→ suspended` after `SUBSCRIPTION_GRACE_DAYS`. A suspended school's subdomain is blocked with `402` until it renews (`signup` again → pay → reactivated).
 
+### The platform boundary
+
+Listing, creating and suspending schools are the *operator's* actions, not a school administrator's. They authenticate with `PLATFORM_OWNER_TOKEN` (`server/auth/platform-owner.mjs`), sent as `Authorization: Bearer …`, and fail closed when it is unset — including refusing a token under 24 characters, so `PLATFORM_OWNER_TOKEN=admin` leaves the door shut rather than ajar. The token lives only in the environment and never touches a tenant database.
+
+They were previously gated on `body.requesterRole === 'admin'`, which meant **any school's administrator could enumerate every school on the platform**, and the listing included each one's `db_url`. Connection details no longer leave the control plane at all (`publicTenant` in `server/db/control.mjs`).
+
+The console is `/owner` in the React app. The token is held in React state for the life of the tab — never `localStorage`, never a cookie.
+
+### Search is namespaced per school
+
+Meilisearch index uids are `<tenant>__<index>` (`indexUidFor`, `server/search/indexer.mjs`); the `default` tenant keeps the bare names, so a single-school deployment needs no reindex. This is not cosmetic: both the incremental sync and the full rebuild *clear* an index before refilling it from one database, so while every school shared six indexes, an ordinary attendance mark in one school wiped another's documents and replaced them with its own — and those then passed the `roles` filter cleanly. Tenancy decides *which index*; the role filter decides *which documents in it*.
+
 ### Cloud deployment
 
-- **Wildcard DNS** `*.your-domain` → the server; **wildcard TLS** cert for `*.your-domain`; a reverse proxy that preserves the `Host` header.
+- **Wildcard DNS** `*.eschool.ink` → the server; a **wildcard TLS** certificate, which can only be issued over a DNS-01 challenge; and a reverse proxy that preserves the `Host` header. Ready-made configurations for both nginx and Caddy are in [`deploy/`](deploy/), each behind a compose profile.
 - One control database, and a Postgres role with **CREATEDB** for `PROVISION_ADMIN_DATABASE_URL`.
-- Configure `CONTROL_DATABASE_URL`, `TENANT_DB_URL_TEMPLATE`, `SUBSCRIPTION_*`, and live `PAYMENT_GATEWAY_MODE` + provider keys. Schedule a daily `POST /api/provision {"action":"sweep","requesterRole":"admin"}`.
-- The public sign-up page is served at `/signup` (e.g. `apply.your-domain/signup`).
+- Configure `SESSION_SECRET`, `PLATFORM_OWNER_TOKEN`, `CONTROL_DATABASE_URL`, `TENANT_DB_URL_TEMPLATE`, `SUBSCRIPTION_*`, and live `PAYMENT_GATEWAY_MODE` + provider keys. Schedule a daily `POST /api/provision {"action":"sweep"}` with the owner token.
+- The public sign-up page is served at `/signup`, and the operator's console at `/owner`.
+
+## Per-School AI Keys
+
+Provider credentials were process-global environment variables — correct when one deployment meant one school, wrong now: every school spent the operator's budget, and a school with its own Anthropic account or its own Ollama box could not use it.
+
+The platform's environment is the default; a row in the tenant's `provider_credentials` table overrides it for that school. `api_key` is **encrypted at rest** with AES-256-GCM under `SECRETS_KEY`, not merely masked on read, because a tenant database dump is a normal operational artefact. Without `SECRETS_KEY` the school is told it cannot store a key, rather than having one written in clear. A key encrypted under a `SECRETS_KEY` that has since been rotated decrypts to nothing, and the school quietly falls back to the platform's credentials instead of its chat window throwing.
+
+How the override reaches the model layer is the interesting part. The reads are synchronous and deep inside it (`providerHasCredentials`, `baseUrlFor`, `requireKey`), while loading a school's row is a query — so threading a credentials object through `runAgent`, the chat pipeline, every provider adapter and the embedding batcher would change dozens of signatures for a value none of them care about. `server/services/credential-store.mjs` uses an `AsyncLocalStorage` instead: `dispatch` puts the school's overrides in scope for the paths that can reach a model, and `credentialFor(name)` reads them there or falls back to `process.env`. Async context follows awaits, so it survives a whole agent run. The store lives in its own import-free module because the service that populates it imports `PROVIDER_ENV` from the model layer, and putting the reader there too would make a load-order cycle.
+
+Administered from **Settings → AI Providers**, admin-only. The key is write-only from the browser's point of view: the API returns a masked preview and nothing else.
+
+## Live Events
+
+`GET /api/events` is a Server-Sent Events stream. One endpoint serves browsers and the mobile apps: the traffic only goes one way, so a WebSocket would buy duplex nobody uses and cost an upgrade handler plus a proxy `Connection` header change that would undo the keep-alive fix.
+
+There is **no broker**, deliberately. A broker carries events between processes; this deployment is one container, so the publisher and the subscriber share a heap. `server/events/bus.mjs` is a `Map` of tenant to subscribers and nothing else — it is the seam where a Redis backend would go if a second replica ever appeared, and nothing above it would change. Durability is not its problem: every message is already a row in Postgres, and an event is a notification that the row exists.
+
+**Keyed by tenant first, always.** One process serves every school, so a bus keyed only by user id would deliver one school's broadcast into another's app.
+
+`server/events/audience.mjs` holds `reaches(event, user)` — the in-memory twin of `audienceClause`. Recipients are never materialised in this schema: one row addresses `all`, a `role`, a `designation` or one `user`, and membership is decided against the reader. The inbox does that in SQL and fan-out does it in JavaScript, so the rule lives in one function and is tested against the clause's behaviour.
+
+**Catch-up.** Every event carries an id; on reconnect a browser sends `Last-Event-ID` and a mobile client sends `?since=`. `server/events/replay.mjs` replays from Postgres using the same audience clause, so a client can never be replayed something it could not have seen by asking. The cursor is `created_at` plus `id` — time alone would make two messages written in the same microsecond unreachable — compared as two predicates rather than a row-value, which pg-mem does not implement.
+
+**Held connections.** A 25-second heartbeat keeps the connection under the proxies' `proxy_read_timeout 300s` and makes a dead socket fail fast. Authentication is re-checked every minute: every request path re-reads the user's row, and a connection held for hours is the one place that would otherwise keep whatever it was granted when it opened.
+
+`server/events/sse.mjs` is the only file that touches a socket, and it is handled in the HTTP layer ahead of `dispatch` — which returns plain objects and can only express one `writeHead` plus one `end`. Everything with a decision in it lives in the sibling modules, which are tested through the ordinary runtime.
+
+### Bearer tokens
+
+Most mobile HTTP clients will not keep an HttpOnly cookie, so `authenticateRequest` accepts the same session token from `Authorization: Bearer` when there is no cookie. Same signature, same tenant binding, same expiry — a transport difference, not a second credential. `signin` returns the token in the body only when the caller passes `issueToken: true`; browsers never ask, so it stays out of reach of anything running on the page. The cookie wins when both are present.
+
+## Authentication and Sessions
+
+Identity used to be self-declared: the signed-in user was a JSON blob in `localStorage` and every request carried its own `requesterRole` in the body, so editing one word in devtools made a teacher an administrator. Two files replace that — `server/auth/session.mjs` (the token and cookie) and `server/auth/actor.mjs` (who a handler is acting for).
+
+**The token proves identity, not privilege.** It is an HMAC-SHA256 signature over `{user id, tenant, expiry}` — no role. The role is read from the `users` row on *every* request, one primary-key lookup beside handlers that already issue dozens of queries. That buys what a role-in-the-token design cannot: a demoted, deleted or un-approved account loses its powers on the very next request rather than whenever the token happens to expire. It also means no session table and no revocation list.
+
+**The cookie is host-only** — `HttpOnly; Secure; SameSite=Lax; Path=/`, and deliberately **no `Domain` attribute**. A cookie set by `kampala-high.eschool.ink` is therefore never *sent* to `gulu-ss.eschool.ink`: the browser enforces the boundary before the request is made, rather than the server checking after it arrives. The tenant claim inside the token is a second lock on the same door. `SameSite=Lax` rather than `Strict` because report cards and exam papers are downloaded by navigating to a URL, and `Strict` would strip the cookie from exactly those requests.
+
+`SESSION_SECRET` signs the token. Unset, a random key is generated at startup — so sessions die on restart and break across replicas, which is survivable in development and not in production. A fixed fallback would have been worse: every unconfigured deployment would be forgeable.
+
+### The three-state actor
+
+`dispatch` carries an `actor`, and the three states are distinguished rather than collapsed into a mode flag:
+
+| `actor` | Means | Behaviour |
+| --- | --- | --- |
+| `undefined` | Not a request at all — a test, or the server calling its own handler | Falls back to `body.requesterRole`, exactly as before |
+| `null` | A real HTTP request carrying no valid session | Nobody. The body is ignored, so claiming a role in it achieves nothing |
+| an object | An authenticated user | Used; the body is ignored for the same reason |
+
+`requireRole(actor, roles)` in `server/auth/actor.mjs` is now the single gate. It replaced the same five lines copy-pasted into eight services.
+
+Two endpoints had no gate at all and now do:
+
+- **`POST /api/db`** — a generic CRUD endpoint over 48 tables with *no role check*, so anything that could reach it could read every invoice and payment in the school. It now requires a session, and each table carries a minimum role (finance and credentials are admin-only; support staff reach no table at all). A table-level rule cannot express "a teacher may edit their own class" — this is the floor, not the ceiling.
+- **`POST /api/functions/fee-status`** — with no student code it listed every student and balance in the school to anyone. The by-code lookup stays open, because that is the gate scanner and parent path and the code *is* the credential; the listing form now needs a session.
+
+### Cross-origin
+
+`server/http/cors.mjs` echoes the request origin only when it is `https://<something>.<TENANT_ROOT_DOMAIN>` (or a `CORS_EXTRA_ORIGINS` entry, or loopback when the server itself was reached on loopback), and always sets `Vary: Origin`. The previous `Access-Control-Allow-Origin: *` — with `X-Tenant` in the allowed headers — let any page on the internet address any school. A wildcard is also simply illegal alongside `Access-Control-Allow-Credentials: true`, which the session cookie requires.
+
+`server/http/security-headers.mjs` adds HSTS, `X-Content-Type-Options`, `X-Frame-Options` and `Referrer-Policy` to every response; none of them existed before. `requestIsSecure` reads `X-Forwarded-Proto` to learn the external scheme behind the proxy — trusted without an allow-list because forging it can only make the answer *stricter* (a Secure cookie, an HSTS header) and is never used to skip a check.
 
 ## Quality Checks
 
@@ -404,4 +846,24 @@ npm run lint
 npm run test:backend
 ```
 
-The backend test uses an in-memory PostgreSQL-compatible database and verifies auth, database queries, audit logging, chat, voice placeholder behavior, and PDF generation.
+The backend test suite uses an in-memory PostgreSQL-compatible database and verifies auth, database queries, audit logging, chat, voice placeholder behaviour, and PDF generation, plus:
+
+- the agent loop executing tools, feeding results back, bounding its steps, and reporting a failing tool rather than aborting;
+- the tool registry hiding tools a role may not use;
+- curriculum seeding, keyword retrieval with no embedding provider, metadata filtering, and idempotent re-uploads;
+- the MCP client's `initialize` / `tools/list` / `tools/call` round trip, and one unreachable server not taking down the others;
+- the MCP server's bearer gate, tool listing and tool calls;
+- question generation honouring a blueprint and attaching citations, and paper publishing writing real `exams` and `exam_schedules` rows;
+- every role gate refusing non-teaching staff **without writing anything**;
+- exam papers, marking schemes and lesson plans rendering as valid PDFs.
+
+Outbound model, embedding and MCP calls all go through an injectable `httpClient`, so every provider path is exercised without a network.
+
+### Two constraints worth knowing before changing the data layer
+
+`pg-mem` backs both the test suite and the Vercel demo, and it is less capable than PostgreSQL in two ways this codebase has already hit:
+
+- it does not implement `GROUP BY` on a primary key carrying the other selected columns (it returns `NULL` for them), and it rejects correlated subqueries. Aggregate with two plain queries merged in Node instead;
+- it supports no extensions, which is why embeddings live in a JSONB column rather than pgvector.
+
+Both are the reason certain queries look more verbose than they would need to be against PostgreSQL alone.

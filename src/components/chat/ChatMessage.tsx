@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import type { Message } from '@/types/chat';
 import MarkdownRenderer from './MarkdownRenderer';
+import AgentTrace from './AgentTrace';
 import { Copy, Check, User, Bot } from 'lucide-react';
 
 interface ChatMessageProps {
@@ -67,6 +68,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
           ) : (
             <div className="text-sm">
               <MarkdownRenderer content={message.content} />
+              <AgentTrace metadata={message.metadata} />
             </div>
           )}
         </div>

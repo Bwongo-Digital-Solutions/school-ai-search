@@ -8,8 +8,10 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { ChatProvider } from "@/contexts/ChatContext";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { SettingsProvider } from "@/contexts/SettingsContext";
+import { LiveProvider } from "@/contexts/LiveContext";
 import Index from "./pages/Index";
 import TenantSignup from "./pages/TenantSignup";
+import PlatformOwner from "./pages/PlatformOwner";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -20,6 +22,7 @@ const App = () => (
       <TooltipProvider>
         <AuthProvider>
           <SettingsProvider>
+          <LiveProvider>
           <ChatProvider>
             <Toaster />
             <Sonner />
@@ -27,10 +30,12 @@ const App = () => (
               <Routes>
                 <Route path="/" element={<Index />} />
                 <Route path="/signup" element={<TenantSignup />} />
+                <Route path="/owner" element={<PlatformOwner />} />
                 <Route path="*" element={<NotFound />} />
               </Routes>
             </BrowserRouter>
           </ChatProvider>
+          </LiveProvider>
           </SettingsProvider>
         </AuthProvider>
       </TooltipProvider>

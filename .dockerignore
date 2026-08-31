@@ -4,5 +4,20 @@ dist
 .gitignore
 .npm-cache
 .codex
+
+# Secrets. `COPY . .` in the build stage would otherwise bake these into an image layer, where they
+# survive every later deletion and travel with the image to wherever it is pushed.
+.env
+.env.local
 .env.production
 .env.development
+deploy/nginx/certs
+
+# Large local state that has no business in a build context. .meilisearch/ holds a downloaded
+# binary and index data (~116 MB) and was being sent to the daemon on every build.
+.meilisearch/
+meili_backups/
+dumps/
+
+# Not needed to run the server.
+tests/

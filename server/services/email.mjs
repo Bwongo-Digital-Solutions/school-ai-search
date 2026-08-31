@@ -14,15 +14,24 @@ export const emailEnabled = () => emailMode() !== 'mock';
  * Sends one email. Returns { sent, mode } rather than throwing on a provider error, so a failed
  * notification never fails the operation that triggered it (provisioning must still succeed).
  */
-export const sendEmail = async ({ to, subject, html, text }, { httpClient = fetch } = {}) => {
+/**
+ * Sends one email, optionally with attachments.
+ *
+ * `attachments` is [{ filename, content }] where content is a Buffer or base64 string — the shape
+ * the Resend-compatible API expects. Used to send a generated report rather than only a link, so a
+ * recipient outside the school does not need an account to read it.
+ */
+export const sendEmail = async ({ to, subject, html, text, attachments = [] }, { httpClient = fetch } = {}) => {
   const mode = emailMode();
   if (mode === 'mock') {
-    return { sent: false, mode: 'mock' };
+    // Report what would have been sent, so a caller can tell the user "email is not configured"
+    // rather than claiming a delivery that never happened.
+    return { sent: false, mode: 'mock', to, subject, attachments: attachments.length };
   }
 
   const url = process.env.EMAIL_API_URL || 'https://api.resend.com/emails';
   const apiKey = process.env.EMAIL_API_KEY;
-  const from = process.env.EMAIL_FROM || 'e-School <no-reply@eschool.app>';
+  const from = process.env.EMAIL_FROM || 'e-School <no-reply@eschool.ink>';
   if (!apiKey) {
     return { sent: false, mode, error: 'EMAIL_API_KEY is not configured' };
   }
@@ -34,7 +43,23 @@ export const sendEmail = async ({ to, subject, html, text }, { httpClient = fetc
     const response = await httpClient(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ from, to, subject, html, text }),
+      body: JSON.stringify({
+        from,
+        to,
+        subject,
+        html,
+        text,
+        ...(attachments.length > 0
+          ? {
+              attachments: attachments.map((attachment) => ({
+                filename: attachment.filename,
+                content: Buffer.isBuffer(attachment.content)
+                  ? attachment.content.toString('base64')
+                  : String(attachment.content),
+              })),
+            }
+          : {}),
+      }),
     });
     if (!response.ok) {
       const detail = await response.text().catch(() => '');
@@ -50,7 +75,7 @@ const escapeHtml = (value) =>
   String(value ?? '').replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
 
 /** Builds the "your school is ready" message for a freshly provisioned tenant. */
-export const renderActivationEmail = ({ schoolName, subdomain, rootDomain = process.env.TENANT_ROOT_DOMAIN || 'eschool.app' }) => {
+export const renderActivationEmail = ({ schoolName, subdomain, rootDomain = process.env.TENANT_ROOT_DOMAIN || 'eschool.ink' }) => {
   const name = schoolName || 'Your school';
   const url = `https://${subdomain}.${rootDomain}`;
   const subject = `${name} is ready on e-School`;
