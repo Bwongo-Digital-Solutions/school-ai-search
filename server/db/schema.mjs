@@ -912,6 +912,8 @@ CREATE INDEX IF NOT EXISTS idx_payments_invoice ON payments(invoice_id);
 CREATE INDEX IF NOT EXISTS idx_receipts_payment ON receipts(payment_id);
 CREATE INDEX IF NOT EXISTS idx_fee_bursaries_student_status ON fee_bursaries(student_id, status);
 CREATE INDEX IF NOT EXISTS idx_student_fee_standings_student ON student_fee_standings(student_id, status);
+-- The gate polls its pending list every minute and only ever wants the active slips.
+CREATE INDEX IF NOT EXISTS idx_gate_permissions_status ON gate_permissions(status, granted_at DESC);
 -- Backs the metadata narrowing that retrieval does before it ranks anything in Node.
 CREATE INDEX IF NOT EXISTS idx_curriculum_chunks_filter ON curriculum_chunks(curriculum, subject, grade_level);
 CREATE INDEX IF NOT EXISTS idx_curriculum_chunks_document ON curriculum_chunks(document_id, chunk_index);

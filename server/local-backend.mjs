@@ -2365,7 +2365,55 @@ const handleGatePermissionFunction = async (database, body = {}) => {
     return { permissions: rows.rows };
   }
 
+  /* Everyone the gate is still expecting. 'active' is itself the waiting-at-the-gate
+     state — a permission leaves it as 'used' or 'declined' when the askari decides, or
+     'cancelled' if the grantor retracts it. The expiry test mirrors activePermissionFor
+     exactly: listing a lapsed slip would offer the gate a decision that the gate-pass
+     handler would then refuse to honour. */
+  if (action === 'pending') {
+    const limit = Math.min(Math.max(Number(body.limit) || 100, 1), 200);
+    const rows = await database.query(
+      `
+        SELECT p.id, p.reason, p.destination, p.granted_by, p.granted_by_email,
+               p.granted_at, p.valid_until, p.expected_return, p.status,
+               s.id AS student_row_id, s.student_id AS student_number,
+               s.first_name, s.last_name, s.grade_level, s.class_section
+        FROM gate_permissions p
+        JOIN students s ON s.id = p.student_id
+        WHERE p.status = 'active'
+          AND (p.valid_until IS NULL OR p.valid_until >= NOW())
+        ORDER BY p.granted_at DESC
+        LIMIT $1
+      `,
+      [limit],
+    );
+    return {
+      pending: rows.rows.map((row) => ({
+        ...row,
+        full_name: `${row.first_name} ${row.last_name}`.trim(),
+      })),
+    };
+  }
+
   return { error: `Unsupported action: ${action}` };
+};
+
+/**
+ * One named permission, but only if it is still open and really belongs to the student being
+ * scanned — so a stale id from a list the gate loaded minutes ago cannot close somebody else's
+ * slip, or reopen a decision already made.
+ */
+const permissionByIdFor = async (database, permissionId, studentId) => {
+  const rows = await database.query(
+    `
+      SELECT * FROM gate_permissions
+      WHERE id = $1 AND student_id = $2 AND status = 'active'
+        AND (valid_until IS NULL OR valid_until >= NOW())
+      LIMIT 1
+    `,
+    [permissionId, studentId],
+  );
+  return rows.rows[0] || null;
 };
 
 /** The most recent permission still good for a trip out, or null. */
@@ -2401,11 +2449,25 @@ const handleGatePassFunction = async (database, body = {}) => {
     return { error: 'A reason is required when declining' };
   }
 
-  // An exit runs off the permission slip when there is one; the authoriser is copied from it so
-  // the movement stays readable after the permission is closed.
-  const permission = direction === 'out'
-    ? await activePermissionFor(database, student.id)
-    : null;
+  /* An exit runs off the permission slip when there is one; the authoriser is copied from it so
+     the movement stays readable after the permission is closed.
+
+     The gate may name the exact slip it is answering. Without that we fall back to "the newest
+     active one", which is right for a scan at the gate but wrong when a student has two open
+     permissions: deciding one would close the newer and leave the older active forever, stuck in
+     the pending list with nothing able to clear it. */
+  let permission = null;
+  if (direction === 'out') {
+    const permissionId = String(body.permissionId || '').trim();
+    if (permissionId) {
+      permission = await permissionByIdFor(database, permissionId, student.id);
+      if (!permission) {
+        return { error: 'That permission is not open for this student' };
+      }
+    } else {
+      permission = await activePermissionFor(database, student.id);
+    }
+  }
 
   const authorisedBy = permission
     ? permission.granted_by
@@ -2435,24 +2497,34 @@ const handleGatePassFunction = async (database, body = {}) => {
     ],
   );
 
-  // An approved exit spends the slip; a declined one closes it with the gate's reason so the
-  // student cannot simply present the same slip to the next officer on duty.
+  /* An approved exit spends the slip; a declined one closes it with the gate's reason so the
+     student cannot simply present the same slip to the next officer on duty.
+
+     Both RETURN the row they wrote, and we hand that back rather than the copy read before the
+     update — otherwise the response says `active` with an empty closed_by for a permission the
+     database has just closed, and a client that trusts the echo cannot tell a real write from a
+     no-op. */
+  let closedPermission = permission;
   if (permission) {
-    if (decision === 'approved') {
-      await database.query(
-        "UPDATE gate_permissions SET status = 'used', closed_at = NOW(), closed_by = $2 WHERE id = $1",
+    const closed = decision === 'approved'
+      ? await database.query(
+        `
+          UPDATE gate_permissions SET status = 'used', closed_at = NOW(), closed_by = $2
+          WHERE id = $1
+          RETURNING *
+        `,
         [permission.id, String(body.recordedBy || '').trim()],
-      );
-    } else {
-      await database.query(
+      )
+      : await database.query(
         `
           UPDATE gate_permissions
           SET status = 'declined', closed_at = NOW(), closed_by = $2, decline_reason = $3
           WHERE id = $1
+          RETURNING *
         `,
         [permission.id, String(body.recordedBy || '').trim(), note],
       );
-    }
+    closedPermission = closed.rows[0] || permission;
   }
 
   const studentName = `${student.first_name} ${student.last_name}`;
@@ -2466,7 +2538,7 @@ const handleGatePassFunction = async (database, body = {}) => {
   }
 
   const onPremises = decision === 'declined' ? true : direction === 'in';
-  return { pass: inserted.rows[0], permission, on_premises: onPremises };
+  return { pass: inserted.rows[0], permission: closedPermission, on_premises: onPremises };
 };
 
 /** The gate's own record: who moved which way, when, and whether they were let through. */

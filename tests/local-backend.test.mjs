@@ -7698,3 +7698,86 @@ test('the unread badge is right past the inbox page limit, and re-reading is ide
     await cleanup();
   }
 });
+
+test('the gate can list the permissions waiting for it, and close the one it names', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const permission = (body) => dispatch(runtime, 'POST', '/api/functions/gate-permission', body);
+  const pass = (body) => dispatch(runtime, 'POST', '/api/functions/gate-pass', body);
+  const pending = async () => (await permission({ action: 'pending' })).body.data.pending;
+
+  const grant = async (code, reason, destination, grantedBy) => {
+    const res = await permission({ action: 'grant', code, reason, destination, grantedBy });
+    assert.ok(res.body.data?.permission, `grant failed: ${JSON.stringify(res.body)}`);
+    return res.body.data.permission;
+  };
+
+  try {
+    assert.deepEqual(await pending(), [], 'nothing is waiting before anything is granted');
+
+    // The gate keeper's list is what a teacher's grant lands in.
+    const slip = await grant('STU-2026-011', 'Dental appointment', 'Mulago', 'Class Teacher');
+    const waiting = await pending();
+    assert.equal(waiting.length, 1);
+    assert.equal(waiting[0].id, slip.id);
+    assert.equal(waiting[0].destination, 'Mulago');
+    assert.equal(waiting[0].granted_by, 'Class Teacher');
+    assert.ok(waiting[0].full_name, 'the row carries a name the gate can read off the screen');
+    assert.ok(waiting[0].student_number, 'and the number the gate posts back to decide it');
+
+    // Approving spends the slip, and the response must describe the row as it now stands —
+    // returning the pre-update copy would report `active` for a permission just closed.
+    const approved = await pass({
+      code: waiting[0].student_number, direction: 'out',
+      decision: 'approved', recordedBy: 'Gate Keeper',
+    });
+    assert.equal(approved.body.data.pass.decision, 'approved');
+    assert.equal(approved.body.data.permission.status, 'used');
+    assert.equal(approved.body.data.permission.closed_by, 'Gate Keeper');
+    assert.equal(approved.body.data.on_premises, false);
+    assert.deepEqual(await pending(), [], 'a spent slip leaves the list');
+
+    // A refusal closes the slip too, with the gate's reason, and leaves the student inside.
+    await grant('STU-2026-012', 'Home visit', 'Ntinda', 'Matron');
+    const declined = await pass({
+      code: 'STU-2026-012', direction: 'out', decision: 'declined',
+      note: 'No uniform', recordedBy: 'Gate Keeper',
+    });
+    assert.equal(declined.body.data.permission.status, 'declined');
+    assert.equal(declined.body.data.permission.decline_reason, 'No uniform');
+    assert.equal(declined.body.data.on_premises, true, 'a student turned back never left');
+    assert.deepEqual(await pending(), [], 'a refused slip cannot be presented again');
+
+    /* Two open slips for one student: deciding without naming one closes whichever is newest and
+       strands the other as `active` forever, with nothing able to clear it off the gate's list. */
+    const first = await grant('STU-2026-013', 'First', 'Clinic', 'Teacher A');
+    const second = await grant('STU-2026-013', 'Second', 'Library', 'Teacher B');
+    assert.equal((await pending()).length, 2);
+
+    const named = await pass({
+      code: 'STU-2026-013', direction: 'out', decision: 'approved',
+      recordedBy: 'Gate Keeper', permissionId: first.id,
+    });
+    assert.equal(named.body.data.permission.id, first.id, 'the named slip is the one closed');
+    assert.equal(named.body.data.permission.reason, 'First');
+
+    const left = await pending();
+    assert.equal(left.length, 1, 'the other slip is still waiting, not orphaned');
+    assert.equal(left[0].id, second.id);
+
+    // An id that is closed, or belongs to somebody else, is refused rather than silently ignored.
+    const stale = await pass({
+      code: 'STU-2026-013', direction: 'out', decision: 'approved',
+      recordedBy: 'Gate Keeper', permissionId: first.id,
+    });
+    assert.match(stale.body.error, /not open for this student/);
+
+    const foreign = await pass({
+      code: 'STU-2026-014', direction: 'out', decision: 'approved',
+      recordedBy: 'Gate Keeper', permissionId: second.id,
+    });
+    assert.match(foreign.body.error, /not open for this student/);
+    assert.equal((await pending()).length, 1, 'a refused decision writes nothing');
+  } finally {
+    await cleanup();
+  }
+});
