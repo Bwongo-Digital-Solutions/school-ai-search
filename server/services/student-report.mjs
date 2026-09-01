@@ -325,15 +325,11 @@ export const handleStudentReportFunction = async (database, body = {}, { actor: 
   const handler = ACTIONS[body.action];
   if (!handler) return { error: `Unsupported report action: ${body.action}` };
 
-  return handler({
-    database,
-    body,
-    actor: {
-      email: trimmed(body.actorEmail),
-      name: trimmed(body.actorName),
-      role: body.requesterRole,
-    },
-  });
+  // The resolved actor, not the three body fields it used to be rebuilt from. Who is recorded as
+  // having sent a family's marks out of the school comes from their session for the same reason the
+  // permission to do so does — a delivery record naming whoever the request said it was is not a
+  // record of anything.
+  return handler({ database, body, actor });
 };
 
 export default { handleStudentReportFunction, renderReport, loadReportData, normaliseSections };

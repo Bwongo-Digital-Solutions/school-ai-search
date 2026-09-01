@@ -215,6 +215,14 @@
   border: 1px solid $ui-03;
 }
 
+/* Class, stream and the two dates. Two up where there is room, stacked where there is not. */
+.idCardFilters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: layout.$spacing-05;
+  margin-block-end: layout.$spacing-05;
+}
+
 .qr {
   inline-size: 11rem;
   block-size: 11rem;

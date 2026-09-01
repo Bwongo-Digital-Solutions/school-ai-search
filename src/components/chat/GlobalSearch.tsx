@@ -35,7 +35,9 @@ const GROUP_META: Record<
   students: {
     label: 'Students',
     icon: UserMultiple,
-    view: 'students',
+    // The student's own file, not the roster filtered down to one row. Opening a search result
+    // should answer the question that prompted the search, not leave it one more click away.
+    view: 'student',
     studentIdFrom: (hit) => hit.id,
   },
   curriculum: { label: 'Curriculum', icon: Book, view: 'lessons' },

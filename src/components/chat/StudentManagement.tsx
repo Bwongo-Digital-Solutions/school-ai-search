@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  ActionableNotification,
   Button,
   Dropdown,
   Modal,
@@ -154,6 +155,10 @@ const attendanceBand = (rate: number) =>
 
 const getErrorMessage = (error: unknown) => (error instanceof Error ? error.message : 'Unknown error');
 
+/** Who a batch of ID cards is for. All four are optional; none of them means the whole school. */
+const emptyIdCardBatch = { grade: '', section: '', registeredFrom: '', registeredTo: '' };
+type IdCardBatch = typeof emptyIdCardBatch;
+
 /**
  * One form field, on Carbon.
  *
@@ -248,7 +253,7 @@ const StudentManagement: React.FC = () => {
   const { notify } = useNotifications();
   const { settings } = useSettings();
 
-  const { students, refreshStudents, focus, clearFocus } = useChatContext();
+  const { students, studentsError, refreshStudents, focus, clearFocus } = useChatContext();
   const { user, isAuthenticated, isAdmin, isSupportStaff, logAudit } = useAuth();
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('last_name');
@@ -292,6 +297,7 @@ const StudentManagement: React.FC = () => {
   const [reportCardPhoto, setReportCardPhoto] = useState('');
   const [scannerOpen, setScannerOpen] = useState(false);
   const [idCardStudent, setIdCardStudent] = useState<Student | null>(null);
+  const [idCardBatch, setIdCardBatch] = useState<IdCardBatch | null>(null);
 
   const canEdit = isAdmin;
   // Support staff are limited to the school fees payment status view.
@@ -565,6 +571,41 @@ const StudentManagement: React.FC = () => {
   // The school's own classes, plus any class a student is actually in that the level does not
   // list — so changing the level never makes a student unreachable through the filter.
   const grades = classFilterOptions(settings.school_level, students.map(s => s.grade_level));
+
+  // The streams that actually exist, rather than an alphabet the school may not use.
+  const idCardSections = Array.from(
+    new Set(students.map(s => s.class_section).filter((section): section is string => Boolean(section))),
+  ).sort();
+
+  /**
+   * The same selection the server will make, applied to the roster already in hand.
+   *
+   * Only so the dialog can say how many cards and how many sheets before anything is printed — the
+   * server re-runs the criteria in SQL and is the one that decides. A count that is briefly stale
+   * is a much smaller problem than four hundred cards printed on a guess.
+   */
+  const idCardMatches = !idCardBatch
+    ? []
+    : students.filter(student => {
+        if (idCardBatch.grade && student.grade_level !== Number(idCardBatch.grade)) return false;
+        if (idCardBatch.section && student.class_section !== idCardBatch.section) return false;
+        // Matching the server: no enrolment date means no match for any range.
+        const enrolled = student.enrollment_date ? String(student.enrollment_date).slice(0, 10) : '';
+        if (idCardBatch.registeredFrom && (!enrolled || enrolled < idCardBatch.registeredFrom)) return false;
+        if (idCardBatch.registeredTo && (!enrolled || enrolled > idCardBatch.registeredTo)) return false;
+        return true;
+      });
+
+  // How many would be excluded by a date range purely for want of a date — worth saying, because
+  // otherwise they simply are not in the batch and nobody finds out until the cards are handed out.
+  const undatedCount = !idCardBatch
+    ? 0
+    : students.filter(student => {
+        if (idCardBatch.grade && student.grade_level !== Number(idCardBatch.grade)) return false;
+        if (idCardBatch.section && student.class_section !== idCardBatch.section) return false;
+        return !student.enrollment_date;
+      }).length;
+
   const avgGpa = students.length ? (students.reduce((s, st) => s + (st.gpa || 0), 0) / students.length).toFixed(2) : '0';
   const avgAtt = students.length ? (students.reduce((s, st) => s + (st.attendance_rate || 0), 0) / students.length).toFixed(1) : '0';
 
@@ -600,13 +641,8 @@ const StudentManagement: React.FC = () => {
           kind="ghost"
           size="sm"
           renderIcon={Printer}
-          onClick={() =>
-            downloadIdCards(
-              `/api/id-cards.pdf?layout=a4${gradeFilter !== null ? `&grade=${gradeFilter}` : ''}`,
-              `student-id-cards${gradeFilter !== null ? `-grade-${gradeFilter}` : ''}.pdf`,
-            )
-          }
-          title="Print QR ID cards for the current grade filter, ten per A4 sheet"
+          onClick={() => setIdCardBatch({ ...emptyIdCardBatch, grade: gradeFilter === null ? '' : String(gradeFilter) })}
+          title="Print QR ID cards, ten per A4 sheet, for a class or an intake"
         >
           Print ID cards
         </Button>
@@ -616,6 +652,18 @@ const StudentManagement: React.FC = () => {
           </Button>
         )}
       </PageHeader>
+
+      {studentsError && (
+        <ActionableNotification
+          inline
+          kind="error"
+          title="The student list could not be loaded"
+          subtitle={`${studentsError}. This is not an empty school — the records are there, they did not arrive.`}
+          lowContrast
+          actionButtonLabel="Try again"
+          onActionButtonClick={refreshStudents}
+        />
+      )}
 
       <div className={styles.controls}>
         <StatRow>
@@ -842,6 +890,109 @@ const StudentManagement: React.FC = () => {
               Download card PDF
             </Button>
           </div>
+        </Modal>
+      )}
+
+      {/* Who the batch is for. A dialog rather than the roster's own grade filter, because a range
+          of registration dates is not something the roster filter can express — and because
+          printing four hundred cards by accident is worth one deliberate step. */}
+      {idCardBatch && (
+        <Modal
+          open
+          modalHeading="Print ID cards"
+          modalLabel="Ten per A4 sheet"
+          primaryButtonText={`Print ${idCardMatches.length} card${idCardMatches.length === 1 ? '' : 's'}`}
+          secondaryButtonText="Cancel"
+          primaryButtonDisabled={idCardMatches.length === 0}
+          onRequestClose={() => setIdCardBatch(null)}
+          onSecondarySubmit={() => setIdCardBatch(null)}
+          onRequestSubmit={() => {
+            const query = new URLSearchParams({ layout: 'a4' });
+            if (idCardBatch.grade) query.set('grade', idCardBatch.grade);
+            if (idCardBatch.section) query.set('section', idCardBatch.section);
+            if (idCardBatch.registeredFrom) query.set('registeredFrom', idCardBatch.registeredFrom);
+            if (idCardBatch.registeredTo) query.set('registeredTo', idCardBatch.registeredTo);
+
+            const parts = [
+              idCardBatch.grade ? `grade-${idCardBatch.grade}` : '',
+              idCardBatch.section,
+              idCardBatch.registeredFrom || idCardBatch.registeredTo
+                ? `registered-${idCardBatch.registeredFrom || 'any'}-to-${idCardBatch.registeredTo || 'any'}`
+                : '',
+            ].filter(Boolean);
+
+            setIdCardBatch(null);
+            void downloadIdCards(
+              `/api/id-cards.pdf?${query.toString()}`,
+              `student-id-cards${parts.length ? `-${parts.join('-')}` : ''}.pdf`,
+            );
+          }}
+        >
+          <div className={styles.idCardFilters}>
+            <Dropdown
+              id="id-card-grade"
+              titleText="Class"
+              label="All classes"
+              items={GRADE_ALL_ITEMS.concat(grades.map(option => option.value))}
+              selectedItem={idCardBatch.grade === '' ? ALL_GRADES : Number(idCardBatch.grade)}
+              itemToString={(item) =>
+                item === ALL_GRADES || item === null
+                  ? 'All classes'
+                  : classLabel(settings.school_level, Number(item))
+              }
+              onChange={({ selectedItem }) =>
+                setIdCardBatch(current => current && ({
+                  ...current,
+                  grade: selectedItem === ALL_GRADES || selectedItem == null ? '' : String(selectedItem),
+                }))
+              }
+            />
+            <Dropdown
+              id="id-card-section"
+              titleText="Stream"
+              label="All streams"
+              items={['', ...idCardSections]}
+              selectedItem={idCardBatch.section}
+              itemToString={(item) => (item ? String(item) : 'All streams')}
+              onChange={({ selectedItem }) =>
+                setIdCardBatch(current => current && { ...current, section: selectedItem ? String(selectedItem) : '' })
+              }
+            />
+            <TextInput
+              id="id-card-registered-from"
+              labelText="Registered from"
+              type="date"
+              value={idCardBatch.registeredFrom}
+              onChange={event =>
+                setIdCardBatch(current => current && { ...current, registeredFrom: event.target.value })
+              }
+            />
+            <TextInput
+              id="id-card-registered-to"
+              labelText="Registered up to"
+              type="date"
+              value={idCardBatch.registeredTo}
+              onChange={event =>
+                setIdCardBatch(current => current && { ...current, registeredTo: event.target.value })
+              }
+            />
+          </div>
+
+          <p className={styles.modalNote}>
+            {idCardMatches.length === 0
+              ? 'No students match. Widen the class or the dates.'
+              : `${idCardMatches.length} student${idCardMatches.length === 1 ? '' : 's'} match, filling ${Math.ceil(idCardMatches.length / 10)} sheet${Math.ceil(idCardMatches.length / 10) === 1 ? '' : 's'}.`}
+          </p>
+
+          {(idCardBatch.registeredFrom || idCardBatch.registeredTo) && undatedCount > 0 && (
+            <InlineNotification
+              kind="info"
+              title={`${undatedCount} student${undatedCount === 1 ? ' has' : 's have'} no registration date on file`}
+              subtitle="They are left out of any date range. Clear the dates to include them."
+              lowContrast
+              hideCloseButton
+            />
+          )}
         </Modal>
       )}
 

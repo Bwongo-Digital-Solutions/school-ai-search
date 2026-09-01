@@ -1,0 +1,80 @@
+# Moodle, the e-learning system the E-Learning menu opens.
+#
+#   docker compose -f deploy/integrations/moodle.yml up -d
+#   ./containers.sh integrations          # the same thing from the menu
+#
+# The main stack must be up first: this joins its network rather than creating one, so that the app
+# can reach Moodle at http://moodle:8080 without either of them publishing a port to the world.
+#
+# Two addresses, and they are not the same one — this is the thing to get right when connecting it
+# under Settings → Integrations:
+#
+#   Address        https://moodle.yourschool.ac.ug  (or http://127.0.0.1:8080 while trying it out)
+#                  What the browser loads when a teacher opens the E-Learning menu. It has to be an
+#                  address a browser can actually reach, which a compose service name is not.
+#   Internal URL   http://moodle:8080
+#                  What this server calls for API requests. Never leaves the bridge network.
+#
+# Bitnami's image because it does the initial install unattended; the upstream moodle image expects
+# an operator to click through a web installer before it will serve anything.
+
+services:
+  moodle:
+    image: bitnami/moodle:4.5
+    container_name: school-ai-search-moodle
+    restart: unless-stopped
+    depends_on:
+      moodle-db:
+        condition: service_healthy
+    ports:
+      # Loopback only, like every other optional service here. Put it behind the reverse proxy to
+      # give it a real address; do not publish it on 0.0.0.0.
+      - "${MOODLE_BIND:-127.0.0.1}:${MOODLE_PORT:-8080}:8080"
+    environment:
+      MOODLE_DATABASE_HOST: moodle-db
+      MOODLE_DATABASE_PORT_NUMBER: 3306
+      MOODLE_DATABASE_NAME: ${MOODLE_DB_NAME:-moodle}
+      MOODLE_DATABASE_USER: ${MOODLE_DB_USER:-moodle}
+      MOODLE_DATABASE_PASSWORD: ${MOODLE_DB_PASSWORD:-moodle}
+      MOODLE_USERNAME: ${MOODLE_ADMIN_USER:-admin}
+      MOODLE_PASSWORD: ${MOODLE_ADMIN_PASSWORD:-change-me-before-you-use-this}
+      MOODLE_EMAIL: ${MOODLE_ADMIN_EMAIL:-admin@example.com}
+      MOODLE_SITE_NAME: ${MOODLE_SITE_NAME:-eSchool Learning}
+      # The address Moodle believes it lives at. Wrong here and every link it generates is wrong.
+      MOODLE_REVERSEPROXY: ${MOODLE_REVERSEPROXY:-no}
+      MOODLE_SSLPROXY: ${MOODLE_SSLPROXY:-no}
+      ALLOW_EMPTY_PASSWORD: "no"
+    volumes:
+      - school_ai_search_moodle_data:/bitnami/moodle
+      - school_ai_search_moodle_moodledata:/bitnami/moodledata
+
+  moodle-db:
+    image: bitnami/mariadb:11.4
+    container_name: school-ai-search-moodle-db
+    restart: unless-stopped
+    # No ports at all. Reachable service-to-service and nowhere else, the way librechat-mongo is.
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MOODLE_DB_ROOT_PASSWORD:-moodle-root}
+      MARIADB_DATABASE: ${MOODLE_DB_NAME:-moodle}
+      MARIADB_USER: ${MOODLE_DB_USER:-moodle}
+      MARIADB_PASSWORD: ${MOODLE_DB_PASSWORD:-moodle}
+      MARIADB_CHARACTER_SET: utf8mb4
+      MARIADB_COLLATE: utf8mb4_unicode_ci
+    volumes:
+      - school_ai_search_moodle_db:/bitnami/mariadb
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  school_ai_search_moodle_data:
+  school_ai_search_moodle_moodledata:
+  school_ai_search_moodle_db:
+
+networks:
+  default:
+    name: eschool_net
+    external: true

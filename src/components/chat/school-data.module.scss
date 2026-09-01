@@ -65,6 +65,20 @@
   border-block-start: 1px solid $ui-03;
 }
 
+/* The schedule controls: a toggle, a time, a zone, a count and Save. Auto-fit rather than fixed
+   columns so they stack on a phone instead of shrinking each field past legibility. */
+.scheduleRow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  align-items: end;
+  gap: layout.$spacing-05;
+
+  /* The Save button sits on the baseline of the fields beside it, not on their labels. */
+  > button {
+    align-self: end;
+  }
+}
+
 .rowMain {
   min-inline-size: 0;
 }

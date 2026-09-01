@@ -1,0 +1,62 @@
+# Dolibarr, one of the three business systems the ERP menu can open.
+#
+#   docker compose -f deploy/integrations/dolibarr.yml up -d
+#
+# The lightest of the three: one container and a MariaDB. A school running this rather than Odoo or
+# ERPNext is usually the school that wanted invoicing and a ledger, not a second platform.
+#
+# Address in the app        https://erp.yourschool.ac.ug (or http://127.0.0.1:8081 to try it)
+# Internal URL in the app   http://dolibarr:80
+
+services:
+  dolibarr:
+    image: dolibarr/dolibarr:20
+    container_name: school-ai-search-dolibarr
+    restart: unless-stopped
+    depends_on:
+      dolibarr-db:
+        condition: service_healthy
+    ports:
+      - "${DOLIBARR_BIND:-127.0.0.1}:${DOLIBARR_PORT:-8081}:80"
+    environment:
+      DOLI_DB_TYPE: mysqli
+      DOLI_DB_HOST: dolibarr-db
+      DOLI_DB_NAME: ${DOLIBARR_DB_NAME:-dolibarr}
+      DOLI_DB_USER: ${DOLIBARR_DB_USER:-dolibarr}
+      DOLI_DB_PASSWORD: ${DOLIBARR_DB_PASSWORD:-dolibarr}
+      DOLI_ADMIN_LOGIN: ${DOLIBARR_ADMIN_USER:-admin}
+      DOLI_ADMIN_PASSWORD: ${DOLIBARR_ADMIN_PASSWORD:-change-me-before-you-use-this}
+      # The address it believes it lives at; every generated link depends on it being right.
+      DOLI_URL_ROOT: ${DOLIBARR_URL_ROOT:-http://127.0.0.1:8081}
+      DOLI_INSTALL_AUTO: "1"
+    volumes:
+      - school_ai_search_dolibarr_documents:/var/www/documents
+      - school_ai_search_dolibarr_html:/var/www/html/custom
+
+  dolibarr-db:
+    image: mariadb:11.4
+    container_name: school-ai-search-dolibarr-db
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DOLIBARR_DB_ROOT_PASSWORD:-dolibarr-root}
+      MARIADB_DATABASE: ${DOLIBARR_DB_NAME:-dolibarr}
+      MARIADB_USER: ${DOLIBARR_DB_USER:-dolibarr}
+      MARIADB_PASSWORD: ${DOLIBARR_DB_PASSWORD:-dolibarr}
+    volumes:
+      - school_ai_search_dolibarr_db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  school_ai_search_dolibarr_documents:
+  school_ai_search_dolibarr_html:
+  school_ai_search_dolibarr_db:
+
+networks:
+  default:
+    name: eschool_net
+    external: true

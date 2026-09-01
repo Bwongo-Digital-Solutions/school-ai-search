@@ -28,6 +28,7 @@ import { CardHeader, PageHeader, StatRow, StatTile, WidgetCard } from '@/compone
 import TeacherPerformance from './TeacherPerformance';
 import styles from './workspace.module.scss';
 import { useSettings } from '@/contexts/SettingsContext';
+import { useAuth } from '@/contexts/AuthContext';
 
 /* The shapes returned by POST /api/functions/monitoring. Everything is scoped to one day
    except off_premises, which is resolved over a rolling window — a student who left
@@ -158,11 +159,17 @@ const MonitoringDashboard: React.FC = () => {
   const [section, setSection] = useState<SectionKey>('today');
   const [date, setDate] = useState(todayIso());
   const { settings } = useSettings();
+  const { user, isLoading: authLoading } = useAuth();
   const [data, setData] = useState<Monitoring | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
+  // Depends on `user` even though the monitoring endpoint does not currently check one: this screen
+  // mounts inside a provider tree that is alive before the session is restored, and every other
+  // load here learned the hard way that a fetch made then is never retried. Gating on the reader
+  // also means this keeps working the day the endpoint does start checking, rather than emptying.
   const load = useCallback(async (forDate: string) => {
+    if (authLoading || !user) return;
     setLoading(true);
     setError('');
     const { data: result, error: failure } = await supabase.functions.invoke<Monitoring>(
@@ -175,7 +182,7 @@ const MonitoringDashboard: React.FC = () => {
       setData(result ?? null);
     }
     setLoading(false);
-  }, []);
+  }, [authLoading, user]);
 
   useEffect(() => { load(date); }, [date, load]);
 

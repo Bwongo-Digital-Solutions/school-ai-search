@@ -13,11 +13,13 @@ import type { JsonRecord } from '@/types/auth';
 // registers — the same records the mobile app writes, read back in one place.
 // 'teaching' reports each teacher's lessons, their students' attendance and their results, and
 // is where classes are assigned to teachers in the first place.
+// 'student' is one student's whole record — where a search result for a student lands.
 // 'data' is backup, export and import — the school's records as a whole rather than one student's.
 // 'elearning' and 'erp' open the systems the school has connected under Settings.
 export type ActiveView =
   | 'chat'
   | 'students'
+  | 'student'
   | 'records'
   | 'users'
   | 'audit'
@@ -48,6 +50,8 @@ interface ChatContextType {
   isLoading: boolean;
   isSidebarOpen: boolean;
   students: Student[];
+  /** Set when the roster could not be loaded, so an empty list can be told from a failed one. */
+  studentsError: string | null;
   aiModels: AiModelOption[];
   selectedModelId: string;
   activeView: ActiveView;
@@ -107,6 +111,8 @@ type AiChatResponse = {
   stoppedAtStepLimit?: boolean;
 };
 
+const getErrorMessage = (error: unknown) => (error instanceof Error ? error.message : 'Unknown error');
+
 const ChatContext = createContext<ChatContextType | undefined>(undefined);
 
 export const useChatContext = () => {
@@ -118,13 +124,16 @@ export const useChatContext = () => {
 export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   // Support staff (non-teaching) may only see school fees payment status, so the full
   // student dataset and the AI assistant are never loaded for them.
-  const { isSupportStaff, user } = useAuth();
+  const { isSupportStaff, user, isLoading: authLoading } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarOpen, setSidebarOpen] = useState(true);
   const [students, setStudents] = useState<Student[]>([]);
+  // Why the roster is empty, when it is empty for a reason other than the school having no
+  // students. Held so a failed load reads as "could not load" rather than as an empty school.
+  const [studentsError, setStudentsError] = useState<string | null>(null);
   const [aiModels, setAiModels] = useState<AiModelOption[]>([]);
   const [selectedModelId, setSelectedModelId] = useState('local-rules');
   const [activeView, setActiveView] = useState<ActiveView>('chat');
@@ -143,9 +152,20 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   });
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
 
+  /**
+   * The roster, reloaded whenever who is asking for it changes.
+   *
+   * `user` is a dependency for a reason that cost a bug: this provider mounts above the sign-in
+   * screen, so without it the fetch fired once during session restore, was refused as an
+   * anonymous read of a teaching-gated table, and never ran again — the callback's identity never
+   * changed, so signing in did not retrigger the effect. The roster stayed empty until the reader
+   * pressed refresh. Depending on `user` means sign-in, sign-out and a role change each reload it.
+   */
   const refreshStudents = useCallback(async () => {
-    if (isSupportStaff) {
+    if (authLoading) return;
+    if (!user || isSupportStaff) {
       setStudents([]);
+      setStudentsError(null);
       return;
     }
     try {
@@ -154,14 +174,15 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         .select('*')
         .order('last_name');
       if (error) {
-        console.error('Error fetching students:', error);
+        setStudentsError(getErrorMessage(error));
         return;
       }
       setStudents(data || []);
+      setStudentsError(null);
     } catch (err) {
-      console.error('Failed to load students:', err);
+      setStudentsError(getErrorMessage(err));
     }
-  }, [isSupportStaff]);
+  }, [authLoading, user, isSupportStaff]);
 
   useEffect(() => {
     refreshStudents();
@@ -351,7 +372,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     <ChatContext.Provider
       value={{
         messages, conversations, currentConversationId, isLoading,
-        isSidebarOpen, students, aiModels, selectedModelId, activeView, setActiveView,
+        isSidebarOpen, students, studentsError, aiModels, selectedModelId, activeView, setActiveView,
         focus, openRecord, clearFocus,
         chatOptions, setChatOptions, mcpServers,
         setSelectedModelId, refreshStudents,

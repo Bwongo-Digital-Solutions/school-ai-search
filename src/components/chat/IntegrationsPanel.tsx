@@ -23,7 +23,7 @@ import styles from './panels.module.scss';
 const IntegrationsPanel: React.FC = () => {
   const { notify } = useNotifications();
   const [state, setState] = useState<IntegrationList | null>(null);
-  const [drafts, setDrafts] = useState<Record<string, { baseUrl: string; apiToken: string; username: string }>>({});
+  const [drafts, setDrafts] = useState<Record<string, { baseUrl: string; internalUrl: string; apiToken: string; username: string }>>({});
   const [busy, setBusy] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -39,12 +39,20 @@ const IntegrationsPanel: React.FC = () => {
   }, [refresh]);
 
   const draftFor = (entry: Integration) =>
-    drafts[entry.provider] ?? { baseUrl: entry.baseUrl, apiToken: '', username: entry.username };
+    drafts[entry.provider] ?? {
+      baseUrl: entry.baseUrl,
+      internalUrl: entry.internalUrl,
+      apiToken: '',
+      username: entry.username,
+    };
 
-  const setDraft = (provider: string, patch: Partial<{ baseUrl: string; apiToken: string; username: string }>) =>
+  const setDraft = (
+    provider: string,
+    patch: Partial<{ baseUrl: string; internalUrl: string; apiToken: string; username: string }>,
+  ) =>
     setDrafts((previous) => ({
       ...previous,
-      [provider]: { baseUrl: '', apiToken: '', username: '', ...previous[provider], ...patch },
+      [provider]: { baseUrl: '', internalUrl: '', apiToken: '', username: '', ...previous[provider], ...patch },
     }));
 
   const run = async (label: string, work: () => Promise<IntegrationList>) => {
@@ -108,6 +116,14 @@ const IntegrationsPanel: React.FC = () => {
               value={draft.baseUrl}
               onChange={(event) => setDraft(entry.provider, { baseUrl: event.target.value })}
             />
+            <TextInput
+              id={`internal-url-${entry.provider}`}
+              labelText="Internal address (optional)"
+              placeholder={`http://${entry.provider}:8080`}
+              helperText="Only if this server reaches it at a different address — a bundled system on the Docker network."
+              value={draft.internalUrl}
+              onChange={(event) => setDraft(entry.provider, { internalUrl: event.target.value })}
+            />
             <PasswordInput
               id={`token-${entry.provider}`}
               labelText="API token (optional)"
@@ -132,6 +148,7 @@ const IntegrationsPanel: React.FC = () => {
                   saveIntegration({
                     provider: entry.provider,
                     baseUrl: draft.baseUrl,
+                    internalUrl: draft.internalUrl,
                     username: draft.username,
                     // Omitted entirely when untouched, so saving the address never blanks a token.
                     ...(draft.apiToken ? { apiToken: draft.apiToken } : {}),

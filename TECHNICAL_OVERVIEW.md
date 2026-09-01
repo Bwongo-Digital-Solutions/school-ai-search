@@ -92,7 +92,7 @@ The local backend lives in `server/local-backend.mjs`.
 | `/api/functions/fee-status` | `POST` | Per-student school fees payment status only; the sole student-facing endpoint the `support_staff` role reads. An optional `code` (scanned ID card payload) narrows the response to one student. |
 | `/api/functions/ai-chat` | `POST` | Creates chat messages and returns a student-search response. Requires `requesterRole` of `admin` or `teacher`. Accepts `mode` (`direct` or `agent`), `useRag`, and `mcpServerIds`; returns the tool trace and citations alongside the answer. |
 | `/api/functions/ai-models` | `POST` | Lists selectable AI search models and provider configuration state. |
-| `/api/functions/backup` | `POST` | Database backups, dispatched by an `action` field: `list`, `create`, `delete`. `PRIVILEGED_ROLES` only. `pg_dump` is injected rather than called directly, so the argv, the filename and the audit row are testable without a subprocess. |
+| `/api/functions/backup` | `POST` | Database backups, dispatched by an `action` field: `list`, `create`, `delete`, `save_schedule`. `PRIVILEGED_ROLES` only. `pg_dump` is injected rather than called directly, so the argv, the filename and the audit row are testable without a subprocess. |
 | `/api/backups/<id>.dump` | `GET` | Downloads one completed backup. Gated exactly as the service is rather than trusting that whoever holds the id was allowed to ask, and the download itself is audited. |
 | `/api/functions/data` | `POST` | Export and import, dispatched by an `action` field: `list_tables`, `export`, `check_import`, `import`. `PRIVILEGED_ROLES` only. An import refuses to run until `check_import` has passed and its token is handed back. |
 | `/api/functions/integrations` | `POST` | The school's Moodle and at most one ERP, dispatched by an `action` field: `list`, `save`, `disable`, `test`. `PRIVILEGED_ROLES` only. `test` returns `connected: false` with the reason rather than a top-level error, because the reason is what the screen exists to show. |
@@ -111,9 +111,11 @@ The local backend lives in `server/local-backend.mjs`.
 | `/api/functions/settings` | `POST` | Global school branding. `action:"get"` returns the settings row (any signed-in role); `action:"update"` is admin-only. Read by every document generator and the app header. |
 | `/api/meta` | `GET` | Product version, build number and developer contacts for the app footer. |
 | `/api/provision` | `POST` | Self-service school onboarding, dispatched by an `action` field: `availability`, `signup`, `callback` (signed webhook), `status`, `list` (admin), `sweep` (admin/cron). Inert unless a control database is configured. See Multi-Tenancy and Self-Service Provisioning. |
+| `/api/functions/student-summary` | `POST` | One student's whole record — biodata, class, parents, grades, attendance, fees, payments, discipline, and every movement from admission to transfer. `ALL_STAFF_ROLES`, but which sections come back is decided by the caller's session role, and a section a role may not see is never queried. |
+| `/api/student-reports/:code.pdf` | `GET` | The same record as one printable PDF, resolved by student number or row id. Teaching staff only — the same gate as the report card. |
 | `/api/report-cards/:studentId.pdf` | `GET` | Generates a PDF report card for a student. |
 | `/api/id-cards/:studentId.pdf` | `GET` | Printable QR ID card for one student. `layout=a4` tiles ten per sheet instead of one CR80 card per page. |
-| `/api/id-cards.pdf` | `GET` | Batch ID cards, optionally filtered by `grade` and `section`. |
+| `/api/id-cards.pdf` | `GET` | Batch ID cards, filtered by any combination of `grade`, `section`, `registeredFrom` and `registeredTo` (against `enrollment_date`). No filter prints the whole school. |
 | `/api/id-cards/:studentId.png` | `GET` | The bare QR image, for on-screen preview and scan testing. |
 | `/api/fees/receipts/:paymentId.pdf` | `GET` | Printable receipt for one payment. Requires `requesterRole=admin` in the query string. |
 | `/api/fees/statements/:studentId.pdf` | `GET` | Full fee statement with running balance, optionally bounded by `from` and `to`, plus a Gateway Transactions section listing every mobile-money and bank attempt including pending and failed ones. Requires `requesterRole` of `admin` or `teacher` — one student's history, unlike the school-wide report below. |
@@ -153,6 +155,7 @@ Schema creation is handled by `server/db/schema.mjs`.
 | --- | --- |
 | `students` | Student profiles, GPA, attendance, subjects, and notes. |
 | `users` | Local auth users with password hashes and a role of `admin`, `head_teacher`, `accountant`, `bursar`, `teacher`, or `support_staff`. `designation` is a support-staff post (`askari`, `matron`, `cook`) deciding what a student ID scan reveals. `bursar` was a designation before it was a role; `schema.mjs` migrates those rows. |
+| `school_backup_schedule` | One row: whether unattended backups are on, the wall-clock time and IANA zone to take them at, how many to keep, and when the last one ran. Its own table rather than columns on `school_settings`, because `updateSettings` replaces that row whole. |
 | `school_backups` | The index of backups taken, so the list survives a container restart. A row is written before `pg_dump` runs and completed after, so an interrupted dump leaves `running` rather than a file that reads as usable. |
 | `school_integrations` | Where the school's Moodle and ERP are, with tokens encrypted at rest under `SECRETS_KEY`. A table rather than columns on `school_settings`, because that row is read on every request that renders anything and is serialised into documents. |
 | `conversations` | Chat conversation metadata. |
@@ -488,6 +491,16 @@ card is lost. Set `ID_CARD_QR_BASE_URL` to encode `<base>/<student number>` inst
 camera app offers to open a link rather than showing plain text. `parseStudentCode` in
 `server/local-backend.mjs` accepts a bare number, a URL, or a JSON payload, so the in-app scanner keeps
 working whichever form the cards carry.
+
+A batch is selected by any combination of `grade`, `section`, `registeredFrom` and `registeredTo` on
+`GET /api/id-cards.pdf`, built up one criterion at a time so an unfiltered request still prints the
+whole school. Ten cards tile onto each A4 sheet and pagination is automatic, so an arbitrary
+selection needs nothing from the renderer.
+
+The registration date is `students.enrollment_date` — there is no `created_at` on that table. It is a
+`DATE`, so a plain `YYYY-MM-DD` comparison is exact and avoids the timezone drift a timestamp would
+bring. It is also **nullable**: a student with no enrolment date on file matches no range at all. The
+print dialog counts those students and says so, rather than letting them quietly miss out on a card.
 
 ## Docker Operations
 
@@ -926,6 +939,48 @@ the MCP tokens `mcp_servers` still stores in plaintext:
 Restoring is deliberately not in the app. It is `pg_restore` on the server, by an operator, against
 a database they have chosen — the one operation where doing it by hand is the safer default.
 
+### Unattended backups
+
+`server/services/backup-scheduler.mjs`, and the only recurring job in the server. A school that has
+to remember to press "Back up now" does not have backups, it has a good intention.
+
+The schedule lives in `school_backup_schedule` — one row, in the tenant database, because the time
+is the school's choice. Its own table rather than columns on `school_settings` for the reason
+`school_integrations` is one: `updateSettings` replaces the whole row, so saving the school's logo
+would silently blank a schedule nobody touched. `run_at` is `HH:MM` text and `timezone` an IANA
+name, because this is a wall clock preference rather than an instant — two in the morning has to
+stay two in the morning across a daylight-saving change, so the comparison is done by formatting the
+current instant into the school's zone rather than by offset arithmetic.
+
+`isBackupDue` asks *"has today's hour come round, and has today's backup been taken?"* — never *"how
+long since the last one?"*. That is what makes it survive a restart. A container that comes back at
+09:00 having missed 02:00 still takes the day's backup; one restarted at 01:59 does not skip the day.
+`last_run_at` is stamped whether the dump succeeded or failed, so a database that cannot be dumped is
+retried tomorrow rather than every minute for the rest of the day.
+
+Started at the tail of `createAppRuntime` and stopped as the **first** statement of `runtime.close()`,
+before any pool is closed — a sweep waking mid-shutdown would be querying a database on its way out,
+and `tests/local-backend.test.mjs` tears down through `close()`, so a leaked interval would keep
+`node --test` from ever exiting. The handle is `unref`'d as a second guard. A sweep never overlaps
+itself: a large school's dump can outlast the tick, and two `pg_dump`s racing the same schedule would
+write two backups and log one.
+
+It is **off unless `BACKUP_SCHEDULER` is set**, and set on exactly one long-running process. Two
+processes with it on would each take the day's backup and each believe it was the one that had. The
+Backups screen reports whether a scheduler is actually running in the server it is talking to, so a
+saved schedule cannot sit there looking armed on a deployment that never starts one.
+
+Retention prunes **scheduled backups only**. A manual backup is a deliberate act — somebody took it
+before a risky change — and having the machine delete it a week later because an unrelated retention
+number said so would be its own kind of data loss. `kind = 'scheduled'` and a blank `created_by` are
+what the screen reads as `· automatic`.
+
+Multi-tenant deployments enumerate schools with `listTenants(control)` and open each through the
+registry's `open(tenantId)`, which is `resolve()` without the Host-header parsing — a background job
+has no request to derive a tenant from, and letting it name its own is safe for exactly the reason
+letting a browser do so is not. `PUBLIC_TENANT_COLUMNS` still withholds `db_url`; nothing here asks
+for it. Only `status = 'active'` schools are dumped.
+
 ## Data Export and Import
 
 `server/services/data-transfer.mjs`. Pure SQL in Node, so it runs identically on pg-mem and is
@@ -962,14 +1017,90 @@ hard way there: an omitted token means *leave the stored one alone* while an exp
 clears it, and `test` returns `connected: false` with the reason rather than a top-level `error` —
 an error becomes a 400 with a null body, hiding the diagnosis the screen exists to show.
 
-`http` addresses are refused. The token travels on every request, so an integration configured over
-plain http would leak it to anyone on the same network; better to refuse at configuration time than
-be quietly insecure afterwards. Enabling a second ERP stands the first down, because a school runs
-one.
+`http` addresses are refused for `base_url`. The token travels on every request, so an integration
+configured over plain http would leak it to anyone on the same network; better to refuse at
+configuration time than be quietly insecure afterwards. Enabling a second ERP stands the first down,
+because a school runs one.
+
+### Two addresses, and why
+
+`base_url` is what the **browser** opens; `config.internal_url` is what the **server** calls. For a
+system the school already runs these are the same address and only the first is set. For one
+bootstrapped from `deploy/integrations/` they differ, and the difference matters: a bundled Moodle
+lives on the Docker network as `http://moodle:8080`, which no browser can reach — a service name
+resolves inside the bridge network and nowhere else.
+
+`normalizeInternalUrl` permits plain http for a **single-label hostname** (and loopback), and holds
+anything with a dot in it to the same https rule as the public address. The objection to http is that
+a token can be read in transit; a service name has no route off the bridge network, so there is no
+transit to read. The relaxation is deliberately confined to the server-side field and does not touch
+the one the browser uses.
+
+The connection test prefers `internal_url` when there is one — testing a bundled system by its public
+address would check the reverse proxy in front of it rather than the system itself, and would fail
+outright before that proxy is configured.
+
+### Bundled systems
+
+`deploy/integrations/{moodle,odoo,erpnext,dolibarr}.yml`, one complete stack per file, started from
+`./containers.sh` option 18 or directly:
+
+```bash
+docker compose -f deploy/integrations/moodle.yml -p school-ai-search-moodle up -d
+```
+
+Separate files rather than more profiles in `docker-compose.yml`: ERPNext alone is seven services
+(MariaDB, three Redis, the web process, a worker and a scheduler), and folding all four in would
+roughly triple the length of the main file for something most schools never start. Each brings its
+own database and named volumes; datastores publish no ports at all, and the application ports bind to
+loopback, following `librechat`/`librechat-mongo`.
+
+They meet the app on a shared network. `docker-compose.yml` names its default network `eschool_net`
+and each integration file joins it as `external: true` — a default network belongs to the file that
+created it, so without the explicit name a second file would silently get a second network and
+nothing would resolve. The app must be up first; `containers.sh` checks the network exists and says
+so rather than failing obscurely.
+
+ERPNext is the one that is not usable when it comes up: Frappe has no site until one is created,
+which is the `erpnext-create-site` one-shot behind a `setup` profile. It is deliberately not part of
+`up` — it takes minutes and would fail noisily on every restart after the first.
+
+Note that Compose will happily run all three ERPs at once while the app permits a school only one.
+That is not a contradiction to fix; it is a deployment convenience for evaluating them.
 
 The UI frames the system and falls back to a new tab on a timeout, since `X-Frame-Options` refusals
 are not observable from script — no error event, no readable status, the `load` event simply never
 fires. That is a guess, and it is the honest one available.
+
+## Student Summary
+
+`server/services/student-summary.mjs`, `src/components/chat/StudentSummary.tsx`. Where a search
+result for a student lands: everything the school holds about one child on one screen, printable in
+one click. Before it, answering a single question about a student meant visiting the roster, the
+records workspace and the ledger.
+
+**The role filtering is in the query, not the response.** A section the reader may not see is never
+read out of the database, so there is nothing in the payload to hide — a bursar's copy has no
+disciplinary record in it, and a teacher's has no payment history. The test asserts this on the
+payload rather than on the component, because a component test would pass just as well against a
+hidden `<div>`.
+
+The section policy is **borrowed from `scan-profiles.mjs` rather than restated**. That module already
+answers "what may this profile see of a student" for the ID-card scan, and two lists that were
+supposed to agree would eventually stop agreeing. `EXTRA_SECTIONS` adds only what a scan has no
+business showing — `discipline` (teaching roles) and `movements`, the passage through the school from
+admission through promotions to transfer.
+
+The academic and financial figures come from `loadReportData` in `student-report.mjs`, the same
+loader the parent report PDF is built on, so a number on this screen and a number on that PDF cannot
+disagree. Note this is *not* the report-card path: `buildSubjectResults` in `report-card.mjs`
+manufactures marks deterministically from `gpa` and `attendance_rate`, which is right for a term
+report card template and wrong for a record of what a student actually scored.
+
+`GET /api/student-reports/:code.pdf` prints the whole thing. `renderReport` had been able to build
+exactly this document since the parent-report work and simply had no route — it was imported in
+`local-backend.mjs` and never called, reachable only by emailing it to a guardian. Print and download
+go through the existing `printFromUrl` / `downloadFromUrl` in `src/lib/download.ts`.
 
 ## Authentication and Sessions
 
@@ -1038,9 +1169,48 @@ The backend test suite uses an in-memory PostgreSQL-compatible database and veri
 - an import refusing to run before its dry run, and the dry run writing nothing;
 - an integration token surviving a save that omits it, clearing on an explicit empty string, and
   never appearing in a response; one ERP standing another down; and a failed connection test
-  returning `connected: false` with a reason rather than a 400 with a null body.
+  returning `connected: false` with a reason rather than a 400 with a null body;
+- an unattended backup coming due once its hour has come round and only once that school day,
+  catching up after downtime rather than skipping the day, and a scheduled run filing itself as
+  automatic, pruning its own and leaving manual backups alone;
+- the backup scheduler being off unless asked for, and stopping when `runtime.close()` is called — a
+  timer that survived would also keep `node --test` from ever exiting, so the leak is its own
+  assertion;
+- ID cards selected by class and by registration date, composing rather than overriding, and a
+  window nobody was registered in returning a 404 the screen can explain rather than an empty PDF;
+- a student summary showing each role its own share of one student: the incident text is absent from
+  a bursar's payload entirely, asserted on the JSON rather than on the component, because a
+  component test would pass equally against a hidden `<div>`.
 
 Outbound model, embedding and MCP calls all go through an injectable `httpClient`, so every provider path is exercised without a network.
+
+### Fetching data that needs a session
+
+A bug worth not reintroducing, because it cost a release and no backend test could see it.
+
+`ChatProvider` and the workspaces beneath it mount **above the sign-in screen**, before `AuthContext`
+has restored the session. A `useCallback` that fetches a role-gated table and does not depend on
+`user` therefore fires once, is refused as an anonymous read, and — because its identity never
+changes — is never retried. Signing in does not retrigger it. The roster stayed empty until the
+reader pressed refresh, and it looked like a school with no students rather than a failed load.
+
+So: **any callback that reads a gated table takes `user` as a dependency**, and skips while
+`isLoading` is true so no request is made during session restore.
+
+```ts
+const refreshStudents = useCallback(async () => {
+  if (authLoading) return;
+  if (!user || isSupportStaff) { setStudents([]); return; }
+  ...
+}, [authLoading, user, isSupportStaff]);
+```
+
+Gating on a derived boolean such as `isSupportStaff` is not enough: it is `false` before sign-in and
+`false` after, so it never changes and never re-runs the effect.
+
+The second half is that these loads swallowed their errors into `console.error` and rendered an empty
+table, which is why a failed load was indistinguishable from an empty school. Each now holds an error
+state and offers a retry.
 
 ### Two constraints worth knowing before changing the data layer
 

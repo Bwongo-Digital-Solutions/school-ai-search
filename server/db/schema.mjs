@@ -226,6 +226,27 @@ CREATE TABLE IF NOT EXISTS school_backups (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- When this school takes an unattended backup, and how many of them to keep.
+--
+-- Its own table rather than columns on school_settings, for the same reason school_integrations is
+-- one: updateSettings replaces the whole row, so an administrator saving the school's logo would
+-- silently blank a backup schedule they never touched.
+--
+-- run_at is 'HH:MM' text rather than a TIME, and timezone is an IANA name, because this is a wall
+-- clock preference rather than an instant — "two in the morning" has to stay two in the morning
+-- across a daylight-saving change. A blank timezone means the server's own.
+CREATE TABLE IF NOT EXISTS school_backup_schedule (
+  id TEXT PRIMARY KEY DEFAULT 'default',
+  enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  run_at TEXT NOT NULL DEFAULT '02:00',
+  timezone TEXT NOT NULL DEFAULT '',
+  keep_last INTEGER NOT NULL DEFAULT 7,
+  last_run_at TIMESTAMPTZ,
+  last_error TEXT NOT NULL DEFAULT '',
+  updated_by TEXT NOT NULL DEFAULT '',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- The external systems a school has connected: its Moodle, and at most one ERP.
 --
 -- A table rather than columns on school_settings, for three reasons. loadSchoolSettings is read on

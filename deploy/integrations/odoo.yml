@@ -1,0 +1,60 @@
+# Odoo, one of the three business systems the ERP menu can open.
+#
+#   docker compose -f deploy/integrations/odoo.yml up -d
+#
+# A school runs one ERP. Compose will happily run all three side by side, but connecting a second
+# one under Settings → Integrations stands the first down — see server/services/integrations.mjs.
+#
+# Its own Postgres rather than the app's. Odoo manages its own databases, creates and drops them
+# from its web interface, and expects a role that may do so; pointing it at the database holding
+# every student record would hand it privileges it has no business having.
+#
+# Address in the app        https://erp.yourschool.ac.ug (or http://127.0.0.1:8069 to try it)
+# Internal URL in the app   http://odoo:8069
+
+services:
+  odoo:
+    image: odoo:17
+    container_name: school-ai-search-odoo
+    restart: unless-stopped
+    depends_on:
+      odoo-db:
+        condition: service_healthy
+    ports:
+      - "${ODOO_BIND:-127.0.0.1}:${ODOO_PORT:-8069}:8069"
+    environment:
+      HOST: odoo-db
+      USER: ${ODOO_DB_USER:-odoo}
+      PASSWORD: ${ODOO_DB_PASSWORD:-odoo}
+    volumes:
+      - school_ai_search_odoo_data:/var/lib/odoo
+      - school_ai_search_odoo_addons:/mnt/extra-addons
+
+  odoo-db:
+    image: postgres:16-alpine
+    container_name: school-ai-search-odoo-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: ${ODOO_DB_USER:-odoo}
+      POSTGRES_PASSWORD: ${ODOO_DB_PASSWORD:-odoo}
+      # Odoo creates its own databases at first run and needs a template to do it from.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - school_ai_search_odoo_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${ODOO_DB_USER:-odoo}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  school_ai_search_odoo_data:
+  school_ai_search_odoo_addons:
+  school_ai_search_odoo_db:
+
+networks:
+  default:
+    name: eschool_net
+    external: true

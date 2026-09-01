@@ -609,6 +609,67 @@ test('ID cards render as PDFs for one student and for a whole class', async () =
   }
 });
 
+test('ID cards can be printed for an intake as well as a class', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const idCards = (params) =>
+      runtime.dispatch({
+        method: 'GET',
+        pathname: '/api/id-cards.pdf',
+        searchParams: new URLSearchParams({ layout: 'a4', ...params }),
+      });
+
+    // Three known enrolment dates to select between, and one student with none at all.
+    await runtime.database.query(
+      "UPDATE students SET enrollment_date = '2024-02-01' WHERE student_id = 'STU-2026-001'",
+    );
+    await runtime.database.query(
+      "UPDATE students SET enrollment_date = '2026-02-01' WHERE student_id = 'STU-2026-002'",
+    );
+    await runtime.database.query(
+      "UPDATE students SET enrollment_date = '2026-09-01' WHERE student_id = 'STU-2026-003'",
+    );
+    await runtime.database.query(
+      "UPDATE students SET enrollment_date = NULL WHERE student_id = 'STU-2026-004'",
+    );
+
+    const term = await idCards({ registeredFrom: '2026-01-01', registeredTo: '2026-06-30' });
+    assert.equal(term.status, 200);
+    assert.equal(term.body.subarray(0, 4).toString(), '%PDF');
+    // The range is in the filename, so a printed batch says on its face what it was.
+    assert.match(term.headers['Content-Disposition'], /registered-2026-01-01-to-2026-06-30\.pdf/);
+
+    // An open-ended range is still a range: "from" alone means everyone since.
+    assert.equal((await idCards({ registeredFrom: '2026-01-01' })).status, 200);
+    assert.equal((await idCards({ registeredTo: '2024-12-31' })).status, 200);
+
+    // A window nobody was registered in is not an empty PDF, it is a 404 the screen can explain.
+    assert.equal((await idCards({ registeredFrom: '2019-01-01', registeredTo: '2019-12-31' })).status, 404);
+
+    // Class and dates compose, rather than one overriding the other.
+    const { rows } = await runtime.database.query(
+      "SELECT grade_level FROM students WHERE student_id = 'STU-2026-002'",
+    );
+    const withGrade = await idCards({
+      grade: String(rows[0].grade_level),
+      registeredFrom: '2026-01-01',
+      registeredTo: '2026-06-30',
+    });
+    assert.equal(withGrade.status, 200);
+    assert.match(withGrade.headers['Content-Disposition'], /grade-\d+-registered-/);
+
+    // A student with no enrolment date on file is in no range at all. The print dialog says so
+    // rather than letting them quietly miss out on a card.
+    const undated = await runtime.database.query(
+      "SELECT COUNT(*)::int AS count FROM students WHERE enrollment_date IS NULL",
+    );
+    assert.ok(undated.rows[0].count > 0, 'the fixture has one, so the exclusion is real');
+  } finally {
+    await cleanup();
+  }
+});
+
 test('grading schemes resolve by country and academic level', () => {
   const ugandaSecondary = resolveGradingScheme({
     country: 'uganda',
@@ -3232,6 +3293,250 @@ test('a backup names the right file and records who took it', async () => {
     assert.equal(audit.rows[0].entity_name, row.filename);
   } finally {
     await cleanup();
+  }
+});
+
+test('a student summary shows each role its own share of one student, and no more', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const summary = (requesterRole) =>
+    dispatch(runtime, 'POST', '/api/functions/student-summary', { code: 'STU-2026-001', requesterRole });
+
+  try {
+    await runtime.database.query(
+      `INSERT INTO discipline_records (id, student_id, incident_date, category, severity, description)
+       VALUES ('disc-1', 'student-001', '2026-05-04', 'Conduct', 'minor', 'Late three mornings running')`,
+    );
+    await runtime.database.query(
+      `INSERT INTO student_promotions (id, student_id, from_grade_level, to_grade_level, academic_year, effective_date)
+       VALUES ('prom-1', 'student-001', 9, 10, '2026/2027', '2026-12-01')`,
+    );
+
+    const head = await summary('head_teacher');
+    assert.equal(head.status, 200);
+    assert.equal(head.body.data.student.student_id, 'STU-2026-001');
+    // The whole picture: who they are, what they owe, what was paid, and their movements.
+    for (const section of ['bio', 'parents', 'fees', 'payments', 'movements']) {
+      assert.ok(head.body.data[section], `a head teacher sees ${section}`);
+    }
+    assert.equal(head.body.data.movements.promotions.length, 1);
+
+    // A teacher sees the child, not the family's payment history — the same line the ID-scan card
+    // draws, borrowed rather than restated so the two cannot drift apart.
+    const teacher = await summary('teacher');
+    assert.equal(teacher.status, 200);
+    assert.ok(teacher.body.data.academics, 'a teacher sees marks');
+    assert.ok(teacher.body.data.attendance, 'and the register');
+    assert.ok(teacher.body.data.discipline, 'and the disciplinary record');
+    assert.equal(teacher.body.data.payments, undefined, 'but not who paid what, and when');
+
+    // The bursar keeps the books. A child's disciplinary record is not part of that.
+    const bursar = await summary('bursar');
+    assert.equal(bursar.status, 200);
+    assert.ok(bursar.body.data.fees, 'a bursar sees the balance');
+    assert.ok(bursar.body.data.payments, 'and the payments behind it');
+    assert.equal(bursar.body.data.discipline, undefined, 'not the disciplinary record');
+    assert.equal(bursar.body.data.academics, undefined, 'nor the marks');
+
+    // The filtering is in the query, not in the response — a section a role may not see was never
+    // read out of the database, so there is nothing in the payload to hide.
+    const asText = JSON.stringify(bursar.body.data);
+    assert.ok(!asText.includes('Late three mornings running'), 'the incident never reaches the page');
+
+    // Support staff hold an account, and it is not one that opens a student's file.
+    const support = await summary('support_staff');
+    assert.equal(support.body.data.academics, undefined);
+    assert.equal(support.body.data.bio, undefined);
+
+    // No session at all is refused outright rather than falling back to a named role.
+    const anonymous = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/functions/student-summary',
+      body: { code: 'STU-2026-001', requesterRole: 'admin' },
+      headers: {},
+      actor: null,
+    });
+    assert.equal(anonymous.status, 403);
+
+    const missing = await dispatch(runtime, 'POST', '/api/functions/student-summary', {
+      code: 'NOBODY', requesterRole: 'admin',
+    });
+    assert.equal(missing.status, 404);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a student summary prints as one PDF, and not for anyone who asks', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    // renderReport has been able to build this since the parent-report work and had no route at
+    // all; the Print button on the summary is what it was written for.
+    const printed = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/student-reports/STU-2026-001.pdf',
+      searchParams: new URLSearchParams(),
+    });
+    assert.equal(printed.status, 200);
+    assert.equal(printed.headers['Content-Type'], 'application/pdf');
+    assert.equal(printed.body.subarray(0, 4).toString(), '%PDF');
+    assert.match(printed.headers['Content-Disposition'], /STU-2026-001-report\.pdf/);
+
+    // The students table's own id works too, because that is what a search result carries.
+    const byId = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/student-reports/student-001.pdf',
+      searchParams: new URLSearchParams(),
+    });
+    assert.equal(byId.status, 200);
+
+    // A named child's marks, attendance and fees in one file. No session, no report.
+    const anonymous = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/student-reports/STU-2026-001.pdf',
+      searchParams: new URLSearchParams(),
+      headers: {},
+      actor: null,
+    });
+    assert.equal(anonymous.status, 403);
+
+    const bursar = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/student-reports/STU-2026-001.pdf',
+      searchParams: new URLSearchParams(),
+      headers: {},
+      actor: { id: 'u1', email: 'b@school.test', name: 'B', role: 'bursar', designation: null },
+    });
+    assert.equal(bursar.status, 403, 'the same gate as the report card it sits beside');
+
+    const missing = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/student-reports/NOBODY.pdf',
+      searchParams: new URLSearchParams(),
+    });
+    assert.equal(missing.status, 404);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('an unattended backup is due once its hour has come round, and only once that day', async () => {
+  const { isBackupDue } = await import('../server/services/backup.mjs');
+
+  const schedule = { enabled: true, run_at: '02:00', timezone: 'Africa/Kampala', last_run_at: null };
+  const at = (iso) => new Date(iso);
+
+  // Kampala is UTC+3 all year, so 02:00 local is 23:00 UTC the day before.
+  assert.equal(isBackupDue(schedule, at('2026-09-01T22:30:00Z')), false, 'before the hour');
+  assert.equal(isBackupDue(schedule, at('2026-09-01T23:05:00Z')), true, 'the hour has come round');
+
+  // Taken. Not due again until the school's next day, however many times the timer ticks.
+  const taken = { ...schedule, last_run_at: '2026-09-01T23:05:00Z' };
+  assert.equal(isBackupDue(taken, at('2026-09-01T23:06:00Z')), false);
+  assert.equal(isBackupDue(taken, at('2026-09-02T20:00:00Z')), false, 'still the same Kampala day');
+  assert.equal(isBackupDue(taken, at('2026-09-02T23:01:00Z')), true, 'the next one');
+
+  // A server that was down through the small hours still takes the day's backup when it comes
+  // back, rather than reasoning about elapsed time and skipping the day entirely.
+  assert.equal(isBackupDue(schedule, at('2026-09-02T06:00:00Z')), true, 'catches up after downtime');
+
+  assert.equal(isBackupDue({ ...schedule, enabled: false }, at('2026-09-01T23:05:00Z')), false);
+  assert.equal(isBackupDue({ ...schedule, run_at: 'later' }, at('2026-09-01T23:05:00Z')), false);
+});
+
+test('a scheduled backup is filed as automatic, prunes its own and leaves manual ones alone', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const { handleBackupFunction, runScheduledBackup } = await import('../server/services/backup.mjs');
+  const fs = await import('node:fs/promises');
+
+  try {
+    const runPgDump = async ({ destination }) => fs.writeFile(destination, 'PGDMP-stub');
+    const database = {
+      ...runtime.database,
+      kind: 'postgres',
+      pool: { options: { connectionString: 'postgres://user:pw@db:5432/school' } },
+    };
+    process.env.BACKUP_DIR = '/tmp/eschool-schedule-test';
+
+    // A backup somebody took by hand. It must survive everything below.
+    await handleBackupFunction(database, { action: 'create', requesterRole: 'admin' }, { runPgDump });
+
+    await handleBackupFunction(
+      database,
+      { action: 'save_schedule', requesterRole: 'admin', enabled: true, runAt: '02:00', timezone: 'UTC', keepLast: 2 },
+      {},
+    );
+
+    // Four days running. Each is a different school day, so each is owed one.
+    for (const day of ['02', '03', '04', '05']) {
+      const result = await runScheduledBackup({
+        database,
+        tenantId: 'kampala-high',
+        runPgDump,
+        now: new Date(`2026-09-${day}T02:30:00Z`),
+      });
+      assert.equal(result.ran, true, `a backup was owed on the ${day}th`);
+    }
+
+    const { rows } = await database.query('SELECT kind, created_by FROM school_backups ORDER BY created_at');
+    const scheduled = rows.filter((row) => row.kind === 'scheduled');
+    const manual = rows.filter((row) => row.kind === 'manual');
+
+    // keepLast is 2, and four were taken.
+    assert.equal(scheduled.length, 2, 'pruned down to the number the school asked to keep');
+    // Nobody pressed anything, which is what the screen reads as "automatic".
+    assert.deepEqual([...new Set(scheduled.map((row) => row.created_by))], ['']);
+    // Retention is about the backups that pile up on their own. A deliberate one is not swept away
+    // by a number that was set for something else.
+    assert.equal(manual.length, 1, 'the manual backup is untouched by retention');
+
+    // Asking again the same day is not owed a second one.
+    const again = await runScheduledBackup({
+      database,
+      tenantId: 'kampala-high',
+      runPgDump,
+      now: new Date('2026-09-05T04:00:00Z'),
+    });
+    assert.equal(again.ran, false);
+  } finally {
+    delete process.env.BACKUP_DIR;
+    await fs.rm('/tmp/eschool-schedule-test', { recursive: true, force: true });
+    await cleanup();
+  }
+});
+
+test('the backup scheduler is off unless asked for, and is stopped when the runtime closes', async () => {
+  const { startBackupScheduler } = await import('../server/services/backup-scheduler.mjs');
+
+  // Off by default. A background job that starts itself in every test run and every CLI script is
+  // one that will eventually dump a database somebody was using for something else.
+  delete process.env.BACKUP_SCHEDULER;
+  const off = startBackupScheduler({ database: null });
+  assert.equal(typeof off, 'function', 'still returns a stop, so the caller has nothing to branch on');
+
+  process.env.BACKUP_SCHEDULER = 'true';
+  try {
+    let sweeps = 0;
+    const database = {
+      kind: 'postgres',
+      query: async () => {
+        sweeps += 1;
+        throw new Error('no schedule table here');
+      },
+    };
+    const stop = startBackupScheduler({ database, intervalMs: 5 });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    stop();
+
+    const afterStop = sweeps;
+    assert.ok(afterStop > 0, 'it ticked while running');
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    // The real assertion: nothing more happens after the stop the runtime's close() calls. A timer
+    // that survived here would also keep `node --test` from ever exiting.
+    assert.equal(sweeps, afterStop, 'no ticks after stopping');
+  } finally {
+    delete process.env.BACKUP_SCHEDULER;
   }
 });
 

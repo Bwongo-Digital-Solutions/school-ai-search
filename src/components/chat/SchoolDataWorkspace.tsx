@@ -4,10 +4,13 @@ import {
   Checkbox,
   InlineLoading,
   InlineNotification,
+  NumberInput,
   Tab,
   TabList,
   Tabs,
   Tag,
+  TextInput,
+  Toggle,
 } from '@carbon/react';
 import {
   Archive,
@@ -30,7 +33,9 @@ import {
   loadBackups,
   loadExportableTables,
   runImport,
+  saveBackupSchedule,
   type BackupList,
+  type BackupSchedule,
   type ExportableTable,
   type ImportCheck,
 } from '@/lib/schoolData';
@@ -62,12 +67,28 @@ const readableSize = (bytes: number) => {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 };
 
+/** What the browser thinks it is, offered as the placeholder so the field is not a blank guess. */
+const serverZoneLabel = (() => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'the server clock';
+  } catch {
+    return 'the server clock';
+  }
+})();
+
+type ScheduleForm = Pick<BackupSchedule, 'enabled' | 'runAt' | 'timezone' | 'keepLast'>;
+
+const EMPTY_SCHEDULE: ScheduleForm = { enabled: false, runAt: '02:00', timezone: '', keepLast: 7 };
+
 const SchoolDataWorkspace: React.FC = () => {
   const { isPrivileged } = useAuth();
   const { notify, confirm } = useNotifications();
 
   const [section, setSection] = useState<SectionKey>('backups');
   const [backups, setBackups] = useState<BackupList | null>(null);
+  // The form is separate from what the server last said, so the Save button can tell an edit from
+  // an untouched screen, and a reload does not discard something half-typed.
+  const [schedule, setSchedule] = useState<ScheduleForm>(EMPTY_SCHEDULE);
   const [tables, setTables] = useState<ExportableTable[]>([]);
   const [chosen, setChosen] = useState<string[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
@@ -79,6 +100,12 @@ const SchoolDataWorkspace: React.FC = () => {
     try {
       const [backupList, tableList] = await Promise.all([loadBackups(), loadExportableTables()]);
       setBackups(backupList);
+      setSchedule({
+        enabled: backupList.schedule.enabled,
+        runAt: backupList.schedule.runAt,
+        timezone: backupList.schedule.timezone,
+        keepLast: backupList.schedule.keepLast,
+      });
       setTables(tableList.tables);
     } catch (err) {
       notify.error('Could not load this screen', err instanceof Error ? err.message : undefined);
@@ -88,6 +115,13 @@ const SchoolDataWorkspace: React.FC = () => {
   useEffect(() => {
     if (isPrivileged) void refresh();
   }, [isPrivileged, refresh]);
+
+  const scheduleChanged =
+    !backups ||
+    schedule.enabled !== backups.schedule.enabled ||
+    schedule.runAt !== backups.schedule.runAt ||
+    schedule.timezone !== backups.schedule.timezone ||
+    schedule.keepLast !== backups.schedule.keepLast;
 
   const run = async (label: string, work: () => Promise<void>) => {
     setBusy(label);
@@ -151,6 +185,104 @@ const SchoolDataWorkspace: React.FC = () => {
       </div>
 
       <div className={styles.body}>
+        {section === 'backups' && backups && (
+          <WidgetCard>
+            <CardHeader title="Automatic backups" />
+            <div className={styles.section}>
+              <p className={styles.note}>
+                One backup a day, taken without anyone remembering to. It appears in the list below
+                like any other and is downloaded the same way.
+              </p>
+
+              {backups.schedule.enabled && !backups.schedule.runnerActive && (
+                <InlineNotification
+                  kind="warning"
+                  title="Nothing is running this schedule"
+                  subtitle="The times below are saved, but this server was started without its backup scheduler. Until it is turned on, no automatic backup will be taken."
+                  lowContrast
+                  hideCloseButton
+                />
+              )}
+
+              {backups.schedule.lastError && (
+                <InlineNotification
+                  kind="error"
+                  title="The last automatic backup failed"
+                  subtitle={backups.schedule.lastError}
+                  lowContrast
+                  hideCloseButton
+                />
+              )}
+
+              <div className={styles.scheduleRow}>
+                <Toggle
+                  id="backup-schedule-enabled"
+                  size="sm"
+                  labelText="Take a backup every day"
+                  labelA="Off"
+                  labelB="On"
+                  toggled={schedule.enabled}
+                  onToggle={(enabled) => setSchedule((current) => ({ ...current, enabled }))}
+                />
+                <TextInput
+                  id="backup-schedule-time"
+                  labelText="At"
+                  type="time"
+                  size="sm"
+                  value={schedule.runAt}
+                  disabled={!schedule.enabled}
+                  onChange={(event) => setSchedule((current) => ({ ...current, runAt: event.target.value }))}
+                />
+                <TextInput
+                  id="backup-schedule-timezone"
+                  labelText="Timezone"
+                  size="sm"
+                  placeholder={serverZoneLabel}
+                  helperText="Leave blank to use the server's clock."
+                  value={schedule.timezone}
+                  disabled={!schedule.enabled}
+                  onChange={(event) => setSchedule((current) => ({ ...current, timezone: event.target.value }))}
+                />
+                <NumberInput
+                  id="backup-schedule-keep"
+                  label="Keep the last"
+                  size="sm"
+                  min={1}
+                  max={365}
+                  value={schedule.keepLast}
+                  disabled={!schedule.enabled}
+                  helperText="Older automatic backups are deleted. Manual ones are never touched."
+                  onChange={(_event, { value }) =>
+                    setSchedule((current) => ({ ...current, keepLast: Number(value) || 1 }))
+                  }
+                />
+                <Button
+                  kind="tertiary"
+                  size="sm"
+                  disabled={Boolean(busy) || !scheduleChanged}
+                  onClick={() =>
+                    run('Saving the backup schedule', async () => {
+                      setBackups(await saveBackupSchedule(schedule));
+                      notify.success(
+                        'Schedule saved',
+                        schedule.enabled
+                          ? `A backup will be taken each day at ${schedule.runAt}.`
+                          : 'Automatic backups are off.',
+                      );
+                    })
+                  }
+                >
+                  {busy === 'Saving the backup schedule' ? 'Saving…' : 'Save schedule'}
+                </Button>
+              </div>
+
+              {backups.schedule.lastRunAt && (
+                <p className={styles.meta}>Last automatic backup: {formatDateTime(backups.schedule.lastRunAt)}</p>
+              )}
+            </div>
+          </WidgetCard>
+        )}
+
         {section === 'backups' && (
           <WidgetCard>
             <CardHeader title="Backups">

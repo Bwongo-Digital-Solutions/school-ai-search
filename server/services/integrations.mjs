@@ -59,11 +59,49 @@ const normalizeUrl = (value) => {
   return { url: parsed.origin + parsed.pathname.replace(/\/$/, '') };
 };
 
+/**
+ * The address *this server* calls, when it is not the address the browser opens.
+ *
+ * A system bootstrapped from deploy/integrations/ lives on the compose network as `http://moodle:8080`.
+ * The browser cannot reach that — a service name resolves inside the bridge network and nowhere
+ * else — so base_url stays the public address and this is kept alongside it, used only server-side.
+ *
+ * That is also why plain http is allowed here and refused there. The objection to http is that the
+ * token can be read in transit; a single-label hostname has no route off the bridge network, so
+ * there is no transit to read. A name with a dot in it might resolve anywhere, and is held to the
+ * same https rule as the public address.
+ */
+const normalizeInternalUrl = (value) => {
+  const raw = trimmed(value);
+  if (!raw) return { url: '' };
+
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return { error: 'That does not read as a web address. It should look like http://moodle:8080' };
+  }
+
+  const isContainerName = !parsed.hostname.includes('.') && parsed.hostname !== 'localhost';
+  const isLoopback = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+  if (parsed.protocol !== 'https:' && !isContainerName && !isLoopback) {
+    return {
+      error:
+        'Use an https address, or a Docker service name such as http://moodle:8080. ' +
+        'A token sent over plain http to a routable host can be read in transit.',
+    };
+  }
+  return { url: parsed.origin + parsed.pathname.replace(/\/$/, '') };
+};
+
 const publicRow = (row) => ({
   provider: row.provider,
   label: PROVIDER_LABELS[row.provider] || row.provider,
   kind: ERP_PROVIDERS.includes(row.provider) ? 'erp' : 'elearning',
   baseUrl: row.base_url,
+  // Where the server calls it, when that differs from where the browser opens it. Not a secret —
+  // a service name is only meaningful inside the network it names.
+  internalUrl: (row.config || {}).internal_url || '',
   username: row.username,
   tokenPreview: maskToken(row.api_token),
   hasToken: Boolean(row.api_token),
@@ -78,7 +116,7 @@ const publicRow = (row) => ({
 
 const listIntegrations = async ({ database }) => {
   const { rows } = await database.query(
-    `SELECT provider, base_url, api_token, username, enabled, last_checked_at, last_error, updated_by
+    `SELECT provider, base_url, api_token, username, config, enabled, last_checked_at, last_error, updated_by
      FROM school_integrations`,
   );
   const bySlug = new Map(rows.map((row) => [row.provider, row]));
@@ -92,6 +130,7 @@ const listIntegrations = async ({ database }) => {
           base_url: '',
           api_token: '',
           username: '',
+          config: {},
           enabled: false,
           last_checked_at: null,
           last_error: '',
@@ -108,6 +147,9 @@ const saveIntegration = async ({ database, body, actor }) => {
 
   const { url, error: urlError } = normalizeUrl(body.baseUrl);
   if (urlError) return { error: urlError };
+
+  const { url: internalUrl, error: internalError } = normalizeInternalUrl(body.internalUrl);
+  if (internalError) return { error: internalError };
 
   // An omitted token means "leave the stored one alone"; an explicit empty string clears it. Without
   // this distinction, saving the address would blank a token nobody meant to touch.
@@ -132,16 +174,25 @@ const saveIntegration = async ({ database, body, actor }) => {
     : existing[0]?.api_token || '';
 
   await database.query(
-    `INSERT INTO school_integrations (provider, base_url, api_token, username, enabled, updated_by, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, NOW())
+    `INSERT INTO school_integrations (provider, base_url, api_token, username, config, enabled, updated_by, updated_at)
+     VALUES ($1, $2, $3, $4, $7, $5, $6, NOW())
      ON CONFLICT (provider) DO UPDATE SET
        base_url = EXCLUDED.base_url,
        api_token = EXCLUDED.api_token,
        username = EXCLUDED.username,
+       config = EXCLUDED.config,
        enabled = EXCLUDED.enabled,
        updated_by = EXCLUDED.updated_by,
        updated_at = NOW()`,
-    [provider, url, storedToken, trimmed(body.username), body.enabled !== false, actor?.email || ''],
+    [
+      provider,
+      url,
+      storedToken,
+      trimmed(body.username),
+      body.enabled !== false,
+      actor?.email || '',
+      JSON.stringify({ internal_url: internalUrl }),
+    ],
   );
 
   // Only one ERP at a time: enabling one stands the others down rather than leaving two menu
@@ -183,10 +234,14 @@ const testIntegration = async ({ database, body, httpClient }) => {
   if (!PROVIDERS.includes(provider)) return { error: `Unknown system: ${provider}` };
 
   const { rows } = await database.query(
-    'SELECT base_url FROM school_integrations WHERE provider = $1',
+    'SELECT base_url, config FROM school_integrations WHERE provider = $1',
     [provider],
   );
-  const baseUrl = rows[0]?.base_url || '';
+  // The internal address when there is one: testing a bundled system by its public address would
+  // check the reverse proxy in front of it rather than the system itself, and would fail outright
+  // before that proxy is configured.
+  const internalUrl = (rows[0]?.config || {}).internal_url || '';
+  const baseUrl = internalUrl || rows[0]?.base_url || '';
   if (!baseUrl) return { connected: false, connectionError: 'No address is set for this system yet.' };
 
   let connected = false;

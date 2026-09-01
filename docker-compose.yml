@@ -57,6 +57,10 @@ services:
       # Where database backups are written. A named volume, so they outlive the container — a
       # backup that dies with the thing it is protecting against is not a backup.
       BACKUP_DIR: ${BACKUP_DIR:-/var/backups/eschool}
+      # Runs the unattended backups a school schedules in the app. Off by default, and deliberately
+      # set here rather than defaulted on in code: exactly one long-running process should hold the
+      # timer, and this is it.
+      BACKUP_SCHEDULER: ${BACKUP_SCHEDULER:-false}
       SCHOOL_NAME: ${SCHOOL_NAME:-eSchool}
       SCHOOL_TAGLINE: ${SCHOOL_TAGLINE:-Academic Excellence and Character}
       SCHOOL_ADDRESS: ${SCHOOL_ADDRESS:-}
@@ -285,4 +289,14 @@ volumes:
   school_ai_search_caddy_config:
   school_ai_search_meili_data:
   school_ai_search_librechat_mongo:
+
+# One shared network, so the systems under deploy/integrations/ — Moodle, Odoo, ERPNext, Dolibarr —
+# can reach this app and be reached by it, by service name, without publishing anything.
+#
+# Named explicitly rather than left to Compose's implicit default, because those stacks live in
+# their own files: a default network belongs to the file that created it, and a second file gets a
+# second network. `name:` pins it so the integration files can join it as external.
+networks:
+  default:
+    name: eschool_net
   

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  ActionableNotification,
   Button,
   InlineLoading,
   InlineNotification,
@@ -126,7 +127,7 @@ const emptyLifecycle = {
 
 const StudentRecordsWorkspace: React.FC = () => {
   const { students, refreshStudents, focus, clearFocus } = useChatContext();
-  const { isAuthenticated, isAdmin, isSupportStaff, user, logAudit } = useAuth();
+  const { isAuthenticated, isAdmin, isSupportStaff, user, isLoading: authLoading, logAudit } = useAuth();
   const { notify, confirm } = useNotifications();
 
   // Arrived from a search hit on an attendance record: open that student's file.
@@ -144,6 +145,7 @@ const StudentRecordsWorkspace: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [records, setRecords] = useState<Record<string, SchoolRecord[]>>({});
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [admission, setAdmission] = useState(emptyAdmission);
   const [attendance, setAttendance] = useState(emptyAttendance);
   const [academic, setAcademic] = useState(emptyAcademic);
@@ -197,9 +199,23 @@ const StudentRecordsWorkspace: React.FC = () => {
     }));
   }, [selectedStudent]);
 
+  /**
+   * Every record table this workspace shows, for whoever is signed in.
+   *
+   * `user` is a dependency for the same reason it is one in ChatContext's roster load: all eight
+   * of these tables are gated to teaching roles, so a fetch made before the session was restored
+   * was refused, and without `user` here nothing ever asked again. Signing in reloads them.
+   */
   const loadRecords = useCallback(async () => {
-    if (isSupportStaff) return;
+    if (authLoading) return;
+    if (!user || isSupportStaff) {
+      setRecords({});
+      setLoadError(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
+    const failures: string[] = [];
     const tables = [
       ['admissions', 'submitted_at'],
       ['attendance_records', 'attendance_date'],
@@ -215,15 +231,18 @@ const StudentRecordsWorkspace: React.FC = () => {
     for (const [table, orderField] of tables) {
       const { data, error } = await supabase.from<SchoolRecord[]>(table).select('*').order(orderField, { ascending: false }).limit(100);
       if (error) {
-        console.error(`Failed to load ${table}:`, error);
+        failures.push(table);
         loaded[table] = [];
       } else {
         loaded[table] = data || [];
       }
     }
     setRecords(loaded);
+    // Named rather than counted: knowing it was attendance that would not load is the difference
+    // between "the register is missing" and "the whole workspace is broken".
+    setLoadError(failures.length ? failures.join(', ').replace(/_/g, ' ') : null);
     setLoading(false);
-  }, [isSupportStaff]);
+  }, [authLoading, user, isSupportStaff]);
 
   useEffect(() => {
     loadRecords();
@@ -519,6 +538,19 @@ const StudentRecordsWorkspace: React.FC = () => {
           Refresh
         </Button>
       </PageHeader>
+
+      {loadError && (
+        <ActionableNotification
+          inline
+          kind="error"
+          title="Some records could not be loaded"
+          subtitle={`${loadError}. What is shown below is incomplete.`}
+          lowContrast
+          actionButtonLabel="Try again"
+          onActionButtonClick={loadRecords}
+          onClose={() => setLoadError(null)}
+        />
+      )}
 
       <div className={styles.controls}>
         <StatRow>

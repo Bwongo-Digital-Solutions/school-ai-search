@@ -95,6 +95,7 @@ Choose an action:
  15) Write a self-signed placeholder so nginx can start
  16) Change environment
  17) Choose the database (bundled container, or your own server)
+ 18) Bundled systems (Moodle, Odoo, ERPNext, Dolibarr)
   0) Exit
 EOF
 }
@@ -687,6 +688,115 @@ ensure_startable_cert() {
   cert_bootstrap
 }
 
+# The systems a school can optionally bootstrap alongside this one. Each is a complete stack in its
+# own file under deploy/integrations/, because ERPNext alone is seven services and putting all four
+# in docker-compose.yml would triple its length for something most schools never start.
+#
+# Independent toggles rather than a choice of one, unlike the proxy — a school may run Moodle and an
+# ERP at the same time. Note though that connecting a second ERP in the app stands the first down:
+# compose can run all three, a school uses one.
+INTEGRATION_STACKS="moodle odoo erpnext dolibarr"
+
+integration_file() {
+  printf 'deploy/integrations/%s.yml' "$1"
+}
+
+integration_running() {
+  # Named containers rather than `compose ps`, because each stack is its own compose project.
+  docker ps --filter "name=${APP_NAME}-$1" --format '{{.Names}}' 2>/dev/null | grep -q . && return 0
+  return 1
+}
+
+integration_up() {
+  name="$1"
+  file="$(integration_file "$name")"
+  [ -f "$file" ] || { echo "No such stack: $name" >&2; return 1; }
+  detect_compose
+
+  # The shared network belongs to the main stack, which has to exist before anything can join it.
+  if ! docker network inspect eschool_net >/dev/null 2>&1; then
+    echo "The eschool_net network does not exist yet — start the app first (option 3)." >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC2086
+  $compose_bin -f "$file" -p "${APP_NAME}-$name" up -d
+  printf '\n%s is starting. It can take a few minutes to install itself on first run.\n' "$name"
+  printf 'Connect it under Settings -> Integrations with:\n'
+  printf '  Internal address  http://%s:%s\n' "$name" "$(integration_internal_port "$name")"
+  printf '  Address           whatever the browser can reach it at (see the file header)\n'
+
+  if [ "$name" = "erpnext" ]; then
+    printf '\nERPNext has no site until one is created. Once the database is up, run:\n'
+    printf '  %s -f %s -p %s-erpnext --profile setup run --rm erpnext-create-site\n' \
+      "$compose_bin" "$file" "$APP_NAME"
+  fi
+}
+
+integration_internal_port() {
+  case "$1" in
+    moodle) printf '8080' ;;
+    odoo) printf '8069' ;;
+    erpnext) printf '8000' ;;
+    dolibarr) printf '80' ;;
+    *) printf '80' ;;
+  esac
+}
+
+integration_down() {
+  name="$1"
+  file="$(integration_file "$name")"
+  [ -f "$file" ] || { echo "No such stack: $name" >&2; return 1; }
+  detect_compose
+  # Containers only. The volumes hold the school's courses and ledgers, and stopping a system is
+  # not a request to destroy them — `docker compose -f <file> down --volumes` is the deliberate act.
+  # shellcheck disable=SC2086
+  $compose_bin -f "$file" -p "${APP_NAME}-$name" down
+}
+
+print_integrations_menu() {
+  printf '\nBundled systems. Each brings its own database and volumes.\n\n'
+  index=1
+  for name in $INTEGRATION_STACKS; do
+    if integration_running "$name"; then
+      state="running"
+    else
+      state="stopped"
+    fi
+    printf '  %d) %-9s %s\n' "$index" "$name" "$state"
+    index=$((index + 1))
+  done
+  printf '  0) Back\n\n'
+  printf 'Choosing a running system stops it; choosing a stopped one starts it.\n'
+}
+
+choose_integrations() {
+  while :; do
+    print_integrations_menu
+    choice="$(prompt "System number: ")"
+
+    [ "$choice" = "0" ] && return 0
+
+    name=""
+    index=1
+    for candidate in $INTEGRATION_STACKS; do
+      [ "$choice" = "$index" ] && name="$candidate"
+      index=$((index + 1))
+    done
+
+    if [ -z "$name" ]; then
+      printf 'Please choose a number from the list.\n'
+      continue
+    fi
+
+    if integration_running "$name"; then
+      integration_down "$name"
+    else
+      integration_up "$name"
+    fi
+  done
+}
+
 run_command() {
   command="$1"
 
@@ -841,11 +951,14 @@ interactive_menu() {
       17)
         choose_database
         ;;
+      18)
+        choose_integrations
+        ;;
       0)
         exit 0
         ;;
       *)
-        printf 'Please choose a number from 0 to 16.\n'
+        printf 'Please choose a number from 0 to 18.\n'
         ;;
     esac
   done

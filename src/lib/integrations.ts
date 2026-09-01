@@ -5,7 +5,14 @@ export interface Integration {
   provider: 'moodle' | 'odoo' | 'erpnext' | 'dolibarr';
   label: string;
   kind: 'elearning' | 'erp';
+  /** What the browser opens. Has to be an address a browser can reach. */
   baseUrl: string;
+  /**
+   * What the server calls, when that is a different address — a system bootstrapped from
+   * deploy/integrations/ lives on the Docker network as http://moodle:8080, which no browser can
+   * reach. Blank when the two are the same.
+   */
+  internalUrl: string;
   username: string;
   /** The last four characters of the stored token. The token itself never leaves the server. */
   tokenPreview: string;
@@ -44,6 +51,7 @@ export const loadIntegrations = () => call<IntegrationList>({ action: 'list' });
 export const saveIntegration = (payload: {
   provider: string;
   baseUrl: string;
+  internalUrl?: string;
   username?: string;
   apiToken?: string;
   enabled?: boolean;

@@ -1,0 +1,160 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  block-size: 100%;
+  overflow: hidden;
+  background-color: $ui-01;
+}
+
+.portrait {
+  inline-size: 2.5rem;
+  block-size: 2.5rem;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid var(--brand-01, #{$brand-01-fallback});
+}
+
+.controls {
+  padding: layout.$spacing-05 layout.$spacing-05 0;
+  flex-shrink: 0;
+}
+
+.body {
+  flex: 1;
+  min-block-size: 0;
+  overflow-y: auto;
+  padding: layout.$spacing-05;
+}
+
+/* Sections read down a column on a phone and tile on a desk. Masonry is not worth the trouble
+   here — the cards are read one at a time, not compared, so a ragged bottom edge costs nothing. */
+.columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+  align-items: start;
+  gap: layout.$spacing-05;
+}
+
+.sectionBody {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+  padding: layout.$spacing-05;
+}
+
+/* Label above value rather than beside it: the values here are names, addresses and phone numbers,
+   which are long and unpredictable, and a two-column dl makes every one of them wrap. */
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: layout.$spacing-05;
+  margin: 0;
+
+  dt {
+    @include type.type-style('label-01');
+    color: $text-03;
+    margin-block-end: layout.$spacing-02;
+  }
+
+  dd {
+    @include type.type-style('body-compact-01');
+    color: $text-01;
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+}
+
+.none {
+  @include type.type-style('body-compact-01');
+  color: $text-03;
+  margin: 0;
+}
+
+.meta {
+  @include type.type-style('helper-text-01');
+  color: $text-03;
+  margin: 0;
+}
+
+.strong {
+  @include type.type-style('heading-compact-01');
+  color: $text-01;
+}
+
+/* Tables scroll inside their own card rather than pushing the page sideways. */
+.tableWrap {
+  overflow-x: auto;
+}
+
+.table {
+  inline-size: 100%;
+  border-collapse: collapse;
+
+  th {
+    @include type.type-style('label-01');
+    color: $text-02;
+    text-align: start;
+    padding: layout.$spacing-03 layout.$spacing-04;
+    border-block-end: 1px solid $ui-03;
+    white-space: nowrap;
+  }
+
+  td {
+    @include type.type-style('body-compact-01');
+    color: $text-01;
+    padding: layout.$spacing-03 layout.$spacing-04;
+    border-block-end: 1px solid $ui-03;
+    vertical-align: top;
+  }
+
+  tr:last-child td {
+    border-block-end: 0;
+  }
+}
+
+.numeric {
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+
+.incident {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-02;
+  padding: layout.$spacing-04;
+  background: $ui-01;
+  border-inline-start: 3px solid var(--brand-01, #{$brand-01-fallback});
+}
+
+.incidentHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: layout.$spacing-03;
+}
+
+.incidentBody {
+  @include type.type-style('body-compact-01');
+  color: $text-01;
+  margin: 0;
+}
+
+.timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-04;
+
+  li {
+    @include type.type-style('body-compact-01');
+    color: $text-02;
+    padding-inline-start: layout.$spacing-05;
+    border-inline-start: 2px solid $ui-03;
+  }
+}

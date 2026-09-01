@@ -33,6 +33,10 @@ RUN apk add --no-cache postgresql16-client
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/server ./server
+# One-off maintenance commands, run as `docker compose exec app node scripts/<name>.mjs`. Without
+# this they are simply not in the image, and every such instruction in the documentation fails with
+# "cannot find module" on a machine where the repository is not checked out.
+COPY --from=build /app/scripts ./scripts
 COPY --from=build /app/package.json ./package.json
 
 # Runs as a normal user. The only thing written to disk is a database backup, into BACKUP_DIR — a

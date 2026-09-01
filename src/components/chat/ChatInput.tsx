@@ -148,11 +148,16 @@ const ChatInput: React.FC = () => {
       <div className={styles.inner}>
         {/* What the next message will use. A Carbon Dropdown rather than the hand-rolled menu this
             replaced: it brings its own click-outside, keyboard navigation and focus return, all of
-            which the old one had to approximate with a fixed transparent overlay div. */}
+            which the old one had to approximate with a fixed transparent overlay div.
+
+            Both pickers open upward. They sit in the composer, which is pinned to the bottom of the
+            viewport, so a list opening downward is cut off by the edge of the screen — and this one
+            is tall, a row per model with its provider and status underneath. */}
         <div className={styles.options}>
           <Dropdown
             id="model-picker"
             className={styles.modelPicker}
+            direction="top"
             size="sm"
             titleText="Model"
             hideLabel
@@ -206,6 +211,7 @@ const ChatInput: React.FC = () => {
             <MultiSelect
               id="mcp-picker"
               className={styles.mcpPicker}
+              direction="top"
               size="sm"
               titleText="MCP servers"
               hideLabel

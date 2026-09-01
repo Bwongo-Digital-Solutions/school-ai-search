@@ -19,11 +19,28 @@ export interface BackupRow {
   created_at: string;
 }
 
+export interface BackupSchedule {
+  enabled: boolean;
+  /** 'HH:MM' on a 24-hour clock, in `timezone`. */
+  runAt: string;
+  /** An IANA zone name, or '' for the server's own clock. */
+  timezone: string;
+  keepLast: number;
+  lastRunAt: string | null;
+  lastError: string;
+  /**
+   * Whether a scheduler is actually running in the server process. A schedule can be saved on a
+   * deployment that never starts one, and saying so beats a switch that looks armed and is not.
+   */
+  runnerActive: boolean;
+}
+
 export interface BackupList {
   backups: BackupRow[];
   /** False when this server cannot take one — an in-memory database, or no postgresql-client. */
   available: boolean;
   directory: string;
+  schedule: BackupSchedule;
 }
 
 export interface ExportableTable {
@@ -65,6 +82,9 @@ const call = async <T,>(name: string, body: Record<string, unknown>): Promise<T>
 export const loadBackups = () => call<BackupList>('backup', { action: 'list' });
 export const createBackup = () => call<BackupList>('backup', { action: 'create' });
 export const deleteBackup = (id: string) => call<BackupList>('backup', { action: 'delete', id });
+
+export const saveBackupSchedule = (schedule: Pick<BackupSchedule, 'enabled' | 'runAt' | 'timezone' | 'keepLast'>) =>
+  call<BackupList>('backup', { action: 'save_schedule', ...schedule });
 
 /** The download goes through a GET so the browser saves a file rather than holding it in memory. */
 export const backupDownloadUrl = (id: string) => buildApiUrl(`/api/backups/${id}.dump`);

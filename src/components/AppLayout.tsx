@@ -3,6 +3,7 @@ import Header from './chat/Header';
 import ConversationSidebar from './chat/ConversationSidebar';
 import ChatWindow from './chat/ChatWindow';
 import StudentManagement from './chat/StudentManagement';
+import StudentSummary from './chat/StudentSummary';
 import AuditLogPanel from './chat/AuditLogPanel';
 import StudentRecordsWorkspace from './chat/StudentRecordsWorkspace';
 import UserAccessPanel from './chat/UserAccessPanel';
@@ -71,6 +72,8 @@ const AuditView: React.FC = () => {
 const VIEW_ROLES: Partial<Record<ActiveView, readonly string[]>> = {
   chat: TEACHING_ROLES,
   students: TEACHING_ROLES,
+  // Everyone who can be shown a student can be shown their file; the server decides which parts.
+  student: [...TEACHING_ROLES, ...FINANCE_ROLES],
   records: TEACHING_ROLES,
   lessons: TEACHING_ROLES,
   examiner: TEACHING_ROLES,
@@ -113,6 +116,8 @@ const AppLayout: React.FC = () => {
         return <ChatWindow />;
       case 'students':
         return <StudentManagement />;
+      case 'student':
+        return <StudentSummary />;
       case 'records':
         return <StudentRecordsWorkspace />;
       case 'users':

@@ -78,10 +78,12 @@ import { generateAssistantReply } from './services/student-chat.mjs';
 import { answerChatMessage } from './agent/chat.mjs';
 import { handleMcpServerRequest } from './mcp/server.mjs';
 import { BACKUP_ACTIONS, handleBackupFunction, readBackupFile } from './services/backup.mjs';
+import { startBackupScheduler } from './services/backup-scheduler.mjs';
 import { DATA_TRANSFER_ACTIONS, handleDataTransferFunction } from './services/data-transfer.mjs';
 import { INTEGRATION_ACTIONS, handleIntegrationsFunction } from './services/integrations.mjs';
 import { handleFeesFunction } from './services/fees.mjs';
 import { handleStudentReportFunction, renderReport } from './services/student-report.mjs';
+import { handleStudentSummaryFunction } from './services/student-summary.mjs';
 import { handleCurriculumFunction } from './services/curriculum.mjs';
 import { handleDigitalExaminerFunction, loadPaper } from './services/digital-examiner.mjs';
 import { handleLessonPlannerFunction } from './services/lesson-planner.mjs';
@@ -3522,6 +3524,34 @@ const handlePaymentFunction = async (database, body, httpClient) => {
   return { error: `Unsupported payment action: ${action}` };
 };
 
+/**
+ * A student's whole record as one printable PDF — the Print button on the summary screen.
+ *
+ * renderReport already builds exactly this and has since the parent-report work; it simply had no
+ * route, so the only way to reach it was to email it to a guardian. Gated like the report card
+ * above, and for the same reason: it is a named child's marks, attendance and fees in one file.
+ */
+const handleStudentReportRequest = async (database, pathname, searchParams, { actor } = {}) => {
+  const match = pathname.match(/^\/api\/student-reports\/([^/]+)\.pdf$/);
+  if (!match) return null;
+
+  if (actor !== undefined) {
+    const refusal = requireRole(actor, TEACHING_ROLES);
+    if (refusal) return { type: 'json', status: 403, body: refusal };
+  }
+
+  const result = await renderReport(database, {
+    code: decodeURIComponent(match[1]),
+    sections: searchParams.get('sections'),
+    generatedBy: actor?.name || actor?.email || '',
+  });
+  if (result?.error) {
+    return { type: 'json', status: 404, body: { error: result.error, data: null } };
+  }
+
+  return pdfResponse(result.pdf, result.filename);
+};
+
 const handleReportCardRequest = async (database, pathname, searchParams, { method = 'GET', body = {}, actor } = {}) => {
   const match = pathname.match(/^\/api\/report-cards\/([^/]+)\.pdf$/);
   if (!match) {
@@ -3653,10 +3683,14 @@ const handleIdCardRequest = async (database, pathname, searchParams, { actor } =
     students = [student];
     filename = `${student.student_id}-id-card.pdf`;
   } else {
+    // Who to print for: class, stream, and when they were registered. Built up one criterion at a
+    // time, so any combination works and an unfiltered request still prints the whole school.
     const conditions = [];
     const values = [];
     const grade = searchParams.get('grade');
     const section = searchParams.get('section');
+    const registeredFrom = searchParams.get('registeredFrom');
+    const registeredTo = searchParams.get('registeredTo');
 
     if (grade) {
       values.push(Number(grade));
@@ -3665,6 +3699,18 @@ const handleIdCardRequest = async (database, pathname, searchParams, { actor } =
     if (section) {
       values.push(section);
       conditions.push(`class_section = $${values.length}`);
+    }
+    // enrollment_date is the day the student was registered, and it is a DATE — so a plain
+    // YYYY-MM-DD comparison is exact, with none of the timezone drift a timestamp would bring.
+    // It is also nullable: a student with no enrolment date on file matches no range, which the
+    // print dialog says out loud rather than leaving them to disappear from the batch.
+    if (registeredFrom) {
+      values.push(registeredFrom);
+      conditions.push(`enrollment_date >= $${values.length}`);
+    }
+    if (registeredTo) {
+      values.push(registeredTo);
+      conditions.push(`enrollment_date <= $${values.length}`);
     }
 
     const result = await database.query(
@@ -3681,7 +3727,9 @@ const handleIdCardRequest = async (database, pathname, searchParams, { actor } =
     }
 
     students = result.rows.map(formatRow);
-    filename = `student-id-cards${grade ? `-grade-${grade}` : ''}${section ? `-${section}` : ''}.pdf`;
+    const registeredPart =
+      registeredFrom || registeredTo ? `-registered-${registeredFrom || 'any'}-to-${registeredTo || 'any'}` : '';
+    filename = `student-id-cards${grade ? `-grade-${grade}` : ''}${section ? `-${section}` : ''}${registeredPart}.pdf`;
   }
 
   const pdfBytes = await buildIdCardPdf({
@@ -4106,6 +4154,10 @@ export const createAppRuntime = async ({
       }
     : null;
 
+  // Unattended backups. Off unless BACKUP_SCHEDULER says otherwise, so no test run and no CLI
+  // script quietly starts dumping databases; startBackupScheduler returns a no-op stop when off.
+  const stopBackupScheduler = startBackupScheduler({ database: defaultDatabase, control, tenants });
+
   return {
     database: defaultDatabase,
     control,
@@ -4115,6 +4167,10 @@ export const createAppRuntime = async ({
     // tests omit host and get the default database.
     resolveDatabase: (host, headerTenant) => tenants.resolve(host, headerTenant, defaultDatabase),
     async close() {
+      // First, before any pool is closed: a sweep that woke up mid-shutdown would otherwise be
+      // querying a database that is on its way out. It is also what keeps `node --test` from
+      // hanging on a live interval.
+      stopBackupScheduler();
       await defaultDatabase.close();
       await tenants.close();
       if (control) await control.close();
@@ -4185,6 +4241,11 @@ export const createAppRuntime = async ({
           },
           body: file.bytes,
         };
+      }
+
+      const studentReportResponse = await handleStudentReportRequest(database, pathname, searchParams, { actor });
+      if (studentReportResponse) {
+        return studentReportResponse;
       }
 
       const idCardResponse = await handleIdCardRequest(database, pathname, searchParams, { actor });
@@ -4274,6 +4335,13 @@ export const createAppRuntime = async ({
         const data = await handleStudentCardFunction(database, body, { actor });
         return data?.error
           ? { type: 'json', status: 404, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/student-summary') {
+        const data = await handleStudentSummaryFunction(database, body, { actor });
+        return data?.error
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 404, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
       }
 

@@ -112,10 +112,19 @@ Both editing and deleting are written to the **Audit** log with who did it and w
 - Student numbers are unique; the app will not let two students share one.
 
 ### Student ID cards
-- From a student row, open the **ID card** preview, or use **Print ID Cards** to produce a batch
-  (ten per A4 sheet, or one plastic-card-sized page each).
+- From a student row, open the **ID card** preview to check the QR scans with a phone before
+  committing to a print run.
+- **Print ID cards** opens a short dialog asking who the batch is for: a **class**, a **stream**, and
+  a **registration date range** — so you can print cards for this year's intake, or for one class, or
+  for everyone. Leave a field blank to include everyone. Ten cards fill an A4 sheet.
+- The dialog tells you how many students match and how many sheets that fills, before it prints
+  anything.
 - Each card carries the school name, logo and theme colour (from Settings), the student's photo, and
   a QR code. Scanning the QR opens that student's **fee status**.
+
+> **A student with no registration date on file is not in any date range.** If you have added
+> students without an enrolment date, the dialog will say how many are being left out. Clear the
+> dates to include them, or fill the date in on the student's record.
 
 ---
 
@@ -303,6 +312,17 @@ Two things the screen enforces, both about that token:
 **Test** asks the system whether it is really there and shows what came back — an unreachable
 address or an error code, kept against the row so it is still there after a reload.
 
+**Internal address.** Leave this blank if the system is one you already run — the address staff type
+in their browser is the address the server uses too. Fill it in only when e-School reaches the system
+by a different name than a browser does, which happens when it was started alongside e-School on the
+same machine: the browser needs something like `https://moodle.yourschool.ac.ug`, while the server
+reaches it as `http://moodle:8080`. If in doubt, leave it blank.
+
+> **Don't have a Moodle or an ERP yet?** One can be started alongside e-School rather than installed
+> separately. Ask whoever runs your server to look at option 18 in `./containers.sh` — Moodle, Odoo,
+> ERPNext and Dolibarr are all available. They are full systems with their own logins and their own
+> upkeep, so this is a decision to make deliberately, not a button to press out of curiosity.
+
 ### Your school's data — backups, export and import
 
 **School Data** in the side menu, for the administrator, head teacher, accountant and bursar. Three
@@ -311,6 +331,23 @@ tabs, answering the same worry from different directions.
 **Backups** are complete copies of your school's database, taken on the server. Press **Back up
 now**, and the backup appears in the list with its size and who took it. **Download** brings it to
 your computer.
+
+**Automatic backups.** Turn on **Take a backup every day**, choose a time, and the school is backed
+up without anyone remembering to. A quiet hour is best — two in the morning is the default. Automatic
+backups appear in the same list as the ones you take by hand, marked *automatic* instead of a name,
+and download the same way.
+
+- **Timezone.** Leave it blank and the time means the server's clock. If your server is elsewhere,
+  put your own zone in (for example `Africa/Kampala`) and the time means your clock.
+- **Keep the last.** Older automatic backups are deleted once there are more than this many, so they
+  do not fill the disk. **Backups you took by hand are never deleted automatically** — those are
+  yours to remove.
+- If the server was switched off at the hour you chose, it takes the day's backup when it comes back
+  rather than skipping the day.
+
+> If the screen warns that **nothing is running this schedule**, the times are saved but this server
+> was started without its backup scheduler. Ask whoever runs it to set `BACKUP_SCHEDULER=true` and
+> restart. Until then no automatic backup will be taken.
 
 > Be careful with a downloaded backup. It contains every student record, every payment, and the
 > accounts your staff sign in with. Keep it wherever you would keep the paper register — not in a
@@ -462,7 +499,24 @@ searches across:
 - **lesson plans** and **banked exam questions** — find the osmosis question you wrote last term;
 - **attendance**, and for administrators **fees** — invoices, receipts and payment references.
 
-Results are grouped by type; pick one to jump to it.
+Results are grouped by type; pick one to jump to it. **Picking a student opens their summary** — see
+below.
+
+### A student's whole record
+
+Choosing a student from search (or opening one from the roster) opens a single screen with everything
+the school holds about them: date of birth and contacts, class, their parents and emergency contact,
+their marks subject by subject, the attendance register, the fee balance and what has been paid, any
+disciplinary record, and their passage through the school from admission through promotions to any
+transfer.
+
+**Print everything** puts the lot on paper in one go — the same document a parent can be emailed —
+and **Download** saves it as a PDF.
+
+> **You see the parts of the record your job needs.** A teacher sees marks, attendance and
+> discipline, but not the family's payment history. The bursar and the accountant see what is owed
+> and what has been paid, but not disciplinary records. This is decided on the server: the parts you
+> may not see are never sent to your browser at all.
 
 > **You only ever see what your role allows.** A teacher's search never returns fee records, even
 > though they are indexed. Support staff have no search at all — they see fee status on their own
@@ -650,6 +704,13 @@ named Docker volume — so they survive the container being rebuilt or replaced.
 They are taken from the app itself, under **School Data**, by an administrator, head teacher,
 accountant or bursar. There is nothing to run on the server for a routine backup.
 
+**Automatic backups need one thing switching on.** A school can set a daily time under **School
+Data → Backups**, but nothing acts on it unless the app container is started with
+`BACKUP_SCHEDULER=true`. Set it on the long-running app container and **nowhere else**: two
+processes with it on would each take the day's backup and each believe it was the one that had.
+The Backups screen warns the school when a schedule is saved and no scheduler is running, so this
+does not fail silently.
+
 Two things worth knowing:
 
 - **A backup volume is not off-site.** It survives a container being replaced; it does not survive
@@ -665,6 +726,31 @@ docker compose cp app:/var/backups/eschool/<file>.dump ./restore.dump
 pg_restore --clean --if-exists --no-owner -d "$DATABASE_URL" ./restore.dump
 ```
 
+### Bundled systems — Moodle, Odoo, ERPNext, Dolibarr
+
+A school that does not already run a learning platform or an ERP can have one started alongside
+e-School rather than installed separately. Option **18** in `./containers.sh`, or directly:
+
+```bash
+docker compose -f deploy/integrations/moodle.yml -p school-ai-search-moodle up -d
+```
+
+Each is a complete stack in its own file under `deploy/integrations/`, with its own database and its
+own volumes. Start the app first — they join its network (`eschool_net`) rather than creating one,
+and the script will say so rather than failing obscurely if it is not there yet.
+
+Sizes differ a great deal. Dolibarr is two containers; Moodle is two; Odoo is two; **ERPNext is
+seven** and wants a couple of gigabytes of memory. ERPNext also has no site until one is created,
+which is a separate command the script prints for you after starting it.
+
+Nothing is published beyond loopback. Put a bundled system behind the same reverse proxy as the app
+to give it a real address, then connect it under **Settings → Integrations** with two addresses: the
+public one staff will open, and `http://<name>:<port>` as the **internal address** the server uses.
+
+> These are real systems with their own logins, their own upgrades and their own backups — this
+> script starts them, it does not look after them. A school that already runs one should connect
+> that one instead.
+
 ---
 
 ## 13. Troubleshooting
@@ -672,10 +758,20 @@ pg_restore --clean --if-exists --no-owner -d "$DATABASE_URL" ./restore.dump
 | Symptom | Likely cause / fix |
 | --- | --- |
 | **"Backups cannot be taken on this server"** | The PostgreSQL client tools are missing from the image, or the app is running against an in-memory database. Rebuild the image (`./containers.sh build`) — `pg_dump` ships in it. |
+| **No automatic backup has been taken** | Check the Backups screen: if it warns *nothing is running this schedule*, the server was started without `BACKUP_SCHEDULER=true`. Otherwise check the time and timezone — a blank timezone means the *server's* clock, which may not be yours. |
+| **The last automatic backup failed** | The reason is shown on the Backups screen and against the row in the list. It is usually a full disk or an unreachable database; it will be tried again at the next day's scheduled time, not sooner. |
 | **A backup is stuck at "In progress"** | The dump was interrupted, usually by the container restarting. Delete that row and take another; a half-written file is deliberately never listed as complete. |
+| **Automatic backups are on but none are being taken** | The screen will say *nothing is running this schedule* if that is why — the server was started without `BACKUP_SCHEDULER=true`. Otherwise check the time and timezone: a blank timezone means the server's clock, which may not be yours. |
+| **An automatic backup I wanted is gone** | Retention deleted it — only so many automatic backups are kept. Raise **Keep the last**, or take the ones that matter by hand: backups you take yourself are never deleted automatically. |
+| **"Print ID cards" says no students match** | The class, stream and date range together match nobody. Widen one of them. If you set dates, remember that students with no registration date on file are in no range at all — the dialog says how many. |
+| **A student's summary is missing a section I expected** | You are seeing the parts of the record your role covers. A teacher has no payment history; the bursar and accountant have no disciplinary records. An administrator or head teacher sees all of it. |
+| **I had to refresh the browser to see students** | Fixed. If it still happens, it is a genuine load failure rather than an empty school — the screen now says so and offers **Try again**, and the reason it gives is worth passing on. |
 | **An import will not start** | It has not been checked yet, or the check found problems. The button stays off until the file reads cleanly — the list of problems above it says what to fix. |
+| **Printing ID cards leaves students out** | Only students with a registration date on file are in a date range. The print dialog says how many are being left out for that reason — clear the dates, or fill the enrolment date in on their records. |
+| **A student summary is missing a section** | You are seeing the parts of the record your role covers. A teacher has no payment history; the bursar and accountant have no disciplinary records. This is decided on the server and cannot be changed from the browser. |
 | **A connected system shows "will not open inside the app"** | That system sends `X-Frame-Options`, refusing to be displayed inside another site. This is normal and is that system protecting its own login. Use the "Open in a new tab" button. |
 | **"The stored token can no longer be decrypted"** | `SECRETS_KEY` changed on the server. The old value cannot be recovered; enter the token again under Settings → Integrations. |
+| **A bundled system tests as unreachable** | It is probably still installing — Moodle and ERPNext take several minutes on first run. If it persists, the **Internal address** is likely wrong: for a system started alongside e-School it is the service name, such as `http://moodle:8080`, not the address you type in your browser. |
 | **A token will not save** | `SECRETS_KEY` is not set on the server, so there is nothing to encrypt it with. Set it (`openssl rand -hex 32`) and restart. An address alone still saves without it. |
 | **The app will not start against my own Postgres** | Check `DATABASE_URL` is reachable from the container (`host.docker.internal` for a database on the host, not `localhost`), and that `DATABASE_SSL=true` if the server requires TLS — most managed ones do. `./containers.sh` option 17 tests the connection before starting anything. |
 | *"Your account is awaiting administrator approval."* | Ask an admin to approve you under **Staff → Pending Approval**. |

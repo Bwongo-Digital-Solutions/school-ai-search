@@ -1,0 +1,127 @@
+# ERPNext, one of the three business systems the ERP menu can open.
+#
+#   docker compose -f deploy/integrations/erpnext.yml up -d
+#   docker compose -f deploy/integrations/erpnext.yml run --rm erpnext-create-site
+#
+# By a wide margin the heaviest of the four systems here: seven containers rather than two, because
+# Frappe splits the web process, the websocket, the background workers and the scheduler, and wants
+# three separate Redis databases. Budget a couple of gigabytes of memory before starting it, and
+# prefer Dolibarr or Odoo if the school only needs invoicing.
+#
+# It is also the one that is not usable the moment it comes up: Frappe has no site until one is
+# created. That is the `erpnext-create-site` one-shot above, which is deliberately not part of
+# `up` — it takes minutes, and it must not re-run on every restart.
+#
+# Address in the app        https://erp.yourschool.ac.ug (or http://127.0.0.1:8082 to try it)
+# Internal URL in the app   http://erpnext:8000
+
+x-erpnext-common: &erpnext-common
+  image: frappe/erpnext:v15.40.0
+  restart: unless-stopped
+  environment: &erpnext-env
+    DB_HOST: erpnext-db
+    DB_PORT: "3306"
+    REDIS_CACHE: erpnext-redis-cache:6379
+    REDIS_QUEUE: erpnext-redis-queue:6379
+    REDIS_SOCKETIO: erpnext-redis-socketio:6379
+    SOCKETIO_PORT: "9000"
+  volumes:
+    - school_ai_search_erpnext_sites:/home/frappe/frappe-bench/sites
+
+services:
+  erpnext:
+    <<: *erpnext-common
+    container_name: school-ai-search-erpnext
+    command: ["bench", "serve", "--port", "8000"]
+    depends_on:
+      erpnext-db:
+        condition: service_healthy
+    ports:
+      - "${ERPNEXT_BIND:-127.0.0.1}:${ERPNEXT_PORT:-8082}:8000"
+
+  erpnext-websocket:
+    <<: *erpnext-common
+    container_name: school-ai-search-erpnext-websocket
+    command: ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
+
+  erpnext-worker:
+    <<: *erpnext-common
+    container_name: school-ai-search-erpnext-worker
+    command: ["bench", "worker", "--queue", "short,default,long"]
+
+  erpnext-scheduler:
+    <<: *erpnext-common
+    container_name: school-ai-search-erpnext-scheduler
+    command: ["bench", "schedule"]
+
+  # Run once, by hand, after the stack is up. Creating a site is not something to do on every
+  # restart — it is slow, and it would fail noisily every time after the first.
+  erpnext-create-site:
+    <<: *erpnext-common
+    container_name: school-ai-search-erpnext-create-site
+    restart: "no"
+    profiles: ["setup"]
+    entrypoint: ["bash", "-c"]
+    command:
+      - >
+        bench new-site "${ERPNEXT_SITE:-erp.localhost}"
+        --mariadb-root-password "${ERPNEXT_DB_ROOT_PASSWORD:-erpnext-root}"
+        --admin-password "${ERPNEXT_ADMIN_PASSWORD:-change-me-before-you-use-this}"
+        --install-app erpnext --set-default
+    depends_on:
+      erpnext-db:
+        condition: service_healthy
+
+  erpnext-db:
+    image: mariadb:10.6
+    container_name: school-ai-search-erpnext-db
+    restart: unless-stopped
+    # Frappe requires these two; it refuses to install on a server without them.
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MARIADB_ROOT_PASSWORD: ${ERPNEXT_DB_ROOT_PASSWORD:-erpnext-root}
+    volumes:
+      - school_ai_search_erpnext_db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # Three, not one: Frappe keeps its cache, its job queue and its websocket state apart so that
+  # flushing one does not take the others with it.
+  erpnext-redis-cache:
+    image: redis:7-alpine
+    container_name: school-ai-search-erpnext-redis-cache
+    restart: unless-stopped
+    volumes:
+      - school_ai_search_erpnext_redis_cache:/data
+
+  erpnext-redis-queue:
+    image: redis:7-alpine
+    container_name: school-ai-search-erpnext-redis-queue
+    restart: unless-stopped
+    volumes:
+      - school_ai_search_erpnext_redis_queue:/data
+
+  erpnext-redis-socketio:
+    image: redis:7-alpine
+    container_name: school-ai-search-erpnext-redis-socketio
+    restart: unless-stopped
+    volumes:
+      - school_ai_search_erpnext_redis_socketio:/data
+
+volumes:
+  school_ai_search_erpnext_sites:
+  school_ai_search_erpnext_db:
+  school_ai_search_erpnext_redis_cache:
+  school_ai_search_erpnext_redis_queue:
+  school_ai_search_erpnext_redis_socketio:
+
+networks:
+  default:
+    name: eschool_net
+    external: true
