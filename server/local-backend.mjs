@@ -28,6 +28,14 @@ import {
   saveProviderCredential,
 } from './services/provider-credentials.mjs';
 import { authenticateRequest, requireRole, resolveActor } from './auth/actor.mjs';
+import {
+  ACCOUNT_ADMIN_ROLES,
+  ALL_STAFF_ROLES,
+  FINANCE_ROLES,
+  PRIVILEGED_ROLES,
+  TEACHING_ROLES,
+  USER_ROLES,
+} from './auth/roles.mjs';
 import { publish, presence as busPresence } from './events/bus.mjs';
 import { handleEventsRequest, isEventsRequest, useAudienceClause } from './events/sse.mjs';
 import { messageEvent, presenceEvent, readEvent } from './events/audience.mjs';
@@ -69,6 +77,9 @@ import { getPaymentStatus, initiatePayment, recordPaymentCallback } from './serv
 import { generateAssistantReply } from './services/student-chat.mjs';
 import { answerChatMessage } from './agent/chat.mjs';
 import { handleMcpServerRequest } from './mcp/server.mjs';
+import { BACKUP_ACTIONS, handleBackupFunction, readBackupFile } from './services/backup.mjs';
+import { DATA_TRANSFER_ACTIONS, handleDataTransferFunction } from './services/data-transfer.mjs';
+import { INTEGRATION_ACTIONS, handleIntegrationsFunction } from './services/integrations.mjs';
 import { handleFeesFunction } from './services/fees.mjs';
 import { handleStudentReportFunction, renderReport } from './services/student-report.mjs';
 import { handleCurriculumFunction } from './services/curriculum.mjs';
@@ -108,8 +119,8 @@ const MODEL_PATHS = new Set([
   '/api/models',
 ]);
 
-// 'support_staff' covers non-teaching staff such as security, gatekeepers, cooks, cleaners and drivers.
-const USER_ROLES = ['admin', 'teacher', 'support_staff'];
+// Role lists live in auth/roles.mjs so a new role is one edit rather than a hunt. 'support_staff'
+// covers non-teaching staff such as security, gatekeepers, cooks, cleaners and drivers.
 
 const MIME_TYPES = {
   '.css': 'text/css; charset=utf-8',
@@ -124,7 +135,9 @@ const MIME_TYPES = {
   '.woff2': 'font/woff2',
 };
 
-const TABLES = {
+// Exported so the export/import service shares one definition of "which tables, which columns"
+// rather than keeping a second list that could drift from this one.
+export const TABLES = {
   students: {
     columns: [
       'id',
@@ -793,22 +806,26 @@ const loadSessionUser = async (database, userId) => {
  * This is the floor, not the ceiling — a table-level rule cannot express "a teacher may edit their
  * own class". It replaces nothing with something.
  */
-const DB_DEFAULT_ROLES = ['admin', 'teacher'];
+const DB_DEFAULT_ROLES = TEACHING_ROLES;
+
+// The finance tables. Open to whoever keeps the books, not to whoever administers the system —
+// which is the whole reason the accountant and bursar roles exist.
+const FINANCE_TABLE_ROLES = FINANCE_ROLES;
 
 const DB_TABLE_ROLES = {
-  fee_structures: ['admin'],
-  payments: ['admin'],
-  invoices: ['admin'],
-  receipts: ['admin'],
-  fee_bursaries: ['admin'],
-  student_fee_standings: ['admin'],
-  payment_transactions: ['admin'],
-  // Parent/guardian portal sign-in records.
-  portal_accounts: ['admin'],
+  fee_structures: FINANCE_TABLE_ROLES,
+  payments: FINANCE_TABLE_ROLES,
+  invoices: FINANCE_TABLE_ROLES,
+  receipts: FINANCE_TABLE_ROLES,
+  fee_bursaries: FINANCE_TABLE_ROLES,
+  student_fee_standings: FINANCE_TABLE_ROLES,
+  payment_transactions: FINANCE_TABLE_ROLES,
+  // Parent/guardian portal sign-in records. Account data, so administrators only.
+  portal_accounts: ACCOUNT_ADMIN_ROLES,
   // The bursar's stores and the school's statutory returns.
-  inventory_items: ['admin'],
-  inventory_transactions: ['admin'],
-  compliance_reports: ['admin'],
+  inventory_items: FINANCE_TABLE_ROLES,
+  inventory_transactions: FINANCE_TABLE_ROLES,
+  compliance_reports: FINANCE_TABLE_ROLES,
 };
 
 const rolesForTable = (table) => DB_TABLE_ROLES[table] || DB_DEFAULT_ROLES;
@@ -1241,7 +1258,7 @@ const handleAuthFunction = async (database, body, { tenantId, headers = {}, acto
   }
 
   if (action === 'update_role') {
-    const refusal = requireRole(resolveActor(actor, body), ['admin']);
+    const refusal = requireRole(resolveActor(actor, body), ACCOUNT_ADMIN_ROLES);
     if (refusal) return refusal;
 
     if (!USER_ROLES.includes(body.newRole)) {
@@ -1268,7 +1285,7 @@ const handleAuthFunction = async (database, body, { tenantId, headers = {}, acto
   // Edit an existing account's name, sign-in email and designation. Separate from update_role so a
   // rename cannot silently change someone's permissions, and vice versa.
   if (action === 'update_account') {
-    const refusal = requireRole(resolveActor(actor, body), ['admin']);
+    const refusal = requireRole(resolveActor(actor, body), ACCOUNT_ADMIN_ROLES);
     if (refusal) return refusal;
 
     const existing = await database.query('SELECT * FROM users WHERE id = $1 LIMIT 1', [body.userId]);
@@ -1316,7 +1333,7 @@ const handleAuthFunction = async (database, body, { tenantId, headers = {}, acto
   // Permanently remove an account. Distinct from reject_account, which is the pending-signup path:
   // this deletes staff who have already been approved and are leaving the school.
   if (action === 'delete_account') {
-    const refusal = requireRole(resolveActor(actor, body), ['admin']);
+    const refusal = requireRole(resolveActor(actor, body), ACCOUNT_ADMIN_ROLES);
     if (refusal) return refusal;
 
     const existing = await database.query('SELECT * FROM users WHERE id = $1 LIMIT 1', [body.userId]);
@@ -1347,7 +1364,7 @@ const handleAuthFunction = async (database, body, { tenantId, headers = {}, acto
   }
 
   if (action === 'approve_account') {
-    const refusal = requireRole(resolveActor(actor, body), ['admin']);
+    const refusal = requireRole(resolveActor(actor, body), ACCOUNT_ADMIN_ROLES);
     if (refusal) return refusal;
 
     const result = await database.query(
@@ -1369,7 +1386,7 @@ const handleAuthFunction = async (database, body, { tenantId, headers = {}, acto
   }
 
   if (action === 'reject_account') {
-    const refusal = requireRole(resolveActor(actor, body), ['admin']);
+    const refusal = requireRole(resolveActor(actor, body), ACCOUNT_ADMIN_ROLES);
     if (refusal) return refusal;
 
     // Rejection deletes the account outright. An administrator can never be rejected this way —
@@ -1496,7 +1513,7 @@ const handleStudentCardFunction = async (database, body = {}, { actor } = {}) =>
   // advisory: a client could ask for the bursar's view and be given it. They now come from the
   // session for any real request; the body is honoured only for an internal call.
   if (actor !== undefined) {
-    const refusal = requireRole(actor, ['admin', 'teacher', 'support_staff']);
+    const refusal = requireRole(actor, ALL_STAFF_ROLES);
     if (refusal) return refusal;
   }
 
@@ -1989,7 +2006,7 @@ const handleMessagesFunction = async (database, body = {}, { actor, tenantId } =
       recipientUserId = recipient.id;
       audienceValue = '';
     } else if (audienceKind === 'role') {
-      if (!['admin', 'teacher', 'support_staff'].includes(audienceValue)) {
+      if (!ALL_STAFF_ROLES.includes(audienceValue)) {
         return { error: 'Unknown staff role' };
       }
     } else if (audienceKind === 'designation') {
@@ -2861,11 +2878,13 @@ const handleMonitoringFunction = async (database, body = {}) => {
  */
 const handleTeacherPerformanceFunction = async (database, body = {}, { actor: authenticated } = {}) => {
   const actor = resolveActor(authenticated, body);
-  const refusal = requireRole(actor, ['admin', 'teacher']);
+  const refusal = requireRole(actor, TEACHING_ROLES);
   if (refusal) return refusal;
 
   const action = String(body.action || 'summary').trim();
-  const isAdmin = actor.role === 'admin';
+  // Who may look at somebody else's figures. A head teacher runs the school, so they see everyone;
+  // a teacher sees only their own work.
+  const isAdmin = ACCOUNT_ADMIN_ROLES.includes(actor.role) || actor.role === 'head_teacher';
 
   /* Teaching staff are the logins that teach, not the rows in `teachers` — that table is a
      staff directory which, before allocation, is empty. */
@@ -2874,7 +2893,7 @@ const handleTeacherPerformanceFunction = async (database, body = {}, { actor: au
       `
         SELECT id, auth_email, display_name, role, teacher_id
         FROM users
-        WHERE role IN ('admin', 'teacher') AND approval_status = 'approved'
+        WHERE role IN ('admin', 'head_teacher', 'teacher') AND approval_status = 'approved'
         ORDER BY display_name
       `,
     );
@@ -3252,7 +3271,7 @@ const handleFeeStatusFunction = async (database, body = {}, { actor: authenticat
   const code = parseStudentCode(body.code);
 
   if (!code && authenticated !== undefined) {
-    const refusal = requireRole(authenticated, ['admin', 'teacher', 'support_staff']);
+    const refusal = requireRole(authenticated, ALL_STAFF_ROLES);
     if (refusal) return refusal;
   }
 
@@ -3347,7 +3366,7 @@ const handleFeeStatusFunction = async (database, body = {}, { actor: authenticat
 // Non-teaching support staff may only see fee payment status, so the assistant is closed to them.
 // The browser already hides it (ChatWindow, ChatContext), but that is a UI convenience: this is the
 // check that actually holds, matching the guard every other service here puts ahead of its actions.
-const CHAT_ROLES = ['admin', 'teacher'];
+const CHAT_ROLES = TEACHING_ROLES;
 
 /**
  * Per-student fee summaries for the rules engine, which is synchronous and so cannot fetch them
@@ -3516,7 +3535,7 @@ const handleReportCardRequest = async (database, pathname, searchParams, { metho
   // nothing to fall back to: an internal caller is not checked, and every real request is. The HTTP
   // layer always supplies an actor — null when there is no session — so this is enforced in full.
   if (actor !== undefined) {
-    const refusal = requireRole(actor, ['admin', 'teacher']);
+    const refusal = requireRole(actor, TEACHING_ROLES);
     if (refusal) return { type: 'json', status: 403, body: refusal };
   }
 
@@ -3588,7 +3607,7 @@ const handleIdCardRequest = async (database, pathname, searchParams, { actor } =
   // Like the report card above, this route previously had no gate at all, and takes no role
   // parameter — so the same rule applies: internal callers unchecked, every real request checked.
   if (actor !== undefined) {
-    const refusal = requireRole(actor, ['admin', 'teacher']);
+    const refusal = requireRole(actor, TEACHING_ROLES);
     if (refusal) return { type: 'json', status: 403, body: refusal };
   }
 
@@ -3824,7 +3843,7 @@ const handleFeeDocumentRequest = async (database, pathname, searchParams, { acto
   // Receipts and the school-wide financial report stay admin-only. A single student's statement is
   // open to teaching staff too: a teacher fielding "has this family paid?" needs the history, and it
   // is a read of one student rather than a view of the school's finances.
-  const allowedRoles = statementMatch ? ['admin', 'teacher'] : ['admin'];
+  const allowedRoles = statementMatch ? TEACHING_ROLES : FINANCE_ROLES;
   const refusal = requireRole(resolveActor(actor, { requesterRole: searchParams.get('requesterRole') }), allowedRoles);
   if (refusal) return { type: 'json', status: 403, body: refusal };
 
@@ -4140,6 +4159,34 @@ export const createAppRuntime = async ({
         return reportCardResponse;
       }
 
+      // A backup is the whole school in one file, so the download is gated exactly as the service
+      // is rather than trusting that whoever holds the id was allowed to ask for it.
+      const backupMatch = method === 'GET' && pathname.match(/^\/api\/backups\/([\w-]+)\.dump$/);
+      if (backupMatch) {
+        const backupActor = resolveActor(actor, { requesterRole: searchParams.get('requesterRole') });
+        const refusal = requireRole(backupActor, PRIVILEGED_ROLES);
+        if (refusal) return { type: 'json', status: 403, body: { error: refusal.error, data: null } };
+
+        const file = await readBackupFile(database, backupMatch[1]);
+        if (!file) return { type: 'json', status: 404, body: { error: 'That backup is no longer on disk.', data: null } };
+
+        await database.query(
+          `INSERT INTO audit_logs (id, user_email, user_name, user_role, action, entity_type, entity_id, entity_name, changes)
+           VALUES ($1, $2, $3, $4, 'backup_downloaded', 'backup', $5, $6, '{}'::jsonb)`,
+          [randomUUID(), backupActor.email || '', backupActor.name || '', backupActor.role || '', backupMatch[1], file.filename],
+        );
+
+        return {
+          type: 'binary',
+          status: 200,
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'Content-Disposition': `attachment; filename="${file.filename}"`,
+          },
+          body: file.bytes,
+        };
+      }
+
       const idCardResponse = await handleIdCardRequest(database, pathname, searchParams, { actor });
       if (idCardResponse) {
         return idCardResponse;
@@ -4290,7 +4337,7 @@ export const createAppRuntime = async ({
       }
 
       if (method === 'POST' && pathname === '/api/functions/student-report') {
-        const data = await handleStudentReportFunction(database, body);
+        const data = await handleStudentReportFunction(database, body, { actor });
         return data?.error
           ? { type: 'json', status: 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
@@ -4307,6 +4354,29 @@ export const createAppRuntime = async ({
         const data = await handleProvisionFunction(provisioning, body, httpClient, headers);
         return data?.error
           ? { type: 'json', status: 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/backup') {
+        const data = await handleBackupFunction(database, body, { actor, tenantId });
+        return data?.error
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/integrations') {
+        const data = await handleIntegrationsFunction(database, body, httpClient, { actor, tenantId });
+        return data?.error
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/data') {
+        // TABLES is passed in rather than imported by the service, so there is one definition of
+        // "which tables, which columns" and the export cannot drift from what /api/db exposes.
+        const data = await handleDataTransferFunction(database, body, { actor, tenantId, tables: TABLES });
+        return data?.error
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
       }
 

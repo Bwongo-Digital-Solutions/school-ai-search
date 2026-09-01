@@ -1,5 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Shield, User } from 'lucide-react';
+import { Button, InlineLoading } from '@carbon/react';
+import { Locked, User } from '@carbon/react/icons';
+import { AccessDenied } from '@/components/common';
+import styles from './chat.module.scss';
 import ChatMessage from './ChatMessage';
 import ChatInput from './ChatInput';
 import TypingIndicator from './TypingIndicator';
@@ -23,41 +26,34 @@ const ChatWindow: React.FC = () => {
 
   if (authLoading) {
     return (
-      <div className="flex h-full items-center justify-center bg-gray-50 dark:bg-gray-900 text-sm text-gray-400">
-        Checking access
+      <div className={styles.checking}>
+        <InlineLoading description="Checking access…" />
       </div>
     );
   }
 
-  // SchoolBot answers from the full student dataset, so it is closed to support staff.
+  // The assistant answers from the full student dataset, so it is closed to support staff.
   if (isSupportStaff) {
     return (
-      <div className="flex h-full flex-col items-center justify-center bg-gray-50 dark:bg-gray-900 p-8 text-center">
-        <Shield className="mb-3 h-10 w-10 text-indigo-500" />
-        <h2 className="text-xl font-bold text-gray-800 dark:text-white">Restricted to Teachers and Admins</h2>
-        <p className="mt-1 max-w-sm text-sm text-gray-500 dark:text-gray-400">
-          SchoolBot answers questions using full student records. Support staff accounts can only view school fees payment status.
-        </p>
-      </div>
+      <AccessDenied
+        title="Restricted to teachers and administrators"
+        message="The assistant answers using complete student records. Support staff accounts can see school fees payment status."
+      />
     );
   }
 
   if (!isAuthenticated) {
     return (
       <>
-        <div className="flex h-full flex-col items-center justify-center bg-gray-50 dark:bg-gray-900 p-8 text-center">
-          <Shield className="mb-3 h-10 w-10 text-indigo-500" />
-          <h2 className="text-xl font-bold text-gray-800 dark:text-white">Sign In Required</h2>
-          <p className="mt-1 max-w-sm text-sm text-gray-500 dark:text-gray-400">
-            SchoolBot chat is available only to signed-in school staff.
+        <div className={styles.gate}>
+          <Locked size={32} />
+          <h2 className={styles.gateTitle}>Sign in to continue</h2>
+          <p className={styles.gateCopy}>
+            The assistant is available to signed-in school staff.
           </p>
-          <button
-            onClick={() => setShowAuthModal(true)}
-            className="mt-4 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
-          >
-            <User className="h-4 w-4" />
-            Sign In
-          </button>
+          <Button renderIcon={User} onClick={() => setShowAuthModal(true)}>
+            Sign in
+          </Button>
         </div>
         <AuthModal isOpen={showAuthModal} onClose={() => setShowAuthModal(false)} />
       </>
@@ -65,16 +61,12 @@ const ChatWindow: React.FC = () => {
   }
 
   return (
-    <div className="flex flex-col h-full bg-gradient-to-b from-gray-50/50 to-white dark:from-gray-900/50 dark:to-gray-900">
-      {/* Messages area */}
-      <div
-        ref={scrollContainerRef}
-        className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-200 dark:scrollbar-thumb-gray-700"
-      >
+    <div className={styles.window}>
+      <div ref={scrollContainerRef} className={styles.scroller}>
         {messages.length === 0 ? (
           <WelcomeScreen />
         ) : (
-          <div className="max-w-4xl mx-auto py-4">
+          <div className={styles.thread}>
             {messages.map((message) => (
               <ChatMessage key={message.id} message={message} />
             ))}
@@ -84,8 +76,7 @@ const ChatWindow: React.FC = () => {
         )}
       </div>
 
-      {/* Input area */}
-      <div className="max-w-4xl mx-auto w-full">
+      <div className={styles.composer}>
         <ChatInput />
       </div>
     </div>

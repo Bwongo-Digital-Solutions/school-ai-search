@@ -1,24 +1,26 @@
 import React from 'react';
-import { Bot } from 'lucide-react';
+import { InlineLoading } from '@carbon/react';
+import { Bot } from '@carbon/react/icons';
+import styles from './chat.module.scss';
 
-const TypingIndicator: React.FC = () => {
-  return (
-    <div className="flex gap-3 px-4 py-4">
-      <div className="flex-shrink-0 w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-200 dark:shadow-indigo-900/30">
-        <Bot className="w-5 h-5 text-white" />
-      </div>
-      <div className="bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 rounded-2xl rounded-bl-md px-5 py-4 shadow-sm">
-        <div className="flex items-center gap-2">
-          <div className="flex gap-1">
-            <span className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-            <span className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-            <span className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-          </div>
-          <span className="text-xs text-gray-400 ml-2">Searching student records...</span>
-        </div>
-      </div>
+/**
+ * The assistant, working.
+ *
+ * Carbon's InlineLoading rather than three bouncing dots: it says what is happening in words, which
+ * matters here because the wait can be several seconds and "searching student records" is a more
+ * reassuring thing to read than an animation.
+ */
+const TypingIndicator: React.FC = () => (
+  <div className={styles.message}>
+    <div className={`${styles.avatar} ${styles.avatarAssistant}`}>
+      <Bot size={20} />
     </div>
-  );
-};
+    <div className={`${styles.bubble} ${styles.bubbleAssistant}`}>
+      <span className={styles.typing}>
+        <InlineLoading description="Searching student records…" />
+      </span>
+    </div>
+  </div>
+);
 
 export default TypingIndicator;

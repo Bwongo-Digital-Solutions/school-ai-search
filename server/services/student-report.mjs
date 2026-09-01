@@ -16,6 +16,8 @@ import { randomUUID } from 'node:crypto';
 import { loadSchoolSettings } from './settings.mjs';
 import { sendEmail } from './email.mjs';
 import { buildParentReportPdf, REPORT_SECTIONS } from '../reports/parent-report.mjs';
+import { requireRole, resolveActor } from '../auth/actor.mjs';
+import { TEACHING_ROLES } from '../auth/roles.mjs';
 
 const trimmed = (value) => String(value ?? '').trim();
 
@@ -303,14 +305,22 @@ const ACTIONS = {
   last_sent: lastSent,
 };
 
+export const STUDENT_REPORT_ACTIONS = Object.keys(ACTIONS);
+
 /**
  * Reports carry a family's marks, attendance and payment history, so they are for staff who
- * already hold the roster: an administrator or a teacher. The role arrives from the client,
- * which matches the convention the rest of this backend uses and is a deployment-perimeter
- * assumption rather than an auth control.
+ * already hold the roster.
+ *
+ * This used to read the role straight off the request body — the last service still doing so after
+ * the rest moved to session-derived actors. A caller could name their own role, which made the
+ * check decorative. It now goes through `resolveActor`, so the role comes from the `users` row
+ * behind the session cookie; `body.requesterRole` is honoured only when there is no request to
+ * authenticate at all, which is the internal/test path.
  */
-export const handleStudentReportFunction = async (database, body = {}) => {
-  if (!['admin', 'teacher'].includes(body.requesterRole)) return { error: 'Unauthorized' };
+export const handleStudentReportFunction = async (database, body = {}, { actor: authenticated } = {}) => {
+  const actor = resolveActor(authenticated, body);
+  const refusal = requireRole(actor, TEACHING_ROLES);
+  if (refusal) return refusal;
 
   const handler = ACTIONS[body.action];
   if (!handler) return { error: `Unsupported report action: ${body.action}` };

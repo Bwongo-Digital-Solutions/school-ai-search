@@ -1,0 +1,222 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../../styles/vars' as *;
+
+// ---------------------------------------------------------------------------
+// The mix editor: how many questions of each difficulty, Bloom level or type.
+// ---------------------------------------------------------------------------
+
+.mixHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: layout.$spacing-03;
+  margin-block-end: layout.$spacing-03;
+}
+
+.mixLabel {
+  @include type.type-style('label-01');
+  color: $text-02;
+}
+
+.mixTotal {
+  @include type.type-style('label-01');
+  color: $text-03;
+}
+
+.mixGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: layout.$spacing-03;
+}
+
+.mixItem {
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+}
+
+.mixInput {
+  inline-size: 4rem;
+  flex-shrink: 0;
+}
+
+.mixName {
+  @include type.type-style('label-01');
+  color: $text-02;
+  text-transform: capitalize;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// ---------------------------------------------------------------------------
+// One question, as a reviewer reads it.
+// ---------------------------------------------------------------------------
+
+.card {
+  padding: layout.$spacing-05;
+  border: 1px solid $ui-03;
+  background: $ui-02;
+}
+
+.cardHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: layout.$spacing-03;
+  margin-block-end: layout.$spacing-04;
+}
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: layout.$spacing-02;
+}
+
+.marks {
+  @include type.type-style('heading-compact-01');
+  color: $text-02;
+  white-space: nowrap;
+}
+
+.marksField {
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+}
+
+.marksLabel {
+  @include type.type-style('label-01');
+  color: $text-03;
+}
+
+.topic {
+  @include type.type-style('label-01');
+  color: $text-03;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin: 0 0 layout.$spacing-03;
+}
+
+.stem {
+  @include type.type-style('body-01');
+  color: $text-01;
+  margin: 0;
+}
+
+.options {
+  @include type.type-style('body-compact-01');
+  margin: layout.$spacing-04 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-02;
+  color: $text-02;
+}
+
+// The right answer, marked. Green plus the word "correct" in the label rather than colour alone,
+// so it survives being printed in black and white and being read by someone who cannot see green.
+.optionCorrect {
+  color: $support-success;
+  font-weight: 600;
+}
+
+.answer {
+  @include type.type-style('body-compact-01');
+  color: $text-02;
+  margin: layout.$spacing-04 0 0;
+}
+
+.answerLabel {
+  color: $support-success;
+  font-weight: 600;
+}
+
+.section {
+  margin-block-start: layout.$spacing-04;
+}
+
+.sectionLabel {
+  @include type.type-style('label-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-02;
+  color: $text-03;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin: 0 0 layout.$spacing-03;
+
+  svg {
+    fill: currentColor;
+  }
+}
+
+.scheme {
+  @include type.type-style('label-01');
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-02;
+  color: $text-02;
+}
+
+.schemeMarks {
+  color: $text-03;
+}
+
+.reviewNote {
+  @include type.type-style('label-01');
+  color: #8e6a00;
+  margin: layout.$spacing-04 0 0;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: layout.$spacing-03;
+  margin-block-start: layout.$spacing-05;
+  padding-block-start: layout.$spacing-04;
+  border-block-start: 1px solid $ui-03;
+}
+
+:global([data-carbon-theme='g100']) {
+  .card {
+    background: $ui-02-dark;
+    border-color: $ui-03-dark;
+  }
+
+  .stem {
+    color: #f4f4f4;
+  }
+
+  .mixLabel,
+  .mixName,
+  .marks,
+  .options,
+  .answer,
+  .scheme {
+    color: $text-02-dark;
+  }
+
+  .mixTotal,
+  .marksLabel,
+  .topic,
+  .sectionLabel,
+  .schemeMarks {
+    color: $text-03-dark;
+  }
+
+  .reviewNote {
+    color: $support-warning;
+  }
+
+  .actions {
+    border-block-start-color: $ui-03-dark;
+  }
+}

@@ -1,0 +1,106 @@
+// The app header, on Carbon's UI Shell.
+//
+// The shell supplies the structure — brand slot, global action bar, the menu button that collapses
+// the rail. This file adds only the two things it has no opinion about: the school's colour, and
+// the unread counter.
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+// The header wears the school's own colour rather than Carbon's stock near-black. It is the first
+// thing anyone sees, it is the same colour as the school's report cards and receipts, and on a
+// platform serving many schools it is what tells you at a glance whose system you are looking at.
+//
+// The contents stay on Carbon's g100 (dark) tokens, so white text and its hover states come out
+// right; --brand-contrast flips to dark text if a school picks a pale colour.
+.header {
+  background-color: var(--brand-01, #{$brand-01-fallback});
+  border-bottom: none;
+
+  :global(.cds--header__name),
+  :global(.cds--header__menu-trigger) {
+    color: var(--brand-contrast, #ffffff);
+  }
+
+  :global(.cds--header__name) {
+    @include type.type-style('body-compact-01');
+    font-weight: 600;
+
+    &:hover {
+      background-color: var(--brand-02, #{$brand-02-fallback});
+    }
+  }
+
+  // Hover and open states darken the school's colour instead of reverting to Carbon's grey, which
+  // would read as a different component appearing on top of the header.
+  :global(.cds--header__action:hover),
+  :global(.cds--header__menu-trigger:hover),
+  :global(.cds--overflow-menu.cds--overflow-menu--open) {
+    background-color: var(--brand-02, #{$brand-02-fallback});
+  }
+
+  :global(.cds--header__action > svg),
+  :global(.cds--overflow-menu > svg) {
+    fill: var(--brand-contrast, #ffffff);
+  }
+
+  :global(.cds--header__action--active) {
+    border-color: var(--brand-03, #{$brand-03-fallback});
+    background-color: var(--brand-02, #{$brand-02-fallback});
+  }
+}
+
+// The unread count on the messages action: a small counter pinned to the corner of the glyph,
+// ringed so it stays legible whatever colour the school chose behind it.
+.badgeWrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.badge {
+  position: absolute;
+  top: -0.125rem;
+  inset-inline-end: -0.375rem;
+  min-width: layout.$spacing-05;
+  height: layout.$spacing-05;
+  padding: 0 layout.$spacing-01;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: $support-error;
+  border: 1px solid var(--brand-01, #{$brand-01-fallback});
+  border-radius: 50%;
+  color: #ffffff;
+  @include type.type-style('label-01');
+  font-size: 0.625rem;
+  font-weight: 600;
+  line-height: 1;
+}
+
+// Carbon's overflow menus are square by default; this only widens them enough for the longer
+// account entries so they do not wrap.
+.menu {
+  min-inline-size: min(14rem, 100%);
+}
+
+.helpList {
+  @include type.type-style('body-01');
+  margin: 0;
+  padding-inline-start: layout.$spacing-06;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-03;
+  color: $text-02;
+}
+
+.sendFields {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+}
+
+.fieldNote {
+  @include type.type-style('helper-text-01');
+  color: $text-02;
+  margin: 0;
+}

@@ -1,0 +1,89 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../../styles/vars' as *;
+
+// The text editor a teacher corrects a generated paper in.
+//
+// A toolbar joined to the writing surface below it — one object, so the border runs continuously
+// between them and only the outer edge is drawn. Square, like the rest of the app.
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: layout.$spacing-01;
+  padding: layout.$spacing-02 layout.$spacing-03;
+  background: $ui-01;
+  border: 1px solid $ui-03;
+  border-block-end: none;
+}
+
+.surface {
+  border: 1px solid $ui-03;
+  background: $ui-02;
+  min-block-size: 24rem;
+  max-block-size: 36rem;
+  overflow-y: auto;
+  padding: layout.$spacing-05;
+}
+
+// Monospace, because this is markup being edited rather than prose being read: the teacher needs to
+// see where a heading marker or a list bullet actually sits.
+.textarea {
+  @include type.type-style('code-01');
+  inline-size: 100%;
+  min-block-size: 24rem;
+  max-block-size: 36rem;
+  padding: layout.$spacing-04;
+  background: $ui-02;
+  border: 1px solid $ui-03;
+  color: $text-01;
+  resize: vertical;
+
+  &:focus {
+    outline: 2px solid var(--brand-01, #{$brand-01-fallback});
+    outline-offset: -2px;
+  }
+}
+
+.divider {
+  inline-size: 1px;
+  block-size: layout.$spacing-05;
+  background: $ui-03;
+  margin-inline: layout.$spacing-02;
+  flex-shrink: 0;
+}
+
+.toolbarEnd {
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  margin-inline-start: auto;
+}
+
+.count {
+  @include type.type-style('label-01');
+  color: $text-03;
+  white-space: nowrap;
+}
+
+:global([data-carbon-theme='g100']) {
+  .toolbar {
+    background: $ui-01-dark;
+    border-color: $ui-03-dark;
+  }
+
+  .surface,
+  .textarea {
+    background: $ui-02-dark;
+    border-color: $ui-03-dark;
+    color: #f4f4f4;
+  }
+
+  .divider {
+    background: $ui-03-dark;
+  }
+
+  .count {
+    color: $text-03-dark;
+  }
+}

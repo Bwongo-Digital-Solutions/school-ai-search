@@ -1,0 +1,53 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+// The rail sits under the header, which is 3rem tall in Carbon's shell.
+.nav {
+  border-inline-end: 1px solid $ui-03;
+
+  // The current section is marked with the school's colour down its leading edge — the same device
+  // OpenMRS uses on a selected tab. Carbon's own marker is a grey background alone, which at this
+  // list length is not enough to find your place in a glance.
+  :global(.cds--side-nav__link[aria-current='page']),
+  :global(.cds--side-nav__link--current),
+  :global(.cds--side-nav__menu-item[aria-current='page'] > .cds--side-nav__link) {
+    box-shadow: inset 3px 0 0 0 var(--brand-01, #{$brand-01-fallback});
+  }
+
+  :global(.cds--side-nav__link[aria-current='page'] .cds--side-nav__link-text) {
+    color: $text-01;
+    font-weight: 600;
+  }
+}
+
+.itemRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: layout.$spacing-03;
+  inline-size: 100%;
+}
+
+// The unread count beside "Messages". Square, like everything else here — the round badge belongs
+// on the header glyph, where there is no room for a number in line.
+.count {
+  @include type.type-style('label-01');
+  min-inline-size: layout.$spacing-05;
+  padding: 0 layout.$spacing-02;
+  background: $support-error;
+  color: #ffffff;
+  font-weight: 600;
+  line-height: layout.$spacing-05;
+  text-align: center;
+}
+
+:global([data-carbon-theme='g100']) {
+  .nav {
+    border-inline-end-color: $ui-03-dark;
+
+    :global(.cds--side-nav__link[aria-current='page'] .cds--side-nav__link-text) {
+      color: #f4f4f4;
+    }
+  }
+}

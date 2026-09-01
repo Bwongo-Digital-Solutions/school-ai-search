@@ -94,6 +94,7 @@ Choose an action:
  14) Reload the proxy configuration
  15) Write a self-signed placeholder so nginx can start
  16) Change environment
+ 17) Choose the database (bundled container, or your own server)
   0) Exit
 EOF
 }
@@ -215,11 +216,83 @@ EOF
 # standalone (docker-compose) reads the variable but does not take the flag, and this script
 # supports both.
 compose_profiles() {
+  profiles=""
+
   case "$proxy" in
-    nginx) printf 'proxy-nginx' ;;
-    caddy) printf 'proxy-caddy' ;;
-    *)     printf '' ;;
+    nginx) profiles="proxy-nginx" ;;
+    caddy) profiles="proxy-caddy" ;;
   esac
+
+  # The bundled Postgres is a profile too, so a school running its own database simply does not
+  # start one. Default is bundled, because that is the setup that needs no decisions.
+  if [ "${db_mode:-bundled}" = "bundled" ]; then
+    profiles="${profiles:+$profiles,}bundled-db"
+  fi
+
+  printf '%s' "$profiles"
+}
+
+# Which database the stack runs against: the container in this compose file, or one of the school's
+# own. External covers a managed Postgres, one on the host, and one on another machine — the app has
+# only ever needed a connection string.
+db_mode="${DB_MODE:-bundled}"
+
+set_db_mode() {
+  case "$1" in
+    bundled|external) db_mode="$1" ;;
+    *) echo "Unknown database mode: $1 (expected 'bundled' or 'external')" >&2; return 1 ;;
+  esac
+
+  if [ "$db_mode" = "external" ]; then
+    url="$(read_env DATABASE_URL)"
+    if [ -z "$url" ]; then
+      echo "DATABASE_URL is not set in ${env_file:-.env}." >&2
+      echo "An external database needs one, for example:" >&2
+      echo "  DATABASE_URL=postgres://schoolapp:secret@db.example.org:5432/school_ai_search" >&2
+      echo "  DATABASE_SSL=true" >&2
+      return 1
+    fi
+    case "$url" in
+      *@db:*)
+        echo "DATABASE_URL still points at the bundled container (host 'db')." >&2
+        echo "Point it at your own server before choosing external." >&2
+        return 1
+        ;;
+    esac
+    echo "Database: external — $(printf '%s' "$url" | sed 's#://[^@]*@#://***@#')"
+  else
+    echo "Database: the bundled container in this compose file."
+  fi
+}
+
+# Read one value out of the env file without sourcing it, so a stray command in there cannot run.
+read_env() {
+  file="${env_file:-.env}"
+  [ -f "$file" ] || return 0
+  sed -n "s/^$1=//p" "$file" | tail -n 1 | sed 's/^\"//; s/\"$//'
+}
+
+# Prove the database answers before starting anything against it. A wrong URL otherwise shows up as
+# an app container restarting forever, which says nothing about why.
+check_database() {
+  url="$(read_env DATABASE_URL)"
+  if [ -z "$url" ]; then
+    echo "No DATABASE_URL set; the bundled container will be used."
+    return 0
+  fi
+
+  if ! command -v pg_isready >/dev/null 2>&1; then
+    echo "pg_isready is not installed here, so the connection could not be checked in advance."
+    return 0
+  fi
+
+  if pg_isready -d "$url" >/dev/null 2>&1; then
+    echo "Database reachable."
+  else
+    echo "Could not reach the database at $(printf '%s' "$url" | sed 's#://[^@]*@#://***@#')." >&2
+    echo "Check the host, the port, the credentials, and that it accepts connections from here." >&2
+    return 1
+  fi
 }
 
 # Which file supplies the ${VARIABLES} in the compose file.
@@ -251,6 +324,23 @@ compose() {
   # Unquoted on purpose: "docker compose" has to split into a command and its subcommand.
   # shellcheck disable=SC2086
   COMPOSE_PROFILES="$(compose_profiles)" $compose_bin "$@"
+}
+
+choose_database() {
+  echo "Where does this school's data live?"
+  echo "  1) The bundled Postgres container in this compose file"
+  echo "  2) Your own Postgres — managed, on the host, or on another machine"
+  printf 'Choice [1-2]: '
+  read -r db_choice
+
+  case "$db_choice" in
+    1) set_db_mode bundled ;;
+    2)
+      set_db_mode external || return 1
+      check_database || return 1
+      ;;
+    *) echo "Unchanged." ;;
+  esac
 }
 
 set_proxy() {
@@ -747,6 +837,9 @@ interactive_menu() {
         ;;
       16)
         choose_environment
+        ;;
+      17)
+        choose_database
         ;;
       0)
         exit 0

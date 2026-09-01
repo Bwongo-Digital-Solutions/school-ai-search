@@ -1,19 +1,25 @@
 import React, { useState, useRef, useCallback } from 'react';
-import { Bot, BookMarked, Check, ChevronDown, Plug, Send, Sparkles, Wrench } from 'lucide-react';
+import { Button, Dropdown, MultiSelect, Tag } from '@carbon/react';
+import { Ai, Book, Send, Tools } from '@carbon/react/icons';
 import VoiceRecorder from './VoiceRecorder';
 import ImageUpload from './ImageUpload';
 import { useChatContext } from '@/contexts/ChatContext';
 import type { Attachment } from '@/types/chat';
+import styles from './chat-input.module.scss';
 
 /**
- * A small on/off pill for the per-message chat options. Active state is a filled indigo chip so the
- * composer shows at a glance what the next message will actually do.
+ * An on/off option for the next message.
+ *
+ * Carbon has no compact toggle chip — its `Toggle` is a form control with a label and a lot of
+ * height, which is wrong for a row of three sitting above a text box. This is a ghost Button given
+ * a selected state, so it inherits Carbon's focus ring, disabled treatment and hit area, and only
+ * the colour is ours.
  */
 const ModeToggle = ({
   active,
   onClick,
   disabled,
-  icon: Icon,
+  icon,
   label,
   title,
 }: {
@@ -24,20 +30,18 @@ const ModeToggle = ({
   label: string;
   title: string;
 }) => (
-  <button
-    type="button"
+  <Button
+    kind="ghost"
+    size="sm"
+    className={`${styles.toggle} ${active ? styles.toggleOn : ''}`}
+    renderIcon={icon}
     onClick={onClick}
     disabled={disabled}
     title={title}
-    className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors disabled:opacity-60 ${
-      active
-        ? 'border-indigo-500 bg-indigo-50 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300'
-        : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
-    }`}
+    aria-pressed={active}
   >
-    <Icon className="w-3.5 h-3.5" />
     {label}
-  </button>
+  </Button>
 );
 
 const ChatInput: React.FC = () => {
@@ -64,14 +68,15 @@ const ChatInput: React.FC = () => {
   const supportsTools = Boolean(selectedModel && selectedModel.provider !== 'local_rules');
   const enabledServers = mcpServers.filter(server => server.enabled);
 
-  const toggleMcpServer = useCallback(
-    (id: string) => {
-      const selected = chatOptions.mcpServerIds.includes(id)
-        ? chatOptions.mcpServerIds.filter(entry => entry !== id)
-        : [...chatOptions.mcpServerIds, id];
-      // Selecting a server implies wanting tools, so turn agent mode on rather than silently
+  const setMcpServers = useCallback(
+    (selected: string[]) => {
+      // Choosing a server implies wanting tools, so turn agent mode on rather than silently
       // ignoring the choice.
-      setChatOptions({ ...chatOptions, mcpServerIds: selected, agentMode: selected.length > 0 || chatOptions.agentMode });
+      setChatOptions({
+        ...chatOptions,
+        mcpServerIds: selected,
+        agentMode: selected.length > 0 || chatOptions.agentMode,
+      });
     },
     [chatOptions, setChatOptions],
   );
@@ -129,10 +134,9 @@ const ChatInput: React.FC = () => {
   const canSend = (inputText.trim().length > 0 || selectedImage) && !isLoading;
 
   return (
-    <div className="border-t border-gray-100 dark:border-gray-700 bg-white/80 dark:bg-gray-900/80 backdrop-blur-xl">
-      {/* Image preview */}
+    <div className={styles.composer}>
       {selectedImage && (
-        <div className="px-4 pt-3">
+        <div className={styles.preview}>
           <ImageUpload
             onImageSelect={handleImageSelect}
             selectedImage={selectedImage}
@@ -141,79 +145,46 @@ const ChatInput: React.FC = () => {
         </div>
       )}
 
-      <div className="px-4 py-3">
-        <div className="relative mb-2 flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setShowModelMenu(prev => !prev)}
+      <div className={styles.inner}>
+        {/* What the next message will use. A Carbon Dropdown rather than the hand-rolled menu this
+            replaced: it brings its own click-outside, keyboard navigation and focus return, all of
+            which the old one had to approximate with a fixed transparent overlay div. */}
+        <div className={styles.options}>
+          <Dropdown
+            id="model-picker"
+            className={styles.modelPicker}
+            size="sm"
+            titleText="Model"
+            hideLabel
+            label="Local rules"
             disabled={isLoading}
-            className="inline-flex max-w-full items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-2.5 py-1.5 text-xs text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-60"
-            title="Select AI model"
-          >
-            <Bot className="w-3.5 h-3.5 text-indigo-500" />
-            <span className="truncate">
-              {selectedModel ? `${selectedModel.label} · ${selectedModel.model}` : 'Local Rules'}
-            </span>
-            <ChevronDown className="w-3.5 h-3.5 text-gray-400" />
-          </button>
-
-          {showModelMenu && (
-            <>
-              <div className="fixed inset-0 z-40" onClick={() => setShowModelMenu(false)} />
-              <div className="absolute bottom-full left-0 z-50 mb-2 max-h-72 w-[min(28rem,calc(100vw-2rem))] overflow-y-auto rounded-xl border border-gray-100 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-xl">
-                <div className="px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400">
-                  AI Models
-                </div>
-                {aiModels.map(model => (
-                  <button
-                    key={model.id}
-                    type="button"
-                    onClick={() => {
-                      setSelectedModelId(model.id);
-                      setShowModelMenu(false);
-                    }}
-                    className="flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-gray-50 dark:hover:bg-gray-700"
-                  >
-                    <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-gray-100 dark:bg-gray-700">
-                      {selectedModelId === model.id ? (
-                        <Check className="h-3.5 w-3.5 text-indigo-600" />
-                      ) : (
-                        <Bot className="h-3.5 w-3.5 text-gray-400" />
-                      )}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="truncate text-xs font-medium text-gray-800 dark:text-gray-100">
-                          {model.label}
-                        </span>
-                        <span className={`rounded px-1.5 py-0.5 text-[10px] ${
-                          model.configured
-                            ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-300'
-                            : 'bg-amber-50 text-amber-600 dark:bg-amber-900/30 dark:text-amber-300'
-                        }`}>
-                          {model.configured ? 'Ready' : 'Needs key'}
-                        </span>
-                      </div>
-                      <p className="truncate text-[11px] text-gray-500 dark:text-gray-400">
-                        {model.provider} · {model.model}
-                      </p>
-                      {model.description && (
-                        <p className="mt-0.5 line-clamp-2 text-[11px] text-gray-400">
-                          {model.description}
-                        </p>
-                      )}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
+            items={aiModels}
+            selectedItem={selectedModel ?? null}
+            itemToString={(model) => (model ? `${model.label} · ${model.model}` : 'Local rules')}
+            itemToElement={(model) =>
+              model ? (
+                <span className={styles.modelRow}>
+                  <span className={styles.modelName}>
+                    {model.label}
+                    <Tag type={model.configured ? 'green' : 'magenta'} size="sm">
+                      {model.configured ? 'Ready' : 'Needs key'}
+                    </Tag>
+                  </span>
+                  <span className={styles.modelMeta}>
+                    {model.provider} · {model.model}
+                    {model.description ? ` — ${model.description}` : ''}
+                  </span>
+                </span>
+              ) : null
+            }
+            onChange={({ selectedItem }) => selectedItem && setSelectedModelId(selectedItem.id)}
+          />
 
           <ModeToggle
             active={chatOptions.agentMode}
             onClick={() => setChatOptions({ ...chatOptions, agentMode: !chatOptions.agentMode })}
             disabled={isLoading || !supportsTools}
-            icon={Wrench}
+            icon={Tools}
             label="Agent"
             title={
               supportsTools
@@ -226,66 +197,45 @@ const ChatInput: React.FC = () => {
             active={chatOptions.useRag}
             onClick={() => setChatOptions({ ...chatOptions, useRag: !chatOptions.useRag })}
             disabled={isLoading}
-            icon={BookMarked}
+            icon={Book}
             label="Curriculum"
             title="Search the curriculum library and cite it in the answer"
           />
 
-          <div className="relative">
-            <ModeToggle
-              active={chatOptions.mcpServerIds.length > 0}
-              onClick={() => setShowMcpMenu(previous => !previous)}
-              disabled={isLoading || !supportsTools || enabledServers.length === 0}
-              icon={Plug}
-              label={chatOptions.mcpServerIds.length > 0 ? `MCP · ${chatOptions.mcpServerIds.length}` : 'MCP'}
-              title={
-                enabledServers.length === 0
-                  ? 'No MCP servers registered — an administrator adds them under Settings'
-                  : 'Bring tools from connected MCP servers into this message'
+          {enabledServers.length > 0 && (
+            <MultiSelect
+              id="mcp-picker"
+              className={styles.mcpPicker}
+              size="sm"
+              titleText="MCP servers"
+              hideLabel
+              label={
+                chatOptions.mcpServerIds.length > 0
+                  ? `MCP · ${chatOptions.mcpServerIds.length}`
+                  : 'MCP servers'
               }
+              disabled={isLoading || !supportsTools}
+              items={enabledServers}
+              itemToString={(server) =>
+                server
+                  ? `${server.name} — ${
+                      server.last_error
+                        ? `last attempt failed: ${server.last_error}`
+                        : `${server.discovered_tools.length} tool${
+                            server.discovered_tools.length === 1 ? '' : 's'
+                          }`
+                    }`
+                  : ''
+              }
+              selectedItems={enabledServers.filter((server) =>
+                chatOptions.mcpServerIds.includes(server.id),
+              )}
+              onChange={({ selectedItems }) => setMcpServers(selectedItems.map((s) => s.id))}
             />
-
-            {showMcpMenu && (
-              <>
-                <div className="fixed inset-0 z-40" onClick={() => setShowMcpMenu(false)} />
-                <div className="absolute bottom-full left-0 z-50 mb-2 max-h-72 w-[min(22rem,calc(100vw-2rem))] overflow-y-auto rounded-xl border border-gray-100 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-xl">
-                  <div className="px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400">
-                    MCP servers
-                  </div>
-                  {enabledServers.map(server => (
-                    <button
-                      key={server.id}
-                      type="button"
-                      onClick={() => toggleMcpServer(server.id)}
-                      className="flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-gray-50 dark:hover:bg-gray-700"
-                    >
-                      <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-gray-100 dark:bg-gray-700">
-                        {chatOptions.mcpServerIds.includes(server.id) ? (
-                          <Check className="h-3.5 w-3.5 text-indigo-600" />
-                        ) : (
-                          <Plug className="h-3.5 w-3.5 text-gray-400" />
-                        )}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <span className="block truncate text-xs font-medium text-gray-800 dark:text-gray-100">
-                          {server.name}
-                        </span>
-                        <span className="block truncate text-[11px] text-gray-400">
-                          {server.last_error
-                            ? `Last attempt failed: ${server.last_error}`
-                            : `${server.discovered_tools.length} tool${server.discovered_tools.length === 1 ? '' : 's'}`}
-                        </span>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
+          )}
         </div>
 
-        <div className="flex items-end gap-2 bg-gray-50 dark:bg-gray-800 rounded-2xl border border-gray-200 dark:border-gray-600 focus-within:border-indigo-400 dark:focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-100 dark:focus-within:ring-indigo-900/30 transition-all duration-200 px-3 py-2">
-          {/* Image upload button */}
+        <div className={styles.field}>
           {!selectedImage && (
             <ImageUpload
               onImageSelect={handleImageSelect}
@@ -294,53 +244,45 @@ const ChatInput: React.FC = () => {
             />
           )}
 
-          {/* Text input */}
           <textarea
             ref={textareaRef}
             value={inputText}
             onChange={handleTextareaChange}
             onKeyDown={handleKeyDown}
-            placeholder={isRecording ? 'Recording...' : 'Ask about any student... (e.g., "What is Emma Johnson\'s GPA?")'}
-            className="flex-1 bg-transparent border-none outline-none resize-none text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-500 min-h-[40px] max-h-[150px] py-2 px-1"
+            placeholder={isRecording ? 'Recording…' : 'Ask about any student…'}
+            className={styles.textarea}
             rows={1}
             disabled={isLoading}
+            aria-label="Your question"
           />
 
-          {/* Voice recorder */}
           <VoiceRecorder
             onTranscription={handleVoiceTranscription}
             onRecordingStateChange={setIsRecording}
           />
 
-          {/* Send button */}
-          <button
+          <Button
+            hasIconOnly
+            kind="ghost"
+            size="md"
+            renderIcon={Send}
+            iconDescription="Send message"
+            tooltipPosition="top"
+            tooltipAlignment="end"
             onClick={handleSubmit}
             disabled={!canSend}
-            className={`p-2.5 rounded-xl transition-all duration-200 ${
-              canSend
-                ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-lg shadow-indigo-200 dark:shadow-indigo-900/30 hover:shadow-xl hover:scale-105'
-                : 'bg-gray-200 dark:bg-gray-700 text-gray-400 cursor-not-allowed'
-            }`}
-            title="Send message"
-          >
-            <Send className="w-5 h-5" />
-          </button>
+          />
         </div>
 
-        {/* Helper text */}
-        <div className="flex items-center justify-between mt-2 px-1">
-          <div className="flex items-center gap-1.5 text-[10px] text-gray-400">
-            <Sparkles className="w-3 h-3" />
-            <span>
-              {selectedModel ? selectedModel.label : 'AI'}
-              {chatOptions.agentMode ? ' · tools on' : ''}
-              {chatOptions.useRag ? ' · curriculum' : ''}
-              {chatOptions.mcpServerIds.length > 0 ? ` · ${chatOptions.mcpServerIds.length} MCP` : ''}
-            </span>
-          </div>
-          <span className="text-[10px] text-gray-400">
-            Press Enter to send, Shift+Enter for new line
+        <div className={styles.hints}>
+          <span className={styles.hint}>
+            <Ai size={16} />
+            {selectedModel ? selectedModel.label : 'Local rules'}
+            {chatOptions.agentMode ? ' · tools on' : ''}
+            {chatOptions.useRag ? ' · curriculum' : ''}
+            {chatOptions.mcpServerIds.length > 0 ? ` · ${chatOptions.mcpServerIds.length} MCP` : ''}
           </span>
+          <span className={styles.hint}>Enter to send · Shift+Enter for a new line</span>
         </div>
       </div>
     </div>

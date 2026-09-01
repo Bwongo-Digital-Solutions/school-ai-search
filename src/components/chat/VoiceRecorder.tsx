@@ -1,6 +1,9 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { Mic, MicOff, Square, Loader2 } from 'lucide-react';
+import { Button, InlineLoading } from '@carbon/react';
+import { Microphone, StopFilled } from '@carbon/react/icons';
 import { supabase } from '@/lib/supabase';
+import styles from './composer-widgets.module.scss';
+import { useNotifications } from '@/contexts/NotificationContext';
 
 interface VoiceRecorderProps {
   onTranscription: (text: string) => void;
@@ -13,6 +16,7 @@ type VoiceToTextResponse = {
 };
 
 const VoiceRecorder: React.FC<VoiceRecorderProps> = ({ onTranscription, onRecordingStateChange }) => {
+  const { notify } = useNotifications();
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [duration, setDuration] = useState(0);
@@ -43,13 +47,13 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({ onTranscription, onRecord
       if (data?.text) {
         onTranscription(data.text);
       } else if (data?.warning) {
-        alert(data.warning);
+        notify.warning('Transcription', data.warning);
       } else {
-        alert('Could not transcribe audio. Please try again or type your message.');
+        notify.error('Could not transcribe that', 'Try again, or type your question instead.');
       }
     } catch (err) {
       console.error('Transcription failed:', err);
-      alert('Voice transcription failed. Please try again.');
+      notify.error('Voice transcription failed', 'Try again, or type your question instead.');
     } finally {
       setIsTranscribing(false);
     }
@@ -107,7 +111,7 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({ onTranscription, onRecord
 
     } catch (err) {
       console.error('Failed to start recording:', err);
-      alert('Could not access microphone. Please check permissions.');
+      notify.error('No access to the microphone', 'Check the browser permissions for this site.');
     }
   }, [onRecordingStateChange, transcribeAudio]);
 
@@ -138,52 +142,54 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({ onTranscription, onRecord
 
   if (isTranscribing) {
     return (
-      <div className="flex items-center gap-2 px-3 py-2 bg-indigo-50 dark:bg-indigo-900/20 rounded-xl">
-        <Loader2 className="w-4 h-4 text-indigo-500 animate-spin" />
-        <span className="text-xs text-indigo-600 dark:text-indigo-400 font-medium">Transcribing...</span>
+      <div className={styles.transcribing}>
+        <InlineLoading description="Transcribing…" />
       </div>
     );
   }
 
   if (isRecording) {
     return (
-      <div className="flex items-center gap-3 px-3 py-2 bg-red-50 dark:bg-red-900/20 rounded-xl border border-red-200 dark:border-red-800">
-        <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
-        
-        {/* Waveform visualization */}
-        <div className="flex items-center gap-[2px] h-6">
+      <div className={styles.recording}>
+        <span className={styles.recordingDot} />
+
+        {/* A live level meter rather than a number: the question while recording is "is it hearing
+            me", and a moving bar answers that without being read. */}
+        <span className={styles.levels} aria-hidden="true">
           {audioLevels.map((level, i) => (
-            <div
+            <span
               key={i}
-              className="w-[3px] bg-red-400 rounded-full transition-all duration-75"
+              className={styles.level}
               style={{ height: `${Math.max(4, level * 24)}px` }}
             />
           ))}
-        </div>
-
-        <span className="text-xs text-red-600 dark:text-red-400 font-mono font-medium">
-          {formatDuration(duration)}
         </span>
 
-        <button
+        <span className={styles.duration}>{formatDuration(duration)}</span>
+
+        <Button
+          hasIconOnly
+          kind="danger"
+          size="sm"
+          renderIcon={StopFilled}
+          iconDescription="Stop recording"
+          tooltipPosition="top"
           onClick={stopRecording}
-          className="p-1.5 bg-red-500 hover:bg-red-600 rounded-lg transition-colors"
-          title="Stop recording"
-        >
-          <Square className="w-3 h-3 text-white fill-white" />
-        </button>
+        />
       </div>
     );
   }
 
   return (
-    <button
+    <Button
+      hasIconOnly
+      kind="ghost"
+      size="md"
+      renderIcon={Microphone}
+      iconDescription="Record a spoken question"
+      tooltipPosition="top"
       onClick={startRecording}
-      className="p-2.5 rounded-xl bg-gray-100 dark:bg-gray-700 hover:bg-indigo-100 dark:hover:bg-indigo-900/30 text-gray-500 hover:text-indigo-600 dark:hover:text-indigo-400 transition-all duration-200 hover:scale-105"
-      title="Record voice message"
-    >
-      <Mic className="w-5 h-5" />
-    </button>
+    />
   );
 };
 

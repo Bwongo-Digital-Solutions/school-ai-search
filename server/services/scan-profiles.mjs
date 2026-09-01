@@ -39,12 +39,23 @@ const ADMIN_SECTIONS = [
   'exam_clearance_grant',
 ];
 
-/* Designations are only meaningful inside their own role; a cook is support staff and an
- * admin who keeps the books is a bursar. An unrecognised pairing falls back to the role. */
+/* Designations are only meaningful inside their own role; a cook is support staff. An
+ * unrecognised pairing falls back to the role's default. */
 const PROFILES = {
   admin: {
     default: ADMIN_SECTIONS,
-    bursar: ADMIN_SECTIONS,
+  },
+  // Runs the school, so the card shows everything an administrator's does.
+  head_teacher: {
+    default: ADMIN_SECTIONS,
+  },
+  // Keeps the books. The same card the bursar designation used to give, now attached to the role
+  // that actually does the job rather than to an administrator account.
+  accountant: {
+    default: ADMIN_SECTIONS,
+  },
+  bursar: {
+    default: ADMIN_SECTIONS,
   },
   teacher: {
     default: [
@@ -72,7 +83,6 @@ const PROFILES = {
 };
 
 export const PROFILE_LABELS = {
-  bursar: 'Bursar',
   askari: 'Gate keeper',
   matron: 'Matron',
   cook: 'Cook',
@@ -80,10 +90,21 @@ export const PROFILE_LABELS = {
 
 export const ROLE_LABELS = {
   admin: 'Administrator',
+  head_teacher: 'Head Teacher',
+  accountant: 'Accountant',
+  bursar: 'Bursar',
   teacher: 'Teacher',
   support_staff: 'Support staff',
 };
 
+/**
+ * Reduce a role and designation to a pairing this module has a card for.
+ *
+ * An unknown role falls back to support staff — the least it can reveal. That is the safe
+ * direction, but it is also silent: a role added to the system and not added to PROFILES above
+ * would be quietly served the fees-only card with no error anywhere. If a card looks wrong for a
+ * role, this is the first place to look.
+ */
 export const normaliseProfile = (role, designation) => {
   const cleanRole = PROFILES[role] ? role : 'support_staff';
   const table = PROFILES[cleanRole];
@@ -105,7 +126,7 @@ export const profileLabel = (role, designation) => {
     : ROLE_LABELS[profile.role] || profile.role;
 };
 
-export const DESIGNATIONS = Object.freeze(['bursar', 'askari', 'matron', 'cook']);
+export const DESIGNATIONS = Object.freeze(['askari', 'matron', 'cook']);
 
 /** Which designations an administrator may assign to an account of a given role. */
 export const designationsForRole = (role) => {

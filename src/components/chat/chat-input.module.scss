@@ -1,0 +1,165 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+// The composer. A white bar under the conversation, separated from it by one line — the same
+// hairline every other boundary in the app is drawn with.
+.composer {
+  border-top: 1px solid $ui-03;
+  background: $ui-02;
+}
+
+.preview {
+  padding: layout.$spacing-04 layout.$spacing-05 0;
+}
+
+.inner {
+  padding: layout.$spacing-04 layout.$spacing-05;
+}
+
+// The row of per-message options above the text box: which model, and what it is allowed to do.
+.options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: layout.$spacing-03;
+  margin-bottom: layout.$spacing-03;
+}
+
+.modelPicker {
+  min-inline-size: min(16rem, 100%);
+  max-inline-size: 24rem;
+  flex: 1 1 16rem;
+}
+
+.mcpPicker {
+  min-inline-size: min(12rem, 100%);
+  flex: 0 1 16rem;
+}
+
+// An on/off option. Carbon has no compact toggle chip, so this is a ghost Button given a selected
+// state: the school's colour on the border and the label, filled faintly. Square, like the rest.
+.toggle {
+  border: 1px solid $ui-03;
+
+  &:global(.cds--btn--ghost) {
+    color: $text-02;
+  }
+}
+
+.toggleOn {
+  border-color: var(--brand-01, #{$brand-01-fallback});
+  background-color: var(--brand-01, #{$brand-01-fallback});
+
+  &:global(.cds--btn--ghost),
+  &:global(.cds--btn--ghost):hover {
+    color: var(--brand-contrast, #ffffff);
+    background-color: var(--brand-02, #{$brand-02-fallback});
+  }
+
+  :global(.cds--btn__icon) {
+    fill: var(--brand-contrast, #ffffff);
+  }
+}
+
+// The text box itself, with its send and attachment controls sitting on the same line.
+.field {
+  display: flex;
+  align-items: flex-end;
+  gap: layout.$spacing-03;
+  background: $field-01;
+  border-block-end: 1px solid $ui-04;
+  padding: 0 layout.$spacing-03;
+
+  &:focus-within {
+    outline: 2px solid var(--brand-01, #{$brand-01-fallback});
+    outline-offset: -2px;
+  }
+}
+
+.textarea {
+  @include type.type-style('body-01');
+  flex: 1;
+  min-inline-size: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+  color: $text-01;
+  min-block-size: 2.5rem;
+  max-block-size: 9.375rem;
+  padding: layout.$spacing-04 layout.$spacing-02;
+
+  &::placeholder {
+    color: $text-03;
+  }
+}
+
+// What the next message will actually do, and how to send it.
+.hints {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: layout.$spacing-05;
+  flex-wrap: wrap;
+  margin-top: layout.$spacing-03;
+}
+
+.hint {
+  @include type.type-style('label-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-02;
+  color: $text-03;
+
+  svg {
+    fill: currentColor;
+  }
+}
+
+// One model in the picker's list: name and readiness on the first line, provider and id below.
+.modelRow {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-01;
+  min-inline-size: 0;
+}
+
+.modelName {
+  @include type.type-style('body-compact-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  color: $text-01;
+}
+
+.modelMeta {
+  @include type.type-style('label-01');
+  color: $text-03;
+}
+
+:global([data-carbon-theme='g100']) {
+  .composer {
+    background: $ui-02-dark;
+    border-top-color: $ui-03-dark;
+  }
+
+  .field {
+    background: $ui-03-dark;
+  }
+
+  .textarea,
+  .modelName {
+    color: #f4f4f4;
+  }
+
+  .toggle {
+    border-color: $ui-03-dark;
+  }
+
+  .hint,
+  .modelMeta,
+  .textarea::placeholder {
+    color: $text-03-dark;
+  }
+}

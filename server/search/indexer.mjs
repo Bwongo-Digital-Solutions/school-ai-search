@@ -21,9 +21,12 @@ import {
   waitForTask,
 } from './meili.mjs';
 import { DEFAULT_TENANT } from '../db/tenants.mjs';
+import { FINANCE_ROLES, TEACHING_ROLES } from '../auth/roles.mjs';
 
-const TEACHING = ['admin', 'teacher'];
-const ADMIN_ONLY = ['admin'];
+// Which roles an index's documents may be returned to. A role missing from every index gets zero
+// hits with a 200 — indistinguishable from "nothing matched" — so these come from the shared lists.
+const TEACHING = TEACHING_ROLES;
+const ADMIN_ONLY = FINANCE_ROLES;
 
 /**
  * The index definitions. `build` reads rows from Postgres — which stays the system of record — and

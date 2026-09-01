@@ -1,33 +1,38 @@
 import React from 'react';
+import styles from './stat-tile.module.scss';
 
-/** Small labelled metric card, matching the tiles on the fee status and records screens. */
-const StatTile = ({
-  label,
-  value,
-  icon: Icon,
-  tone = 'default',
-}: {
+type Tone = 'default' | 'warning' | 'danger' | 'success';
+
+interface StatTileProps {
   label: string;
   value: string | number;
+  /** An icon component — Carbon's or lucide's; both take a numeric `size`. */
   icon: React.ElementType;
-  tone?: 'default' | 'warning' | 'danger' | 'success';
-}) => {
-  const iconTone = {
-    default: 'text-indigo-500',
-    warning: 'text-amber-500',
-    danger: 'text-red-500',
-    success: 'text-emerald-500',
-  }[tone];
+  /** Colours the icon, to mark the figure worth watching. Never the number itself. */
+  tone?: Tone;
+}
 
-  return (
-    <div className="bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 rounded-lg px-4 py-3">
-      <div className="flex items-center gap-2 text-xs text-gray-400">
-        <Icon className={`w-3.5 h-3.5 ${iconTone}`} />
-        {label}
-      </div>
-      <p className="text-lg font-bold text-gray-800 dark:text-white mt-1">{value}</p>
+/**
+ * One labelled number, in the band across the top of a screen.
+ *
+ * Used on ten screens, which is the point: a fee total, a class average and an error count all look
+ * the same, so a reader learns to read the band once. Follows the OpenMRS metric card — hairline
+ * border, grey label, the figure in `heading-04`.
+ */
+export const StatTile: React.FC<StatTileProps> = ({ label, value, icon: Icon, tone = 'default' }) => (
+  <div className={`${styles.tile} ${styles[tone]}`}>
+    <div className={styles.label}>
+      <Icon size={16} />
+      {label}
     </div>
-  );
-};
+    <p className={styles.value}>{value}</p>
+  </div>
+);
+
+/** The row a set of StatTiles sits in: equal widths, wrapping, never narrower than legible. */
+export const StatRow: React.FC<{ children: React.ReactNode; className?: string }> = ({
+  children,
+  className,
+}) => <div className={`${styles.row} ${className || ''}`}>{children}</div>;
 
 export default StatTile;

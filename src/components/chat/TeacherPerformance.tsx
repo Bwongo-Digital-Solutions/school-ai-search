@@ -1,20 +1,31 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  AlertTriangle,
-  BookOpen,
-  CalendarCheck,
-  CheckCircle2,
-  ClipboardList,
-  GraduationCap,
-  Loader2,
-  RefreshCw,
-  UserCheck,
-  Users,
-} from 'lucide-react';
+  Button,
+  InlineLoading,
+  InlineNotification,
+  Select,
+  SelectItem,
+  Slider,
+  TextInput,
+} from '@carbon/react';
+import {
+  Book,
+  Calendar,
+  CheckmarkFilled,
+  Education,
+  ListChecked,
+  Renew,
+  UserFollow,
+  UserMultiple,
+} from '@carbon/react/icons';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
+import { useSettings } from '@/contexts/SettingsContext';
 import { academicYear, TERMS } from '@/lib/format';
-import StatTile from '@/components/common/StatTile';
+import { classAndSection } from '@/lib/classLevels';
+import { CardHeader, PageHeader, StatRow, StatTile, WidgetCard } from '@/components/common';
+import workspace from './workspace.module.scss';
+import styles from './teacher-performance.module.scss';
 
 /* How a teacher's work is attributed. 'allocated' means it was read off the classes they are
    assigned to; 'inferred' means nothing assigns them anything, so it was taken from the work
@@ -58,57 +69,80 @@ interface Summary {
 }
 
 const Section = ({
-  title, subtitle, icon: Icon, right, children,
+  title,
+  subtitle,
+  right,
+  children,
 }: {
-  title: string; subtitle?: string; icon: React.ElementType;
-  right?: React.ReactNode; children: React.ReactNode;
+  title: string;
+  subtitle?: string;
+  right?: React.ReactNode;
+  children: React.ReactNode;
 }) => (
-  <div className="bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 rounded-lg overflow-hidden">
-    <div className="px-4 py-3 border-b border-gray-100 dark:border-gray-700 flex items-center gap-2">
-      <Icon className="w-4 h-4 text-indigo-500" />
-      <div className="flex-1 min-w-0">
-        <h3 className="text-sm font-semibold text-gray-800 dark:text-white">{title}</h3>
-        {subtitle ? <p className="text-xs text-gray-400">{subtitle}</p> : null}
-      </div>
+  <WidgetCard>
+    <CardHeader title={title}>
+      {subtitle && <span className={workspace.note}>{subtitle}</span>}
       {right}
-    </div>
+    </CardHeader>
     {children}
-  </div>
+  </WidgetCard>
 );
 
 const Empty = ({ children }: { children: React.ReactNode }) => (
-  <p className="px-4 py-6 text-xs text-gray-400 text-center">{children}</p>
+  <p className={workspace.empty}>{children}</p>
+);
+
+/** A count with its label under it, for the tallies inside each card. */
+const Tally = ({ label, value }: { label: string; value: React.ReactNode }) => (
+  <div className={workspace.tallyItem}>
+    <p className={workspace.tallyValue}>{value}</p>
+    <p className={workspace.tallyLabel}>{label}</p>
+  </div>
 );
 
 /** Says plainly where a figure came from, so an estimate is never read as a record. */
 const SourceNote = ({ source }: { source: Source }) => {
   if (source === 'allocated') return null;
-  const text = source === 'inferred'
-    ? 'Estimated: no classes are assigned to this teacher, so this counts the registers they '
-      + 'called rather than their own students.'
-    : 'Nothing is assigned to this teacher, so no marks can be attributed to them.';
+  const text =
+    source === 'inferred'
+      ? 'No classes are assigned to this teacher, so this counts the registers they called rather '
+        + 'than their own students.'
+      : 'Nothing is assigned to this teacher, so no marks can be attributed to them.';
   return (
-    <div className="px-4 py-2 bg-amber-50 dark:bg-amber-900/20 border-b border-amber-100 dark:border-amber-900/40 flex items-start gap-2">
-      <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
-      <p className="text-xs text-amber-700 dark:text-amber-300">{text}</p>
+    <div className={styles.sourceNote}>
+      <InlineNotification
+        kind="info"
+        title={source === 'inferred' ? 'Estimated' : 'Not attributable'}
+        subtitle={text}
+        lowContrast
+        hideCloseButton
+      />
     </div>
   );
 };
 
-/** A pass/fail bar. One row per subject, weakest first, so the problem subject is at the top. */
+/**
+ * A pass/fail bar. Red across the full width with green over the passes, so it reads as "how much
+ * of this got through" rather than as two colours competing for the same space.
+ */
 const PassBar = ({ passed, failed }: { passed: number; failed: number }) => {
   const total = passed + failed;
   if (!total) return null;
-  const pct = (passed / total) * 100;
   return (
-    <div className="h-2 rounded-full bg-red-200 dark:bg-red-900/50 overflow-hidden" title={`${passed} passed, ${failed} failed`}>
-      <div className="h-full bg-emerald-500" style={{ width: `${pct}%` }} />
+    <div className={styles.passBar} title={`${passed} passed, ${failed} failed`}>
+      <div className={styles.passBarFill} style={{ width: `${(passed / total) * 100}%` }} />
     </div>
   );
 };
 
-const TeacherPerformance: React.FC = () => {
+/**
+ * `embedded` drops the page header and the screen's own background, for when this is shown as a
+ * section of Monitoring rather than as a screen of its own — two page titles stacked would read as
+ * two screens.
+ */
+const TeacherPerformance: React.FC<{ embedded?: boolean }> = ({ embedded }) => {
   const { isAdmin } = useAuth();
+  const { settings } = useSettings();
 
   const [staff, setStaff] = useState<StaffRow[]>([]);
   const [selected, setSelected] = useState('');
@@ -190,104 +224,123 @@ const TeacherPerformance: React.FC = () => {
   const chosen = useMemo(() => staff.find((row) => row.id === selected), [staff, selected]);
 
   return (
-    <div className="flex flex-col h-full bg-gradient-to-b from-gray-50/50 to-white dark:from-gray-900/50 dark:to-gray-900">
-      <div className="px-6 py-4 border-b border-gray-100 dark:border-gray-700 bg-white dark:bg-gray-800">
-        <div className="flex items-center gap-2">
-          <GraduationCap className="w-5 h-5 text-indigo-500" />
-          <div className="flex-1 min-w-0">
-            <h2 className="text-base font-semibold text-gray-800 dark:text-white">Teacher performance</h2>
-            <p className="text-xs text-gray-400">
-              Lessons, attendance and results for the classes a teacher is assigned to.
-            </p>
-          </div>
-          <button
+    <div className={embedded ? styles.embedded : workspace.screen}>
+      {!embedded && (
+        <PageHeader title="Teacher performance" illustration={<Education size={32} />}>
+          <Button
+            kind="ghost"
+            size="sm"
+            renderIcon={Renew}
             onClick={() => loadSummary(selected, passMark)}
             disabled={loading}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 disabled:opacity-50"
           >
-            {loading
-              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              : <RefreshCw className="w-3.5 h-3.5" />}
             Refresh
-          </button>
-        </div>
+          </Button>
+        </PageHeader>
+      )}
 
-        <div className="mt-3 flex flex-wrap items-end gap-3">
-          <label className="text-xs text-gray-500">
-            <span className="block mb-1">Teacher</span>
-            <select
-              value={selected}
-              onChange={(e) => setSelected(e.target.value)}
-              disabled={!isAdmin}
-              className="px-2 py-1.5 rounded-md border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-700 text-sm text-gray-800 dark:text-white disabled:opacity-60"
+      <div className={workspace.controls}>
+        <div className={styles.controls}>
+          {embedded && (
+            <Button
+              kind="ghost"
+              size="sm"
+              renderIcon={Renew}
+              onClick={() => loadSummary(selected, passMark)}
+              disabled={loading}
             >
-              {staff.map((row) => (
-                <option key={row.id} value={row.id}>
-                  {row.display_name}{row.allocation_rows ? '' : ' — nothing assigned'}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="text-xs text-gray-500">
-            <span className="block mb-1">Pass mark</span>
-            <div className="flex items-center gap-2">
-              <input
-                type="range" min={0} max={100} step={5}
-                value={passMark}
-                onChange={(e) => setPassMark(Number(e.target.value))}
-                className="w-32"
+              Refresh
+            </Button>
+          )}
+          <Select
+            id="teacher-picker"
+            className={styles.teacherPicker}
+            labelText="Teacher"
+            value={selected}
+            disabled={!isAdmin}
+            onChange={(event) => setSelected(event.target.value)}
+          >
+            {staff.map((row) => (
+              <SelectItem
+                key={row.id}
+                value={row.id}
+                text={`${row.display_name}${row.allocation_rows ? '' : ' — nothing assigned'}`}
               />
-              <span className="text-sm font-semibold text-gray-800 dark:text-white w-10">{passMark}%</span>
-            </div>
-          </label>
+            ))}
+          </Select>
+
+          {/* The pass mark is a judgement, not a fact, so it is adjustable here rather than fixed
+              in the data — a school that marks out of 40 reads a different line as "passing". */}
+          <Slider
+            id="pass-mark"
+            className={styles.slider}
+            labelText="Pass mark"
+            min={0}
+            max={100}
+            step={5}
+            value={passMark}
+            onChange={({ value }) => setPassMark(value)}
+          />
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto px-6 py-4 space-y-4">
-        {error ? (
-          <div className="flex items-center gap-2 px-4 py-3 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900/40 text-red-600 dark:text-red-300 text-xs">
-            <AlertTriangle className="w-4 h-4 shrink-0" />
-            {error}
-          </div>
-        ) : null}
+      <div className={`${workspace.body} ${workspace.bodyTop}`}>
+        {error && (
+          <InlineNotification
+            kind="error"
+            title="Could not load these figures"
+            subtitle={error}
+            onCloseButtonClick={() => setError('')}
+            lowContrast
+          />
+        )}
 
-        {notice ? (
-          <div className="flex items-center gap-2 px-4 py-3 rounded-lg bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-900/40 text-emerald-700 dark:text-emerald-300 text-xs">
-            <CheckCircle2 className="w-4 h-4 shrink-0" />
-            {notice}
-          </div>
-        ) : null}
+        {notice && (
+          <InlineNotification
+            kind="success"
+            title={notice}
+            onCloseButtonClick={() => setNotice('')}
+            lowContrast
+          />
+        )}
 
-        {loading && !data ? (
-          <div className="flex items-center justify-center py-16 text-gray-400 text-sm gap-2">
-            <Loader2 className="w-4 h-4 animate-spin" /> Loading these figures…
+        {loading && !data && (
+          <div className={workspace.loading}>
+            <InlineLoading description="Loading these figures…" />
           </div>
-        ) : null}
+        )}
 
-        {data ? (
+        {data && (
           <>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <StatTile label="Lessons planned" value={data.lessons.total} icon={ClipboardList} />
-              <StatTile label="Delivered" value={data.lessons.delivered} icon={CheckCircle2} tone="success" />
+            <StatRow>
+              <StatTile label="Lessons planned" value={data.lessons.total} icon={ListChecked} />
+              <StatTile
+                label="Delivered"
+                value={data.lessons.delivered}
+                icon={CheckmarkFilled}
+                tone="success"
+              />
               <StatTile
                 label="Attendance"
                 value={data.attendance.present_rate === null ? '—' : `${data.attendance.present_rate}%`}
-                icon={CalendarCheck}
-                tone={data.attendance.present_rate !== null && data.attendance.present_rate < 80 ? 'warning' : 'default'}
+                icon={Calendar}
+                tone={
+                  data.attendance.present_rate !== null && data.attendance.present_rate < 80
+                    ? 'warning'
+                    : 'default'
+                }
               />
               <StatTile
                 label={`Passing at ${data.pass_mark}%`}
                 value={data.results.pass_rate === null ? '—' : `${data.results.pass_rate}%`}
-                icon={GraduationCap}
+                icon={Education}
                 tone={data.results.pass_rate !== null && data.results.pass_rate < 50 ? 'danger' : 'success'}
               />
-            </div>
+            </StatRow>
 
             <Section
               title="Results"
-              subtitle={`${data.results.entries} mark(s) across this teacher's subjects`}
-              icon={GraduationCap}
+              subtitle={`${data.results.entries} mark${data.results.entries === 1 ? '' : 's'} across this teacher's subjects`}
             >
               <SourceNote source={data.results.source} />
               {data.results.entries === 0 ? (
@@ -298,27 +351,20 @@ const TeacherPerformance: React.FC = () => {
                 </Empty>
               ) : (
                 <>
-                  <div className="grid grid-cols-3 gap-2 px-4 py-3 border-b border-gray-100 dark:border-gray-700">
-                    {[
-                      ['Passed', data.results.passed, 'text-emerald-600'],
-                      ['Failed', data.results.failed, 'text-red-600'],
-                      ['Average', `${data.results.average_percent}%`, 'text-gray-800 dark:text-white'],
-                    ].map(([label, value, tone]) => (
-                      <div key={String(label)}>
-                        <p className={`text-lg font-bold ${tone}`}>{value}</p>
-                        <p className="text-[10px] uppercase tracking-wide text-gray-400">{label}</p>
-                      </div>
-                    ))}
+                  <div className={workspace.tally}>
+                    <Tally label="Passed" value={data.results.passed} />
+                    <Tally label="Failed" value={data.results.failed} />
+                    <Tally label="Average" value={`${data.results.average_percent}%`} />
                   </div>
-                  <ul className="divide-y divide-gray-100 dark:divide-gray-700">
+                  <ul className={workspace.list}>
                     {data.results.by_subject.map((row) => (
-                      <li key={row.subject} className="px-4 py-3">
-                        <div className="flex items-center gap-3 mb-1.5">
-                          <span className="flex-1 text-sm text-gray-800 dark:text-white">{row.subject}</span>
-                          <span className="text-xs text-gray-400">{row.average_percent}% avg</span>
-                          <span className="text-xs font-medium text-emerald-600">{row.passed}</span>
-                          <span className="text-xs text-gray-300">/</span>
-                          <span className="text-xs font-medium text-red-600">{row.failed}</span>
+                      <li key={row.subject} className={styles.subject}>
+                        <div className={styles.subjectHead}>
+                          <span className={styles.subjectName}>{row.subject}</span>
+                          <span className={styles.subjectStat}>{row.average_percent}% avg</span>
+                          <span className={`${styles.subjectStat} ${styles.passed}`}>{row.passed}</span>
+                          <span className={styles.subjectStat}>/</span>
+                          <span className={`${styles.subjectStat} ${styles.failed}`}>{row.failed}</span>
                         </div>
                         <PassBar passed={row.passed} failed={row.failed} />
                       </li>
@@ -328,41 +374,27 @@ const TeacherPerformance: React.FC = () => {
               )}
             </Section>
 
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <Section title="Attendance" subtitle="Registers covering this teacher's students" icon={CalendarCheck}>
+            <div className={workspace.grid2}>
+              <Section title="Attendance" subtitle="Registers covering this teacher's students">
                 <SourceNote source={data.attendance.source} />
                 {data.attendance.total === 0 ? (
                   <Empty>No registers have been called for these students yet.</Empty>
                 ) : (
-                  <div className="grid grid-cols-4 gap-2 px-4 py-4">
-                    {[
-                      ['Present', data.attendance.present],
-                      ['Absent', data.attendance.absent],
-                      ['Late', data.attendance.late],
-                      ['Excused', data.attendance.excused],
-                    ].map(([label, value]) => (
-                      <div key={String(label)}>
-                        <p className="text-lg font-bold text-gray-800 dark:text-white">{value}</p>
-                        <p className="text-[10px] uppercase tracking-wide text-gray-400">{label}</p>
-                      </div>
-                    ))}
+                  <div className={workspace.tally}>
+                    <Tally label="Present" value={data.attendance.present} />
+                    <Tally label="Absent" value={data.attendance.absent} />
+                    <Tally label="Late" value={data.attendance.late} />
+                    <Tally label="Excused" value={data.attendance.excused} />
                   </div>
                 )}
               </Section>
 
-              <Section title="Lessons" subtitle="Plans written and periods timetabled" icon={BookOpen}>
-                <div className="grid grid-cols-4 gap-2 px-4 py-4">
-                  {[
-                    ['Draft', data.lessons.draft],
-                    ['Approved', data.lessons.approved],
-                    ['Delivered', data.lessons.delivered],
-                    ['Periods', data.lessons.timetabled_periods],
-                  ].map(([label, value]) => (
-                    <div key={String(label)}>
-                      <p className="text-lg font-bold text-gray-800 dark:text-white">{value}</p>
-                      <p className="text-[10px] uppercase tracking-wide text-gray-400">{label}</p>
-                    </div>
-                  ))}
+              <Section title="Lessons" subtitle="Plans written and periods timetabled">
+                <div className={workspace.tally}>
+                  <Tally label="Draft" value={data.lessons.draft} />
+                  <Tally label="Approved" value={data.lessons.approved} />
+                  <Tally label="Delivered" value={data.lessons.delivered} />
+                  <Tally label="Periods" value={data.lessons.timetabled_periods} />
                 </div>
               </Section>
             </div>
@@ -370,80 +402,93 @@ const TeacherPerformance: React.FC = () => {
             <Section
               title="Classes taught"
               subtitle={chosen ? `${chosen.display_name} · ${chosen.auth_email}` : undefined}
-              icon={Users}
             >
               {data.classes.length === 0 ? (
                 <Empty>Nothing is assigned to this teacher yet.</Empty>
               ) : (
-                <ul className="divide-y divide-gray-100 dark:divide-gray-700">
+                <ul className={workspace.list}>
                   {data.classes.map((row) => (
-                    <li key={`${row.grade_level}${row.class_section}`} className="px-4 py-3 flex items-center gap-3">
-                      <UserCheck className="w-4 h-4 text-indigo-400 shrink-0" />
-                      <span className="text-sm text-gray-800 dark:text-white">
-                        Grade {row.grade_level}{row.class_section}
+                    <li key={`${row.grade_level}${row.class_section}`} className={styles.classRow}>
+                      <UserFollow size={16} />
+                      <span className={styles.className}>
+                        {classAndSection(settings.school_level, row.grade_level, row.class_section)}
                       </span>
-                      <span className="flex-1 text-xs text-gray-400">{row.subjects.join(', ')}</span>
-                      <span className="text-xs text-gray-500">{row.students} student(s)</span>
+                      <span className={styles.classSubjects}>{row.subjects.join(', ')}</span>
+                      <span className={styles.subjectStat}>
+                        {row.students} student{row.students === 1 ? '' : 's'}
+                      </span>
                     </li>
                   ))}
                 </ul>
               )}
 
-              {isAdmin ? (
-                <div className="px-4 py-3 border-t border-gray-100 dark:border-gray-700 bg-gray-50/60 dark:bg-gray-900/30">
-                  <p className="text-xs text-gray-500 mb-2">
+              {isAdmin && (
+                <div className={styles.assign}>
+                  <p className={styles.assignNote}>
                     Assign a class. Until a teacher has one, their marks cannot be attributed to them.
                   </p>
-                  <div className="flex flex-wrap items-end gap-2">
-                    <input
+                  <div className={styles.assignFields}>
+                    <TextInput
+                      id="assign-subject"
+                      className={styles.fieldSubject}
+                      labelText="Subject"
+                      size="sm"
                       value={subject}
                       onChange={(e) => setSubject(e.target.value)}
-                      placeholder="Subject"
-                      className="px-2 py-1.5 w-36 rounded-md border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-700 text-sm"
                     />
-                    <input
+                    <TextInput
+                      id="assign-grade"
+                      className={styles.fieldNarrow}
+                      labelText="Grade"
+                      size="sm"
+                      inputMode="numeric"
                       value={gradeLevel}
                       onChange={(e) => setGradeLevel(e.target.value)}
-                      placeholder="Grade"
-                      inputMode="numeric"
-                      className="px-2 py-1.5 w-20 rounded-md border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-700 text-sm"
                     />
-                    <input
+                    <TextInput
+                      id="assign-section"
+                      className={styles.fieldNarrow}
+                      labelText="Section"
+                      size="sm"
                       value={classSection}
                       onChange={(e) => setClassSection(e.target.value)}
-                      placeholder="Section"
-                      className="px-2 py-1.5 w-20 rounded-md border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-700 text-sm"
                     />
-                    <select
+                    <Select
+                      id="assign-term"
+                      className={styles.fieldTerm}
+                      labelText="Term"
+                      size="sm"
                       value={term}
                       onChange={(e) => setTerm(e.target.value)}
-                      className="px-2 py-1.5 rounded-md border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-700 text-sm"
                     >
-                      {TERMS.map((t) => <option key={t} value={t}>{t}</option>)}
-                    </select>
-                    <input
+                      {TERMS.map((t) => (
+                        <SelectItem key={t} value={t} text={t} />
+                      ))}
+                    </Select>
+                    <TextInput
+                      id="assign-year"
+                      className={styles.fieldYear}
+                      labelText="Year"
+                      size="sm"
                       value={year}
                       onChange={(e) => setYear(e.target.value)}
-                      placeholder="Year"
-                      className="px-2 py-1.5 w-24 rounded-md border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-700 text-sm"
                     />
-                    <button
+                    <Button
+                      kind="primary"
+                      size="sm"
                       onClick={allocate}
                       disabled={saving || !subject.trim() || !gradeLevel.trim() || !classSection.trim()}
-                      className="px-3 py-1.5 rounded-md bg-indigo-600 text-white text-xs font-medium disabled:opacity-50"
                     >
                       {saving ? 'Assigning…' : 'Assign'}
-                    </button>
+                    </Button>
                   </div>
                 </div>
-              ) : null}
+              )}
             </Section>
           </>
-        ) : null}
+        )}
 
-        {!loading && !data && !error ? (
-          <Empty>No teaching staff to report on yet.</Empty>
-        ) : null}
+        {!loading && !data && !error && <Empty>No teaching staff to report on yet.</Empty>}
       </div>
     </div>
   );

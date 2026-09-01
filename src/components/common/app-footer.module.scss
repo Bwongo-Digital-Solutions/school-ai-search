@@ -1,0 +1,42 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+// The product footer, on every screen. Deliberately the quietest thing in the interface: it exists
+// so a support call can start with a version number, not to be read.
+.footer {
+  flex-shrink: 0;
+  border-block-start: 1px solid $ui-03;
+  background: $ui-02;
+  padding: layout.$spacing-02 layout.$spacing-05;
+}
+
+.line {
+  @include type.type-style('label-01');
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: layout.$spacing-02 layout.$spacing-03;
+  color: $text-03;
+}
+
+.product {
+  color: $text-02;
+  font-weight: 600;
+}
+
+:global([data-carbon-theme='g100']) {
+  .footer {
+    background: $ui-02-dark;
+    border-block-start-color: $ui-03-dark;
+  }
+
+  .line {
+    color: $text-03-dark;
+  }
+
+  .product {
+    color: $text-02-dark;
+  }
+}

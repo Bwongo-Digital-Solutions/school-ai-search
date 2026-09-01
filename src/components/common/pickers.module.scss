@@ -1,0 +1,116 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+.label {
+  @include type.type-style('label-01');
+  color: $text-02;
+  display: block;
+  margin-block-end: layout.$spacing-03;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-04;
+}
+
+// The preview. Sized to the shape of the thing it holds — a square for a logo, a portrait for a
+// student photo — so an upload lands looking like what it will be on the printed document.
+.preview {
+  object-fit: contain;
+  background: #ffffff;
+  border: 1px solid $ui-03;
+  flex-shrink: 0;
+}
+
+.previewPhoto {
+  object-fit: cover;
+}
+
+.placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border: 1px dashed $ui-04;
+  color: $text-03;
+
+  svg {
+    fill: currentColor;
+  }
+}
+
+.buttons {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: layout.$spacing-02;
+}
+
+// The file input is hidden and driven by a Carbon Button, because Carbon has no file control that
+// takes a preview alongside it and a bare `<input type=file>` is the one control browsers refuse to
+// let anyone style.
+.fileInput {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.hint {
+  @include type.type-style('helper-text-01');
+  color: $text-03;
+  margin: layout.$spacing-02 0 0;
+}
+
+// Colour: the swatch and the hex value, side by side, because people arrive with one or the other.
+.colourRow {
+  display: flex;
+  align-items: flex-end;
+  gap: layout.$spacing-03;
+}
+
+.swatch {
+  inline-size: layout.$spacing-09;
+  block-size: 2.5rem;
+  padding: 0;
+  border: 1px solid $ui-03;
+  background: transparent;
+  cursor: pointer;
+  flex-shrink: 0;
+
+  &::-webkit-color-swatch-wrapper {
+    padding: 2px;
+  }
+
+  &::-webkit-color-swatch {
+    border: none;
+  }
+}
+
+.hex {
+  flex: 1;
+  min-inline-size: 0;
+}
+
+:global([data-carbon-theme='g100']) {
+  .label {
+    color: $text-02-dark;
+  }
+
+  .hint,
+  .placeholder {
+    color: $text-03-dark;
+  }
+
+  .preview,
+  .swatch {
+    border-color: $ui-03-dark;
+  }
+}

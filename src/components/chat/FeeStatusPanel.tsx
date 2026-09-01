@@ -1,44 +1,69 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, CheckCircle2, Clock, FileDown, Loader2, Receipt, RefreshCw, ScanLine, Search, Wallet, X } from 'lucide-react';
+import {
+  Button,
+  Dropdown,
+  InlineLoading,
+  InlineNotification,
+  Search as CarbonSearch,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  Tag,
+} from '@carbon/react';
+import {
+  Checkmark,
+  CheckmarkFilled,
+  Close,
+  DocumentPdf,
+  Receipt,
+  Renew,
+  ScanAlt,
+  Time,
+  Wallet,
+  Warning,
+} from '@carbon/react/icons';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
+import { useNotifications } from '@/contexts/NotificationContext';
+import { useSettings } from '@/contexts/SettingsContext';
 import { feeDocumentUrl } from '@/lib/fees';
 import { downloadFromUrl } from '@/lib/download';
 import { formatAmount, formatDate, todayIso } from '@/lib/format';
-import StatTile from '@/components/common/StatTile';
+import { classAndSection } from '@/lib/classLevels';
+import {
+  AccessDenied,
+  CardHeader,
+  EmptyState,
+  PageHeader,
+  StatRow,
+  StatTile,
+  TableSkeleton,
+  WidgetCard,
+} from '@/components/common';
 import StudentIdScanner from './StudentIdScanner';
+import styles from './workspace.module.scss';
 import type { FeeStatus, StudentFeeStatus } from '@/types/fees';
 
-const STATUS_STYLES: Record<FeeStatus, { label: string; badge: string; icon: React.ElementType }> = {
-  cleared: {
-    label: 'Cleared',
-    badge: 'bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800',
-    icon: CheckCircle2,
-  },
-  partial: {
-    label: 'Part Paid',
-    badge: 'bg-amber-50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-800',
-    icon: Clock,
-  },
-  unpaid: {
-    label: 'Unpaid',
-    badge: 'bg-orange-50 dark:bg-orange-900/20 text-orange-600 dark:text-orange-400 border-orange-200 dark:border-orange-800',
-    icon: Clock,
-  },
-  overdue: {
-    label: 'Overdue',
-    badge: 'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 border-red-200 dark:border-red-800',
-    icon: AlertTriangle,
-  },
-  no_invoices: {
-    label: 'No Invoice',
-    badge: 'bg-gray-50 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border-gray-200 dark:border-gray-700',
-    icon: Receipt,
-  },
+type TagType = 'green' | 'teal' | 'magenta' | 'red' | 'cool-gray';
+
+const STATUS_STYLES: Record<FeeStatus, { label: string; tag: TagType; icon: React.ElementType }> = {
+  cleared: { label: 'Cleared', tag: 'green', icon: CheckmarkFilled },
+  partial: { label: 'Part paid', tag: 'teal', icon: Time },
+  unpaid: { label: 'Unpaid', tag: 'magenta', icon: Time },
+  overdue: { label: 'Overdue', tag: 'red', icon: Warning },
+  no_invoices: { label: 'No invoice', tag: 'cool-gray', icon: Receipt },
 };
+
+const STATUS_KEYS = Object.keys(STATUS_STYLES) as FeeStatus[];
+const ALL_STATUSES = 'all' as const;
 
 const FeeStatusPanel: React.FC = () => {
   const { isAuthenticated, isAdmin, user } = useAuth();
+  const { settings } = useSettings();
+  const { notify } = useNotifications();
   const [rows, setRows] = useState<StudentFeeStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -67,7 +92,7 @@ const FeeStatusPanel: React.FC = () => {
     try {
       await downloadFromUrl(feeDocumentUrl('/api/fees/report.pdf', user), `financial-report-${todayIso()}.pdf`);
     } catch (err) {
-      alert(`Failed to generate report: ${err instanceof Error ? err.message : 'Unexpected error'}`);
+      notify.error('Could not build the financial report', err instanceof Error ? err.message : 'Unexpected error');
     }
   }, [user]);
 
@@ -121,200 +146,198 @@ const FeeStatusPanel: React.FC = () => {
 
   if (!isAuthenticated) {
     return (
-      <div className="flex flex-col items-center justify-center h-full bg-gray-50 dark:bg-gray-900 p-8 text-center">
-        <Wallet className="w-10 h-10 text-indigo-500 mb-3" />
-        <h2 className="text-xl font-bold text-gray-800 dark:text-white">Sign In Required</h2>
-        <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Sign in to view school fees payment status.</p>
-      </div>
+      <AccessDenied
+        title="Sign in to continue"
+        message="School fees payment status is available to signed-in staff."
+      />
     );
   }
 
+  const scannedStyle = scanned ? STATUS_STYLES[scanned.status] ?? STATUS_STYLES.no_invoices : null;
+
   return (
-    <div className="flex flex-col h-full bg-gradient-to-b from-gray-50/50 to-white dark:from-gray-900/50 dark:to-gray-900">
-      <div className="px-6 pt-6 pb-4 border-b border-gray-100 dark:border-gray-800">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h2 className="text-xl font-bold text-gray-800 dark:text-white flex items-center gap-2">
-              <Wallet className="w-6 h-6 text-indigo-500" />
-              School Fees Status
-            </h2>
-            <p className="text-xs text-gray-400 mt-0.5">
-              Payment status only — no contact, academic, medical, or discipline records are shown here.
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setScannerOpen(true)}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 text-white text-sm font-medium hover:shadow-lg transition-all"
-            >
-              <ScanLine className="w-4 h-4" />
-              Scan Student ID
-            </button>
-            {isAdmin && (
-              <button
-                onClick={downloadReport}
-                className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50"
-              >
-                <FileDown className="w-4 h-4" />
-                Financial Report
-              </button>
-            )}
-            <button
-              onClick={loadFeeStatus}
-              disabled={loading}
-              className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50"
-            >
-              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-              Refresh
-            </button>
-          </div>
-        </div>
+    <div className={styles.screen}>
+      <PageHeader title="School fees status" illustration={<Wallet size={32} />}>
+        <Button kind="primary" size="sm" renderIcon={ScanAlt} onClick={() => setScannerOpen(true)}>
+          Scan student ID
+        </Button>
+        {isAdmin && (
+          <Button kind="ghost" size="sm" renderIcon={DocumentPdf} onClick={downloadReport}>
+            Financial report
+          </Button>
+        )}
+        <Button kind="ghost" size="sm" renderIcon={Renew} onClick={loadFeeStatus} disabled={loading}>
+          Refresh
+        </Button>
+      </PageHeader>
 
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mt-4">
-          <StatTile label="Outstanding" value={formatAmount(totals.outstanding, totals.currency)} icon={Wallet} />
-          <StatTile label="Collected" value={formatAmount(totals.collected, totals.currency)} icon={Receipt} />
-          <StatTile label="Overdue Students" value={String(totals.overdue)} icon={AlertTriangle} />
-          <StatTile label="Cleared Students" value={String(totals.cleared)} icon={CheckCircle2} />
-        </div>
+      <div className={styles.controls}>
+        <StatRow>
+          <StatTile
+            label="Outstanding"
+            value={formatAmount(totals.outstanding, totals.currency)}
+            icon={Wallet}
+            tone={totals.outstanding > 0 ? 'warning' : 'success'}
+          />
+          <StatTile label="Collected" value={formatAmount(totals.collected, totals.currency)} icon={Receipt} tone="success" />
+          <StatTile label="Overdue students" value={String(totals.overdue)} icon={Warning} tone={totals.overdue > 0 ? 'danger' : 'default'} />
+          <StatTile label="Cleared students" value={String(totals.cleared)} icon={Checkmark} tone="success" />
+        </StatRow>
 
-        <div className="flex flex-wrap items-center gap-3 mt-4">
-          <div className="relative flex-1 min-w-[220px]">
-            <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
-            <input
-              value={search}
-              onChange={event => setSearch(event.target.value)}
-              placeholder="Search by student name or number"
-              className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
-            />
-          </div>
-          <select
-            value={statusFilter}
-            onChange={event => setStatusFilter(event.target.value as FeeStatus | 'all')}
-            className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
-          >
-            <option value="all">All statuses</option>
-            {(Object.keys(STATUS_STYLES) as FeeStatus[]).map(status => (
-              <option key={status} value={status}>{STATUS_STYLES[status].label}</option>
-            ))}
-          </select>
+        <div className={styles.toolbar}>
+          <CarbonSearch
+            id="fee-search"
+            size="lg"
+            labelText="Search students"
+            placeholder="Search by student name or number…"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            onClear={() => setSearch('')}
+          />
+          <Dropdown
+            id="fee-status-filter"
+            className={styles.filter}
+            size="lg"
+            titleText="Status"
+            hideLabel
+            label="All statuses"
+            items={[ALL_STATUSES, ...STATUS_KEYS]}
+            selectedItem={statusFilter}
+            itemToString={(item) =>
+              item === ALL_STATUSES || item == null ? 'All statuses' : STATUS_STYLES[item].label
+            }
+            onChange={({ selectedItem }) =>
+              setStatusFilter((selectedItem ?? ALL_STATUSES) as FeeStatus | 'all')
+            }
+          />
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto px-6 py-4">
+      <div className={styles.body}>
         {scanning && (
-          <div className="mb-4 flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 rounded-lg px-4 py-3">
-            <Loader2 className="w-4 h-4 animate-spin" /> Looking up scanned ID
-          </div>
+          <WidgetCard padded>
+            <InlineLoading description="Looking up the scanned ID…" />
+          </WidgetCard>
         )}
 
         {scanMiss && (
-          <div className="mb-4 flex items-start justify-between gap-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg px-4 py-3">
-            <div className="flex items-start gap-2">
-              <AlertTriangle className="w-4 h-4 text-red-500 mt-0.5" />
-              <div>
-                <p className="text-sm font-medium text-red-600 dark:text-red-400">No student matches that ID card</p>
-                <p className="text-xs text-red-500/80 dark:text-red-400/80 mt-0.5">Scanned: {scanMiss}</p>
-              </div>
+          <InlineNotification
+            kind="error"
+            title="No student matches that ID card"
+            subtitle={`Scanned: ${scanMiss}`}
+            onCloseButtonClick={() => setScanMiss(null)}
+            lowContrast
+          />
+        )}
+
+        {scanned && scannedStyle && (
+          <div className={styles.callout}>
+            <div className={styles.calloutHead}>
+              <span className={styles.calloutTitle}>
+                <ScanAlt size={16} /> Scanned ID card
+              </span>
+              <Button
+                hasIconOnly
+                kind="ghost"
+                size="sm"
+                renderIcon={Close}
+                iconDescription="Clear this result"
+                tooltipPosition="left"
+                onClick={() => setScanned(null)}
+              />
             </div>
-            <button onClick={() => setScanMiss(null)} className="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/40">
-              <X className="w-4 h-4 text-red-400" />
-            </button>
+            <div className={styles.calloutBody}>
+              <div className={styles.calloutIdentity}>
+                <div>
+                  <p className={styles.calloutName}>{scanned.full_name}</p>
+                  <p className={styles.secondary}>
+                    {scanned.student_number} · {classAndSection(settings.school_level, scanned.grade_level, scanned.class_section)}
+                  </p>
+                </div>
+                <Tag type={scannedStyle.tag} size="sm" renderIcon={scannedStyle.icon}>
+                  {scannedStyle.label}
+                </Tag>
+              </div>
+              <StatRow>
+                <StatTile label="Invoiced" value={formatAmount(scanned.total_invoiced, scanned.currency)} icon={Receipt} />
+                <StatTile label="Paid" value={formatAmount(scanned.total_paid, scanned.currency)} icon={Checkmark} tone="success" />
+                <StatTile label="Balance" value={formatAmount(scanned.balance_due, scanned.currency)} icon={Wallet} tone={scanned.balance_due > 0 ? 'warning' : 'success'} />
+                <StatTile label="Next due" value={formatDate(scanned.next_due_date)} icon={Time} />
+              </StatRow>
+            </div>
           </div>
         )}
 
-        {scanned && (() => {
-          const style = STATUS_STYLES[scanned.status] ?? STATUS_STYLES.no_invoices;
-          const ScannedIcon = style.icon;
-          return (
-            <div className="mb-4 bg-white dark:bg-gray-800 border-2 border-indigo-200 dark:border-indigo-800 rounded-lg overflow-hidden">
-              <div className="flex items-center justify-between px-4 py-2 bg-indigo-50 dark:bg-indigo-900/20 border-b border-indigo-100 dark:border-indigo-800">
-                <span className="text-xs font-medium text-indigo-600 dark:text-indigo-400 flex items-center gap-1.5">
-                  <ScanLine className="w-3.5 h-3.5" /> Scanned ID Card
-                </span>
-                <button onClick={() => setScanned(null)} className="p-1 rounded hover:bg-indigo-100 dark:hover:bg-indigo-900/40">
-                  <X className="w-4 h-4 text-indigo-400" />
-                </button>
-              </div>
-              <div className="p-4">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <p className="text-lg font-bold text-gray-800 dark:text-white">{scanned.full_name}</p>
-                    <p className="text-xs text-gray-400">
-                      {scanned.student_number} · Grade {scanned.grade_level} {scanned.class_section}
-                    </p>
-                  </div>
-                  <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border ${style.badge}`}>
-                    <ScannedIcon className="w-3 h-3" /> {style.label}
-                  </span>
-                </div>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
-                  <StatTile label="Invoiced" value={formatAmount(scanned.total_invoiced, scanned.currency)} icon={Receipt} />
-                  <StatTile label="Paid" value={formatAmount(scanned.total_paid, scanned.currency)} icon={CheckCircle2} />
-                  <StatTile label="Balance" value={formatAmount(scanned.balance_due, scanned.currency)} icon={Wallet} />
-                  <StatTile label="Next Due" value={formatDate(scanned.next_due_date)} icon={Clock} />
-                </div>
-              </div>
-            </div>
-          );
-        })()}
+        <WidgetCard>
+          <CardHeader title="Students">
+            <span className={styles.note}>
+              Showing {filtered.length} of {rows.length}
+            </span>
+          </CardHeader>
 
-        <div className="bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 rounded-lg overflow-hidden">
           {loading ? (
-            <div className="h-72 flex items-center justify-center text-gray-400">
-              <Loader2 className="w-5 h-5 animate-spin mr-2" />
-              Loading fee status
-            </div>
+            <TableSkeleton rowCount={8} columnCount={8} />
           ) : filtered.length === 0 ? (
-            <p className="px-4 py-10 text-center text-sm text-gray-400">
-              {rows.length === 0 ? 'No fee invoices have been recorded yet.' : 'No students match this filter.'}
-            </p>
+            <EmptyState
+              headerTitle="Fees"
+              displayText={rows.length === 0 ? 'fee invoices' : 'students matching this filter'}
+              helperText={
+                rows.length === 0
+                  ? 'Invoices raised under Fee management will appear here.'
+                  : 'Try a different search or status.'
+              }
+            />
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="bg-gray-50 dark:bg-gray-900/40 text-xs text-gray-500 dark:text-gray-400">
-                  <tr>
-                    <th className="text-left font-medium px-4 py-2.5">Student</th>
-                    <th className="text-left font-medium px-4 py-2.5">Class</th>
-                    <th className="text-right font-medium px-4 py-2.5">Invoiced</th>
-                    <th className="text-right font-medium px-4 py-2.5">Paid</th>
-                    <th className="text-right font-medium px-4 py-2.5">Balance</th>
-                    <th className="text-left font-medium px-4 py-2.5">Next Due</th>
-                    <th className="text-left font-medium px-4 py-2.5">Last Payment</th>
-                    <th className="text-left font-medium px-4 py-2.5">Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
-                  {filtered.map(row => {
+            <div className={styles.tableWrap}>
+              <Table size="sm" useZebraStyles>
+                <TableHead>
+                  <TableRow>
+                    <TableHeader>Student</TableHeader>
+                    <TableHeader>Class</TableHeader>
+                    <TableHeader className={styles.numeric}>Invoiced</TableHeader>
+                    <TableHeader className={styles.numeric}>Paid</TableHeader>
+                    <TableHeader className={styles.numeric}>Balance</TableHeader>
+                    <TableHeader>Next due</TableHeader>
+                    <TableHeader>Last payment</TableHeader>
+                    <TableHeader>Status</TableHeader>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {filtered.map((row) => {
                     const style = STATUS_STYLES[row.status] ?? STATUS_STYLES.no_invoices;
-                    const StatusIcon = style.icon;
                     return (
-                      <tr key={row.student_id} className="odd:bg-white even:bg-gray-50/70 dark:odd:bg-gray-800 dark:even:bg-gray-900/30">
-                        <td className="px-4 py-2.5">
-                          <p className="font-medium text-gray-800 dark:text-white">{row.full_name}</p>
-                          <p className="text-xs text-gray-400">{row.student_number}</p>
-                        </td>
-                        <td className="px-4 py-2.5 text-gray-600 dark:text-gray-300">
-                          Grade {row.grade_level} {row.class_section}
-                        </td>
-                        <td className="px-4 py-2.5 text-right text-gray-600 dark:text-gray-300">{formatAmount(row.total_invoiced, row.currency)}</td>
-                        <td className="px-4 py-2.5 text-right text-gray-600 dark:text-gray-300">{formatAmount(row.total_paid, row.currency)}</td>
-                        <td className="px-4 py-2.5 text-right font-medium text-gray-800 dark:text-white">{formatAmount(row.balance_due, row.currency)}</td>
-                        <td className="px-4 py-2.5 text-gray-600 dark:text-gray-300">{formatDate(row.next_due_date)}</td>
-                        <td className="px-4 py-2.5 text-gray-600 dark:text-gray-300">{formatDate(row.last_payment_at)}</td>
-                        <td className="px-4 py-2.5">
-                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${style.badge}`}>
-                            <StatusIcon className="w-2.5 h-2.5" /> {style.label}
-                          </span>
-                        </td>
-                      </tr>
+                      <TableRow key={row.student_id}>
+                        <TableCell>
+                          <p className={styles.primary}>{row.full_name}</p>
+                          <p className={styles.secondary}>{row.student_number}</p>
+                        </TableCell>
+                        <TableCell>
+                          {classAndSection(settings.school_level, row.grade_level, row.class_section)}
+                        </TableCell>
+                        <TableCell className={styles.numeric}>
+                          {formatAmount(row.total_invoiced, row.currency)}
+                        </TableCell>
+                        <TableCell className={styles.numeric}>
+                          {formatAmount(row.total_paid, row.currency)}
+                        </TableCell>
+                        <TableCell className={`${styles.numeric} ${styles.strong}`}>
+                          {formatAmount(row.balance_due, row.currency)}
+                        </TableCell>
+                        <TableCell>{formatDate(row.next_due_date)}</TableCell>
+                        <TableCell>{formatDate(row.last_payment_at)}</TableCell>
+                        <TableCell>
+                          <Tag type={style.tag} size="sm" renderIcon={style.icon}>
+                            {style.label}
+                          </Tag>
+                        </TableCell>
+                      </TableRow>
                     );
                   })}
-                </tbody>
-              </table>
+                </TableBody>
+              </Table>
             </div>
           )}
-        </div>
-        <p className="text-[10px] text-gray-400 mt-2 px-1">Showing {filtered.length} of {rows.length} students</p>
+        </WidgetCard>
       </div>
 
       <StudentIdScanner

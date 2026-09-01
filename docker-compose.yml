@@ -1,7 +1,13 @@
 services:
+  # The bundled database, for a school that wants one machine and no separate Postgres to look
+  # after. It is behind a profile so it can simply not be started: set DB_MODE=external in the
+  # environment (or choose it in containers.sh) and point DATABASE_URL at your own server instead.
+  # A managed Postgres, a database on the host, or one on another machine all work — the app has
+  # only ever needed a connection string.
   db:
     image: postgres:16-alpine
     container_name: school-ai-search-db
+    profiles: ["bundled-db"]
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-school_ai_search}
@@ -27,16 +33,30 @@ services:
     depends_on:
       db:
         condition: service_healthy
+        # Honoured when the bundled database is running, ignored when it is not. Without this the
+        # app refuses to start at all against an external Postgres, because Compose waits forever
+        # for a container nobody asked for.
+        required: false
     ports:
       # Bound to loopback by default: with a proxy in front, the app has no business being reachable
       # from the internet on its own port. Set APP_BIND=0.0.0.0 to publish it directly instead.
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8787}:8787"
+    volumes:
+      # Database backups. The only thing this container writes to disk.
+      - school_ai_search_backups:/var/backups/eschool
     environment:
       LOCAL_BACKEND_HOST: 0.0.0.0
       LOCAL_BACKEND_PORT: 8787
       LOCAL_STATIC_ROOT: /app/dist
       DATABASE_URL: ${DATABASE_URL:-postgres://schoolapp:schoolapp@db:5432/school_ai_search}
-      DATABASE_SSL: "false"
+      # Was hardcoded to "false", which silently overrode anything set in .env — and a managed
+      # Postgres almost always requires TLS, so an external database could not be reached at all.
+      DATABASE_SSL: ${DATABASE_SSL:-false}
+      # Set to false only for a server presenting a self-signed certificate on a trusted network.
+      DATABASE_SSL_REJECT_UNAUTHORIZED: ${DATABASE_SSL_REJECT_UNAUTHORIZED:-true}
+      # Where database backups are written. A named volume, so they outlive the container — a
+      # backup that dies with the thing it is protecting against is not a backup.
+      BACKUP_DIR: ${BACKUP_DIR:-/var/backups/eschool}
       SCHOOL_NAME: ${SCHOOL_NAME:-eSchool}
       SCHOOL_TAGLINE: ${SCHOOL_TAGLINE:-Academic Excellence and Character}
       SCHOOL_ADDRESS: ${SCHOOL_ADDRESS:-}
@@ -259,6 +279,7 @@ services:
 
 volumes:
   school_ai_search_postgres_data:
+  school_ai_search_backups:
   school_ai_search_certbot_webroot:
   school_ai_search_caddy_data:
   school_ai_search_caddy_config:

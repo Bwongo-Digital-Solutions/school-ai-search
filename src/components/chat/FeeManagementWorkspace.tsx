@@ -1,22 +1,25 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { Button, InlineLoading, Tab, TabList, Tabs, Tag } from '@carbon/react';
 import {
-  AlertTriangle,
-  BookOpen,
-  FileDown,
-  Gauge,
-  GraduationCap,
-  Landmark,
+  Book,
+  DocumentPdf,
+  Education,
   Layers,
-  Loader2,
+  Meter,
+  Money,
   Receipt,
-  Shield,
+  UserAdmin,
   Wallet,
-} from 'lucide-react';
+  Warning,
+} from '@carbon/react/icons';
 import { useAuth } from '@/contexts/AuthContext';
+import { useChatContext } from '@/contexts/ChatContext';
+import { useNotifications } from '@/contexts/NotificationContext';
 import { callFees, feeDocumentUrl } from '@/lib/fees';
 import { downloadFromUrl } from '@/lib/download';
 import { formatAmount, todayIso } from '@/lib/format';
-import StatTile from '@/components/common/StatTile';
+import { AccessDenied, PageHeader, StatRow, StatTile } from '@/components/common';
+import styles from './workspace.module.scss';
 import type { FeesSummary } from '@/types/feeAdmin';
 import FeeStructuresTab from './fees/FeeStructuresTab';
 import BillingRunTab from './fees/BillingRunTab';
@@ -27,18 +30,20 @@ import BursariesTab from './fees/BursariesTab';
 import FeeRatingsTab from './fees/FeeRatingsTab';
 
 const SECTIONS = [
-  { key: 'structures', label: 'Fee Structures', icon: Layers },
-  { key: 'billing', label: 'Billing Run', icon: Receipt },
-  { key: 'payments', label: 'Record Payment', icon: Wallet },
-  { key: 'ledger', label: 'Student Ledger', icon: BookOpen },
-  { key: 'arrears', label: 'Arrears', icon: AlertTriangle },
-  { key: 'bursaries', label: 'Bursaries', icon: GraduationCap },
-  { key: 'ratings', label: 'Payment Ratings', icon: Gauge },
+  { key: 'structures', label: 'Fee structures', icon: Layers },
+  { key: 'billing', label: 'Billing run', icon: Receipt },
+  { key: 'payments', label: 'Record payment', icon: Wallet },
+  { key: 'ledger', label: 'Student ledger', icon: Book },
+  { key: 'arrears', label: 'Arrears', icon: Warning },
+  { key: 'bursaries', label: 'Bursaries', icon: Education },
+  { key: 'ratings', label: 'Payment ratings', icon: Meter },
 ] as const;
 
 type SectionKey = (typeof SECTIONS)[number]['key'];
 
 const FeeManagementWorkspace: React.FC = () => {
+  const { notify } = useNotifications();
+  const { focus, clearFocus } = useChatContext();
   const { isAdmin } = useAuth();
   const { user } = useAuth();
   const [section, setSection] = useState<SectionKey>('structures');
@@ -67,107 +72,116 @@ const FeeManagementWorkspace: React.FC = () => {
       await handler();
     } catch (err: unknown) {
       console.error(`${label} failed:`, err);
-      alert(`${label} failed: ${err instanceof Error ? err.message : 'Unexpected error'}`);
+      notify.error(`${label} failed`, err instanceof Error ? err.message : 'Unexpected error');
     } finally {
       setBusy(null);
     }
-  }, []);
+  }, [notify]);
 
   const openLedger = useCallback((studentId: string) => {
     setLedgerStudentId(studentId);
     setSection('ledger');
   }, []);
 
+  // Arrived from a search hit on an invoice or a payment: open that student's ledger, which is the
+  // screen that actually answers "what is this charge".
+  useEffect(() => {
+    if (focus?.view !== 'finance' || !focus.studentId) return;
+    openLedger(focus.studentId);
+    clearFocus();
+  }, [focus, openLedger, clearFocus]);
+
   // Defence in depth. Support staff never reach this component (AppLayout short-circuits them to
   // the fee status panel) and the nav entry is admin-only, but a teacher must see nothing here
   // even if the view is somehow selected.
   if (!isAdmin) {
     return (
-      <div className="flex flex-col items-center justify-center h-full bg-gradient-to-b from-gray-50/50 to-white dark:from-gray-900/50 dark:to-gray-900 p-8">
-        <div className="max-w-md text-center">
-          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-purple-100 to-indigo-100 dark:from-purple-900/30 dark:to-indigo-900/30 flex items-center justify-center mx-auto mb-4">
-            <Shield className="w-8 h-8 text-purple-500" />
-          </div>
-          <h2 className="text-xl font-bold text-gray-800 dark:text-white mb-2">Admin Access Required</h2>
-          <p className="text-sm text-gray-500 dark:text-gray-400">
-            Fee management — structures, invoicing, payments and payment ratings — is only accessible to
-            administrators.
-          </p>
-        </div>
-      </div>
+      <AccessDenied
+        title="Administrators only"
+        message="Fee management — structures, billing runs, bursaries and payments — is available to administrators."
+      />
     );
   }
 
   const currency = summary?.totals.currency || 'UGX';
 
   return (
-    <div className="flex flex-col h-full bg-gradient-to-b from-gray-50/50 to-white dark:from-gray-900/50 dark:to-gray-900">
-      <div className="px-6 pt-6 pb-4 border-b border-gray-100 dark:border-gray-800">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h2 className="text-xl font-bold text-gray-800 dark:text-white flex items-center gap-2">
-              <Landmark className="w-6 h-6 text-indigo-500" />
-              Fee Management
-            </h2>
-            <p className="text-xs text-gray-400 mt-0.5">
-              Fee structures, invoicing, payments, bursaries and payment ratings.
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            {busy && (
-              <span className="inline-flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-                <Loader2 className="w-3.5 h-3.5 animate-spin" /> {busy}…
-              </span>
-            )}
-            <button
-              onClick={() => runAction('Generating financial report', async () => {
-                await downloadFromUrl(feeDocumentUrl('/api/fees/report.pdf', user), `financial-report-${todayIso()}.pdf`);
-              })}
-              className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 text-white text-sm font-medium hover:shadow-lg transition-all disabled:opacity-50"
-              disabled={Boolean(busy)}
-            >
-              <FileDown className="w-4 h-4" /> Financial Report
-            </button>
-            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-medium bg-purple-50 dark:bg-purple-900/20 text-purple-600 dark:text-purple-400 border border-purple-200 dark:border-purple-800">
-              <Shield className="w-3 h-3" /> Admin Only
-            </span>
-          </div>
-        </div>
+    <div className={styles.screen}>
+      <PageHeader title="Fee management" illustration={<Money size={32} />}>
+        {busy && (
+          <span className={styles.busy}>
+            <InlineLoading description={`${busy}…`} />
+          </span>
+        )}
+        <Tag type="purple" size="sm" renderIcon={UserAdmin}>
+          Administrators only
+        </Tag>
+        <Button
+          kind="primary"
+          size="sm"
+          renderIcon={DocumentPdf}
+          disabled={Boolean(busy)}
+          onClick={() =>
+            runAction('Generating financial report', async () => {
+              await downloadFromUrl(
+                feeDocumentUrl('/api/fees/report.pdf', user),
+                `financial-report-${todayIso()}.pdf`,
+              );
+            })
+          }
+        >
+          Financial report
+        </Button>
+      </PageHeader>
 
+      <div className={styles.controls}>
         {summary && (
-          <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mt-4">
+          <StatRow>
             <StatTile label="Invoiced" value={formatAmount(summary.totals.invoiced, currency)} icon={Receipt} />
-            <StatTile label="Collected" value={formatAmount(summary.totals.collected, currency)} icon={Wallet} tone="success" />
-            <StatTile label="Outstanding" value={formatAmount(summary.totals.outstanding, currency)} icon={AlertTriangle} tone="warning" />
-            <StatTile label="Overdue students" value={String(summary.counts.overdueStudents)} icon={AlertTriangle} tone="danger" />
+            <StatTile
+              label="Collected"
+              value={formatAmount(summary.totals.collected, currency)}
+              icon={Wallet}
+              tone="success"
+            />
+            <StatTile
+              label="Outstanding"
+              value={formatAmount(summary.totals.outstanding, currency)}
+              icon={Warning}
+              tone="warning"
+            />
+            <StatTile
+              label="Overdue students"
+              value={String(summary.counts.overdueStudents)}
+              icon={Warning}
+              tone="danger"
+            />
             <StatTile
               label="Reviews due"
               value={String(summary.counts.reviewsDue)}
-              icon={Gauge}
+              icon={Meter}
               tone={summary.counts.reviewsDue > 0 ? 'warning' : 'default'}
             />
-          </div>
+          </StatRow>
         )}
 
-        <div className="flex flex-wrap gap-1.5 mt-4">
-          {SECTIONS.map(({ key, label, icon: Icon }) => (
-            <button
-              key={key}
-              onClick={() => setSection(key)}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                section === key
-                  ? 'bg-indigo-600 text-white'
-                  : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'
-              }`}
-            >
-              <Icon className="w-3.5 h-3.5" />
-              {label}
-            </button>
-          ))}
+        <div className={styles.tabs}>
+          <Tabs
+            selectedIndex={SECTIONS.findIndex(entry => entry.key === section)}
+            onChange={({ selectedIndex }) => setSection(SECTIONS[selectedIndex].key)}
+          >
+            <TabList aria-label="Fee management sections" contained>
+              {SECTIONS.map(({ key, label, icon: Icon }) => (
+                <Tab key={key} renderIcon={Icon}>
+                  {label}
+                </Tab>
+              ))}
+            </TabList>
+          </Tabs>
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto px-6 py-4">
+      <div className={styles.body}>
         {section === 'structures' && <FeeStructuresTab runAction={runAction} onChanged={loadSummary} />}
         {section === 'billing' && <BillingRunTab runAction={runAction} onChanged={loadSummary} />}
         {section === 'payments' && <RecordPaymentTab runAction={runAction} onChanged={loadSummary} />}

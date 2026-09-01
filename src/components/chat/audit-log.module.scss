@@ -1,0 +1,195 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+.scroller {
+  max-block-size: 32rem;
+  overflow-y: auto;
+}
+
+.entry {
+  display: flex;
+  align-items: flex-start;
+  gap: layout.$spacing-04;
+  padding: layout.$spacing-04 layout.$spacing-05;
+  border-block-start: 1px solid $ui-03;
+
+  &:hover {
+    background: $ui-01;
+  }
+}
+
+// The action, as a tinted square before the name. Colour and icon together, because "created" and
+// "deleted" need to be distinguishable at a glance and by someone who cannot tell green from red.
+.mark {
+  inline-size: layout.$spacing-07;
+  block-size: layout.$spacing-07;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-block-start: 0.1em;
+
+  svg {
+    fill: currentColor;
+  }
+}
+
+.markCreate {
+  background: #defbe6;
+  color: #0e6027;
+}
+
+.markUpdate {
+  background: #d0e2ff;
+  color: #0043ce;
+}
+
+.markDelete {
+  background: #fff1f1;
+  color: #a2191f;
+}
+
+.markOther {
+  background: $ui-01;
+  color: $text-02;
+}
+
+.main {
+  flex: 1;
+  min-inline-size: 0;
+}
+
+.who {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: layout.$spacing-03;
+}
+
+.name {
+  @include type.type-style('heading-compact-01');
+  color: $text-01;
+}
+
+.target {
+  @include type.type-style('body-compact-01');
+  color: $text-02;
+}
+
+.meta {
+  @include type.type-style('label-01');
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: layout.$spacing-03;
+  color: $text-03;
+  margin-block-start: layout.$spacing-02;
+}
+
+.changes {
+  margin-block-start: layout.$spacing-03;
+}
+
+.changeList {
+  @include type.type-style('label-01');
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-02;
+  padding: layout.$spacing-04;
+  background: $ui-01;
+  border: 1px solid $ui-03;
+  margin-block-start: layout.$spacing-02;
+}
+
+.change {
+  display: flex;
+  gap: layout.$spacing-03;
+}
+
+.changeKey {
+  color: $text-03;
+  font-weight: 600;
+  min-inline-size: 7rem;
+  flex-shrink: 0;
+}
+
+.changeValue {
+  color: $text-02;
+  overflow-wrap: anywhere;
+}
+
+.time {
+  @include type.type-style('label-01');
+  color: $text-03;
+  flex-shrink: 0;
+
+  @media (max-width: 42rem) {
+    display: none;
+  }
+}
+
+.loadMore {
+  display: flex;
+  justify-content: center;
+  padding: layout.$spacing-03;
+  border-block-start: 1px solid $ui-03;
+}
+
+.state {
+  padding: layout.$spacing-09 layout.$spacing-05;
+  text-align: center;
+}
+
+.stateText {
+  @include type.type-style('body-compact-01');
+  color: $text-02;
+  margin: layout.$spacing-04 0 0;
+}
+
+.stateHint {
+  @include type.type-style('label-01');
+  color: $text-03;
+  margin: layout.$spacing-02 0 0;
+}
+
+:global([data-carbon-theme='g100']) {
+  .entry {
+    border-block-start-color: $ui-03-dark;
+
+    &:hover {
+      background: $ui-01-dark;
+    }
+  }
+
+  .name {
+    color: #f4f4f4;
+  }
+
+  .target,
+  .changeValue,
+  .stateText {
+    color: $text-02-dark;
+  }
+
+  .meta,
+  .time,
+  .changeKey,
+  .stateHint {
+    color: $text-03-dark;
+  }
+
+  .changeList {
+    background: $ui-01-dark;
+    border-color: $ui-03-dark;
+  }
+
+  .markOther {
+    background: $ui-03-dark;
+    color: $text-02-dark;
+  }
+
+  .loadMore {
+    border-block-start-color: $ui-03-dark;
+  }
+}

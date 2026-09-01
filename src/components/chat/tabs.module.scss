@@ -1,0 +1,798 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+// The shared vocabulary of the fees, lessons and examiner tabs.
+//
+// These 17 files are the same shape repeated: a form panel, a list or table of what was saved, and
+// a row of actions. Held in one stylesheet rather than seventeen so they agree — a heading in the
+// billing run and a heading in the question bank are the same heading, because they are.
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+}
+
+.stackTight {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-04;
+}
+
+.pad {
+  padding: layout.$spacing-05;
+}
+
+// Forms.
+.grid2,
+.grid3 {
+  display: grid;
+  gap: layout.$spacing-05;
+  grid-template-columns: 1fr;
+}
+
+@media (min-width: 34rem) {
+  .grid2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 48rem) {
+  .grid3 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.spanAll {
+  grid-column: 1 / -1;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: layout.$spacing-03;
+}
+
+.actionsEnd {
+  justify-content: flex-end;
+}
+
+// A heading inside a panel, below the card's own title.
+.subheading {
+  @include type.type-style('heading-compact-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  color: $text-01;
+  margin: 0 0 layout.$spacing-04;
+
+  svg {
+    fill: var(--brand-01, #{$brand-01-fallback});
+    flex-shrink: 0;
+  }
+}
+
+.label {
+  @include type.type-style('label-01');
+  color: $text-03;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin: 0 0 layout.$spacing-02;
+}
+
+.primary {
+  @include type.type-style('body-compact-01');
+  color: $text-01;
+  margin: 0;
+}
+
+.strong {
+  @include type.type-style('heading-compact-01');
+  color: $text-01;
+}
+
+.secondary {
+  @include type.type-style('helper-text-01');
+  color: $text-03;
+  margin: 0;
+}
+
+.note {
+  @include type.type-style('label-01');
+  color: $text-03;
+  margin: 0;
+}
+
+.warn {
+  @include type.type-style('label-01');
+  color: #8e6a00;
+  margin: 0;
+}
+
+// Tables. Carbon's DataTable is for interactive lists; several of these are read-only registers, so
+// they take the same borders and type without the sorting machinery.
+.tableWrap {
+  overflow-x: auto;
+}
+
+.numeric {
+  text-align: end;
+}
+
+.truncate {
+  max-inline-size: 18rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// Hand-built rows, where a table would be too rigid.
+.rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: layout.$spacing-04;
+  padding: layout.$spacing-04 layout.$spacing-05;
+  border-block-start: 1px solid $ui-03;
+}
+
+.rowMain {
+  min-inline-size: 0;
+  flex: 1;
+}
+
+.empty {
+  @include type.type-style('body-compact-01');
+  padding: layout.$spacing-07 layout.$spacing-05;
+  text-align: center;
+  color: $text-03;
+  margin: 0;
+}
+
+.loading {
+  display: flex;
+  justify-content: center;
+  padding: layout.$spacing-07 layout.$spacing-05;
+}
+
+// A read-only figure worth reading as a figure — a computed total under a form.
+.total {
+  @include type.type-style('heading-03');
+  color: $text-01;
+  margin: 0;
+}
+
+:global([data-carbon-theme='g100']) {
+  .subheading,
+  .primary,
+  .strong,
+  .total {
+    color: #f4f4f4;
+  }
+
+  .label,
+  .secondary,
+  .note,
+  .empty {
+    color: $text-03-dark;
+  }
+
+  .warn {
+    color: $support-warning;
+  }
+
+  .row {
+    border-block-start-color: $ui-03-dark;
+  }
+}
+
+// A form panel beside the list of what it produces. The dominant shape of these tabs.
+.split {
+  display: grid;
+  gap: layout.$spacing-05;
+  grid-template-columns: 1fr;
+  align-items: start;
+
+  @media (min-width: 72rem) {
+    grid-template-columns: 24rem minmax(0, 1fr);
+  }
+}
+
+.splitWide {
+  display: grid;
+  gap: layout.$spacing-05;
+  grid-template-columns: 1fr;
+  align-items: start;
+
+  @media (min-width: 72rem) {
+    grid-template-columns: minmax(0, 1fr) 24rem;
+  }
+}
+
+.fit {
+  block-size: fit-content;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: layout.$spacing-03;
+
+  > :first-child {
+    flex: 1;
+    min-inline-size: min(12rem, 100%);
+  }
+}
+
+.filter {
+  min-inline-size: min(10rem, 100%);
+}
+
+// ---------------------------------------------------------------------------
+// Read-only tables. Several of these tabs render a register rather than an
+// interactive list, so they take Carbon's borders and type without DataTable.
+// ---------------------------------------------------------------------------
+
+// Read-only tables.
+//
+// Several of these tabs render a register rather than an interactive list, so they take Carbon's
+// borders, type and spacing without DataTable's sorting and selection machinery.
+//
+// The cells are styled from the table element rather than class-by-class. A register has seven or
+// eight columns and every one needs the same padding; requiring a class on each `<th>` and `<td>`
+// means the day someone forgets one, that column silently collapses against its neighbour — which
+// is exactly what happened here. The modifier classes below (.numeric, .tdStrong) layer on top.
+.table {
+  inline-size: 100%;
+  border-collapse: collapse;
+
+  th {
+    @include type.type-style('label-01');
+    text-align: start;
+    color: $text-02;
+    background: $ui-01;
+    padding: layout.$spacing-04 layout.$spacing-05;
+    border-block-end: 1px solid $ui-03;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    font-weight: 600;
+    white-space: nowrap;
+    vertical-align: middle;
+  }
+
+  td {
+    @include type.type-style('body-compact-01');
+    color: $text-02;
+    padding: layout.$spacing-04 layout.$spacing-05;
+    border-block-end: 1px solid $ui-03;
+    vertical-align: middle;
+  }
+
+  tbody tr:last-child td {
+    border-block-end: none;
+  }
+
+  // A figure belongs against the column it is compared down, so numbers sit right and their
+  // heading sits with them.
+  th.numeric,
+  td.numeric,
+  th:has(+ th.numeric) {
+    text-align: end;
+  }
+}
+
+.numeric {
+  text-align: end;
+}
+
+.thead {
+  @include type.type-style('label-01');
+  background: $ui-01;
+  color: $text-02;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.th {
+  text-align: start;
+  padding: layout.$spacing-04 layout.$spacing-05;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.thNumeric {
+  text-align: end;
+  padding: layout.$spacing-04 layout.$spacing-05;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.td {
+  @include type.type-style('body-compact-01');
+  padding: layout.$spacing-04 layout.$spacing-05;
+  color: $text-02;
+}
+
+.tdNumeric {
+  @include type.type-style('body-compact-01');
+  padding: layout.$spacing-04 layout.$spacing-05;
+  color: $text-02;
+  text-align: end;
+}
+
+.tdStrong {
+  @include type.type-style('heading-compact-01');
+  padding: layout.$spacing-04 layout.$spacing-05;
+  color: $text-01;
+  text-align: end;
+}
+
+.tdPositive {
+  @include type.type-style('body-compact-01');
+  padding: layout.$spacing-04 layout.$spacing-05;
+  color: $support-success;
+  text-align: end;
+}
+
+
+// Toned text, for the handful of places a figure's colour carries meaning.
+.positive { color: $support-success; }
+.negative { color: $support-error; }
+.caution { color: #8e6a00; }
+
+// A boxed aside inside a panel: a warning, a running total, a note about what will happen.
+.callout {
+  padding: layout.$spacing-04 layout.$spacing-05;
+  border: 1px solid $ui-03;
+  background: $ui-01;
+}
+
+.calloutWarn {
+  border-color: #f1c21b;
+  background: $warning-background;
+}
+
+.calloutBrand {
+  border-color: var(--brand-01, #{$brand-01-fallback});
+  background: $ui-01;
+}
+
+.divider {
+  inline-size: 1px;
+  block-size: layout.$spacing-05;
+  background: $ui-03;
+  margin-inline: layout.$spacing-03;
+  flex-shrink: 0;
+}
+
+.between {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: layout.$spacing-04;
+}
+
+.betweenTop {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: layout.$spacing-04;
+}
+
+.grow {
+  flex: 1;
+  min-inline-size: 0;
+}
+
+.index {
+  inline-size: layout.$spacing-06;
+  block-size: layout.$spacing-06;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: $ui-01;
+  color: var(--brand-01, #{$brand-01-fallback});
+  @include type.type-style('label-01');
+  font-weight: 600;
+}
+
+.mono {
+  @include type.type-style('code-01');
+  color: $text-02;
+}
+
+:global([data-carbon-theme='g100']) {
+  .thead {
+    background: $ui-01-dark;
+    color: $text-02-dark;
+  }
+
+  .td,
+  .tdNumeric,
+  .mono {
+    color: $text-02-dark;
+  }
+
+  .tdStrong {
+    color: #f4f4f4;
+  }
+
+  .callout,
+  .calloutBrand,
+  .index {
+    background: $ui-01-dark;
+    border-color: $ui-03-dark;
+  }
+
+  .calloutBrand {
+    border-color: var(--brand-01, #{$brand-01-fallback});
+  }
+
+  .calloutWarn {
+    background: rgb(241 194 27 / 12%);
+    border-color: $support-warning;
+  }
+
+  .caution {
+    color: $support-warning;
+  }
+
+  .divider {
+    background: $ui-03-dark;
+  }
+}
+
+.padFit {
+  padding: layout.$spacing-05;
+  block-size: fit-content;
+}
+
+.padStack {
+  padding: layout.$spacing-05;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-04;
+}
+
+.padBody {
+  padding: 0 layout.$spacing-05 layout.$spacing-05;
+}
+
+.padTight {
+  padding: layout.$spacing-04;
+}
+
+.rowPad {
+  padding: layout.$spacing-04 layout.$spacing-05;
+}
+
+.grid4 {
+  display: grid;
+  gap: layout.$spacing-05;
+  grid-template-columns: 1fr;
+
+  @media (min-width: 34rem) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  @media (min-width: 62rem) {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+// A line of quiet explanatory text with an icon beside it.
+.noteRow {
+  @include type.type-style('label-01');
+  display: flex;
+  align-items: flex-start;
+  gap: layout.$spacing-03;
+  color: $text-03;
+  margin: 0;
+
+  svg {
+    fill: currentColor;
+    flex-shrink: 0;
+    margin-block-start: 0.1em;
+  }
+}
+
+.footNotes {
+  @include type.type-style('label-01');
+  display: flex;
+  flex-wrap: wrap;
+  gap: layout.$spacing-05;
+  color: $text-03;
+  border-block-start: 1px solid $ui-03;
+  padding-block-start: layout.$spacing-04;
+}
+
+.sectionRow {
+  padding: layout.$spacing-03 layout.$spacing-05;
+  border-block-end: 1px solid $ui-03;
+  background: $ui-01;
+}
+
+.bullets {
+  @include type.type-style('label-01');
+  color: $text-02;
+  margin: 0;
+  padding-inline-start: layout.$spacing-06;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-01;
+}
+
+// A whole row that is a button — expanding a saved plan, opening a record.
+.expandRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: layout.$spacing-03;
+  inline-size: 100%;
+  padding: layout.$spacing-04 layout.$spacing-05;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: start;
+
+  &:hover {
+    background: $ui-01;
+  }
+}
+
+.betweenTopRule {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: layout.$spacing-04;
+  padding-block-end: layout.$spacing-04;
+  border-block-end: 1px solid $ui-03;
+}
+
+.actionsRule {
+  display: flex;
+  flex-wrap: wrap;
+  gap: layout.$spacing-03;
+  margin-block-start: layout.$spacing-05;
+  padding-block-start: layout.$spacing-04;
+  border-block-start: 1px solid $ui-03;
+}
+
+.stackTightRule {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-02;
+  margin-block-start: layout.$spacing-04;
+  padding-block-start: layout.$spacing-03;
+  border-block-start: 1px solid $ui-03;
+}
+
+.boxRow {
+  display: flex;
+  align-items: flex-start;
+  gap: layout.$spacing-04;
+  padding: layout.$spacing-04;
+  border: 1px solid $ui-03;
+}
+
+.padBrand {
+  padding: layout.$spacing-05;
+  border-color: var(--brand-01, #{$brand-01-fallback});
+}
+
+.rowPadBrand {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: layout.$spacing-03;
+  padding: layout.$spacing-04 layout.$spacing-05;
+  border-color: var(--brand-01, #{$brand-01-fallback});
+}
+
+.rowPadBetween {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: layout.$spacing-03;
+  padding: layout.$spacing-04 layout.$spacing-05;
+}
+
+.calloutTitle {
+  @include type.type-style('label-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  color: $text-02;
+  font-weight: 600;
+  margin: 0 0 layout.$spacing-03;
+
+  svg {
+    fill: currentColor;
+    flex-shrink: 0;
+  }
+}
+
+.tdTop {
+  vertical-align: top;
+  border-block-start: 1px solid $ui-03;
+}
+
+.fullWidth {
+  inline-size: 100%;
+  justify-content: center;
+}
+
+:global([data-carbon-theme='g100']) {
+  .noteRow,
+  .footNotes {
+    color: $text-03-dark;
+  }
+
+  .bullets,
+  .calloutTitle {
+    color: $text-02-dark;
+  }
+
+  .footNotes,
+  .sectionRow,
+  .betweenTopRule,
+  .actionsRule,
+  .stackTightRule,
+  .boxRow,
+  .tdTop {
+    border-color: $ui-03-dark;
+  }
+
+  .sectionRow,
+  .expandRow:hover {
+    background: $ui-01-dark;
+  }
+}
+
+// The green strip above a receipt, and the amber banner offering to filter to overdue reviews.
+// Both are "something happened / something needs you", so they take the status colour as a fill
+// with the text in the normal colour, rather than colouring the text itself.
+.receiptHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: layout.$spacing-03;
+  padding: layout.$spacing-03 layout.$spacing-05;
+  background: #defbe6;
+  border-block-end: 1px solid #a7f0ba;
+}
+
+.warnBanner {
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  inline-size: 100%;
+  padding: layout.$spacing-04 layout.$spacing-05;
+  text-align: start;
+  cursor: pointer;
+  background: $warning-background;
+  border: 1px solid $support-warning;
+
+  svg {
+    fill: #8e6a00;
+    flex-shrink: 0;
+  }
+
+  &:hover {
+    background: #fff2c9;
+  }
+}
+
+:global([data-carbon-theme='g100']) {
+  .receiptHead {
+    background: rgb(36 161 72 / 16%);
+    border-block-end-color: $support-success;
+  }
+
+  .warnBanner {
+    background: rgb(241 194 27 / 12%);
+
+    svg {
+      fill: $support-warning;
+    }
+
+    &:hover {
+      background: rgb(241 194 27 / 20%);
+    }
+  }
+}
+
+// A panel flagged as needing attention — the question editor when its content has gone stale.
+.padWarn {
+  padding: layout.$spacing-05;
+  border-color: $support-warning;
+}
+
+.calloutBrandRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: layout.$spacing-03;
+  padding: layout.$spacing-02 layout.$spacing-03;
+  margin-block-end: layout.$spacing-04;
+  border: 1px solid var(--brand-01, #{$brand-01-fallback});
+  background: $ui-01;
+}
+
+// A heading that is also a field. No border until focus, so it reads as the title it is until
+// someone means to change it.
+.inlineTitle {
+  @include type.type-style('heading-03');
+  inline-size: 100%;
+  background: transparent;
+  border: none;
+  padding: layout.$spacing-02;
+  margin-inline-start: -#{layout.$spacing-02};
+  color: $text-01;
+
+  &:hover {
+    background: $ui-01;
+  }
+
+  &:focus {
+    background: $ui-01;
+    outline: 2px solid var(--brand-01, #{$brand-01-fallback});
+    outline-offset: -2px;
+  }
+}
+
+:global([data-carbon-theme='g100']) {
+  .calloutBrandRow {
+    background: $ui-01-dark;
+  }
+
+  .inlineTitle {
+    color: #f4f4f4;
+
+    &:hover,
+    &:focus {
+      background: $ui-01-dark;
+    }
+  }
+}
+
+// A payment grade in the ratings register: one letter, sized to be read down the column.
+.grade {
+  @include type.type-style('heading-compact-01');
+  padding: layout.$spacing-04 layout.$spacing-05;
+  text-align: center;
+  font-weight: 600;
+}
+
+.gradeA { color: $support-success; }
+.gradeB { color: #009d9a; }
+.gradeC { color: #b28600; }
+.gradeD { color: #ba4e00; }
+.gradeE { color: $support-error; }
+
+// A figure that is zero, or a value not yet set. Present, but not competing for attention.
+.muted {
+  color: $text-03;
+}
+
+:global([data-carbon-theme='g100']) {
+  .gradeC { color: $support-warning; }
+  .muted { color: $text-03-dark; }
+}

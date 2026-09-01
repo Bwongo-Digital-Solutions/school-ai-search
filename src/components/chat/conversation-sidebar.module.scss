@@ -1,0 +1,318 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+// The conversation list, beside the chat. Fixed and sliding on a narrow screen, in the flow on a
+// wide one — the same behaviour the section rail has, so the two agree at a given width.
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 30%);
+  z-index: 30;
+
+  @media (min-width: 66rem) {
+    display: none;
+  }
+}
+
+.sidebar {
+  position: fixed;
+  z-index: 40;
+  block-size: 100%;
+  inline-size: 18rem;
+  display: flex;
+  flex-direction: column;
+  background: $ui-02;
+  border-inline-end: 1px solid $ui-03;
+  overflow: hidden;
+  transition: transform 240ms cubic-bezier(0.2, 0, 0.38, 0.9);
+
+  @media (min-width: 66rem) {
+    position: relative;
+    transform: none;
+  }
+}
+
+.closed {
+  transform: translateX(-100%);
+  inline-size: 0;
+
+  @media (min-width: 66rem) {
+    transform: none;
+    inline-size: 18rem;
+  }
+}
+
+.head {
+  padding: layout.$spacing-05;
+  border-block-end: 1px solid $ui-03;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: layout.$spacing-03;
+}
+
+.brandName {
+  @include type.type-style('heading-compact-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  color: $text-01;
+}
+
+.mark {
+  inline-size: layout.$spacing-07;
+  block-size: layout.$spacing-07;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: var(--brand-01, #{$brand-01-fallback});
+  color: var(--brand-contrast, #ffffff);
+
+  svg {
+    fill: currentColor;
+  }
+}
+
+.closeButton {
+  @media (min-width: 66rem) {
+    display: none;
+  }
+}
+
+.search {
+  padding: layout.$spacing-03 layout.$spacing-05;
+}
+
+.scroller {
+  flex: 1;
+  min-block-size: 0;
+  overflow-y: auto;
+  padding: 0 layout.$spacing-03 layout.$spacing-05;
+}
+
+.section {
+  margin-block-end: layout.$spacing-05;
+}
+
+// A collapsible section title. Small, grey and uppercase — a signpost, not a heading.
+.sectionToggle {
+  @include type.type-style('label-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-02;
+  inline-size: 100%;
+  padding: layout.$spacing-02 layout.$spacing-02;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: $text-03;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  text-align: start;
+
+  &:hover {
+    color: $text-02;
+  }
+
+  svg {
+    fill: currentColor;
+    flex-shrink: 0;
+  }
+}
+
+.filters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: layout.$spacing-02;
+  margin-block-start: layout.$spacing-02;
+}
+
+.filter {
+  @include type.type-style('label-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-02;
+  padding: layout.$spacing-03;
+  background: none;
+  border: 1px solid transparent;
+  cursor: pointer;
+  color: $text-02;
+  text-align: start;
+
+  &:hover {
+    border-color: var(--brand-01, #{$brand-01-fallback});
+    color: var(--brand-01, #{$brand-01-fallback});
+  }
+
+  svg {
+    fill: currentColor;
+    flex-shrink: 0;
+  }
+
+  span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.conversations {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-02;
+  margin-block-start: layout.$spacing-02;
+}
+
+// One saved conversation. The current one is marked with the school's colour down its leading edge,
+// the same device the section rail uses for the current section.
+.conversation {
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  padding: layout.$spacing-03 layout.$spacing-04;
+  cursor: pointer;
+  border-inline-start: 3px solid transparent;
+
+  &:hover {
+    background: $ui-01;
+  }
+
+  svg {
+    fill: $text-03;
+    flex-shrink: 0;
+  }
+}
+
+.current {
+  background: $ui-01;
+  border-inline-start-color: var(--brand-01, #{$brand-01-fallback});
+
+  svg {
+    fill: var(--brand-01, #{$brand-01-fallback});
+  }
+
+  .conversationTitle {
+    color: $text-01;
+    font-weight: 600;
+  }
+}
+
+.conversationText {
+  flex: 1;
+  min-inline-size: 0;
+}
+
+.conversationTitle {
+  @include type.type-style('body-compact-01');
+  color: $text-02;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversationDate {
+  @include type.type-style('label-01');
+  color: $text-03;
+  margin: layout.$spacing-01 0 0;
+}
+
+.deleteButton {
+  opacity: 0;
+  flex-shrink: 0;
+
+  .conversation:hover &,
+  &:focus-within {
+    opacity: 1;
+  }
+
+  @media (hover: none) {
+    opacity: 1;
+  }
+}
+
+.noConversations {
+  text-align: center;
+  padding: layout.$spacing-07 0;
+  color: $text-03;
+
+  svg {
+    fill: $ui-03;
+  }
+}
+
+.noConversationsTitle {
+  @include type.type-style('body-compact-01');
+  color: $text-02;
+  margin: layout.$spacing-03 0 0;
+}
+
+.noConversationsHint {
+  @include type.type-style('label-01');
+  color: $text-03;
+  margin: layout.$spacing-01 0 0;
+}
+
+.foot {
+  padding: layout.$spacing-04 layout.$spacing-05;
+  border-block-start: 1px solid $ui-03;
+}
+
+.online {
+  @include type.type-style('label-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  color: $text-03;
+
+  &::before {
+    content: '';
+    inline-size: layout.$spacing-03;
+    block-size: layout.$spacing-03;
+    border-radius: 50%;
+    background: $support-success;
+  }
+}
+
+:global([data-carbon-theme='g100']) {
+  .sidebar {
+    background: $ui-02-dark;
+    border-inline-end-color: $ui-03-dark;
+  }
+
+  .head,
+  .foot {
+    border-color: $ui-03-dark;
+  }
+
+  .brandName,
+  .current .conversationTitle {
+    color: #f4f4f4;
+  }
+
+  .conversationTitle,
+  .filter,
+  .noConversationsTitle {
+    color: $text-02-dark;
+  }
+
+  .sectionToggle,
+  .conversationDate,
+  .online,
+  .noConversationsHint {
+    color: $text-03-dark;
+  }
+
+  .conversation:hover,
+  .current {
+    background: $ui-03-dark;
+  }
+}

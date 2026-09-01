@@ -1,0 +1,38 @@
+// IBM Carbon, loaded once for the whole app.
+//
+// The pattern follows OpenMRS: components come from `@carbon/react`, icons from
+// `@carbon/react/icons`, and anything Carbon does not provide is written as a co-located SCSS
+// module using Carbon's own layout, type and colour tokens rather than ad-hoc pixel values.
+//
+// `$css--font-face: false` turns off Carbon's own @font-face block. It points at the font files
+// with webpack-style `~@ibm/plex/…` paths, which Vite cannot resolve — so those rules emitted ~200
+// unresolvable URLs and the browser silently fell back to a system font for the entire type scale.
+// Carbon's typography is IBM Plex; without it every heading and label is subtly wrong. The faces
+// are loaded from Google Fonts in index.css instead, under the exact family names Carbon asks for.
+//
+// This is the blanket import, and it stays that way deliberately.
+//
+// Importing only the components in use saves ~36KB gzipped, and it was tried. It breaks silently in
+// two ways that are hard to catch without opening every screen:
+//
+//   1. `@carbon/styles/scss/layout` is easy to miss and emits no components of its own — but Carbon
+//      sizes every control with `clamp(max(var(--cds-layout-size-height-min), …))`, so without it
+//      the clamp is invalid and buttons and inputs keep their colours while losing all height and
+//      padding. They collapse to bare text.
+//   2. A component's directory index does not forward its sub-partials. `components/data-table`
+//      gives you the table but not `data-table/sort`, `action`, `expandable` or `skeleton` — so a
+//      sortable table renders its screen-reader sort instructions as visible body text.
+//
+// Both faults look like a design mistake rather than a missing import, and neither shows up in a
+// type check, a lint run or a build. If this is revisited, the check that catches it is a diff of
+// the emitted `.cds--*` selectors against a build made with this blanket import.
+@use '@carbon/react' with (
+  $css--font-face: false
+);
+
+// The app is full height and scrolls inside its own panes, which Carbon's reset does not assume.
+html,
+body,
+#root {
+  height: 100%;
+}

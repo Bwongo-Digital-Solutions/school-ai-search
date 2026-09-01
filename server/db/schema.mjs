@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   auth_email TEXT NOT NULL UNIQUE,
   display_name TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('admin', 'teacher', 'support_staff')),
+  role TEXT NOT NULL CHECK (role IN
+    ('admin', 'head_teacher', 'accountant', 'bursar', 'teacher', 'support_staff')),
   avatar_url TEXT,
   password_hash TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -66,18 +67,37 @@ CREATE TABLE IF NOT EXISTS users (
 -- are ever stored.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS approval_status TEXT NOT NULL DEFAULT 'approved';
 
--- Widen the role list on databases created before 'support_staff' (non-teaching staff) existed.
+-- Widen the role list on databases created before these roles existed: first 'support_staff'
+-- (non-teaching staff), then the three posts that answer for the institution rather than for a
+-- class — the head teacher who runs the school, and the accountant and bursar who keep its books.
+--
+-- Order matters below. 'bursar' was a designation before it was a role, so the rows have to move
+-- before the designation constraint stops allowing the old value; and the role constraint has to
+-- allow 'bursar' before any row can be given it. Widen, migrate, then narrow.
 ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
-ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin', 'teacher', 'support_staff'));
+ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN
+  ('admin', 'head_teacher', 'accountant', 'bursar', 'teacher', 'support_staff'));
 
--- A staff member's specialisation within their role, which decides what a student ID scan
--- reveals to them: an admin may keep the books (bursar), and support staff split into the
--- gate (askari), the dormitories (matron) and the kitchen (cook). NULL means the role carries
--- no specialisation, which is how every account created before this migration reads.
+-- A support-staff member's post, which decides what a student ID scan reveals to them: the gate
+-- (askari), the dormitories (matron) and the kitchen (cook). NULL means the role carries no
+-- specialisation, which is how every account created before this migration reads.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS designation TEXT;
+
+-- 'bursar' used to live here, as a designation on an administrator's account. It is a role now —
+-- keeping the books is a job, not a posting, and it needs to be assignable without also handing
+-- somebody the administrator's keys. Existing accounts move before the constraint below stops
+-- allowing the old value, or the ALTER would fail on live data.
+--
+-- Idempotent: the UPDATE matches nothing once it has run, and re-running the whole schema is how
+-- every deployment migrates.
 ALTER TABLE users DROP CONSTRAINT IF EXISTS users_designation_check;
+UPDATE users SET role = 'bursar', designation = NULL
+  WHERE designation = 'bursar' AND role = 'admin';
+-- A bursar designation on any other role was never reachable through the UI, but a hand-edited
+-- row could carry one. Clear it rather than let the constraint reject the whole migration.
+UPDATE users SET designation = NULL WHERE designation = 'bursar';
 ALTER TABLE users ADD CONSTRAINT users_designation_check
-  CHECK (designation IS NULL OR designation IN ('bursar', 'askari', 'matron', 'cook'));
+  CHECK (designation IS NULL OR designation IN ('askari', 'matron', 'cook'));
 
 
 -- The school's global identity: one row (id = 'default'), edited by an admin under Settings and
@@ -105,7 +125,13 @@ CREATE TABLE IF NOT EXISTS school_settings (
 ALTER TABLE school_settings ADD COLUMN IF NOT EXISTS school_level TEXT NOT NULL DEFAULT 'secondary';
 ALTER TABLE school_settings DROP CONSTRAINT IF EXISTS school_settings_level_check;
 ALTER TABLE school_settings ADD CONSTRAINT school_settings_level_check
-  CHECK (school_level IN ('pre_school', 'kindergarten', 'primary', 'secondary', 'technical', 'tertiary'));
+  CHECK (school_level IN (
+    'pre_school', 'kindergarten', 'primary',
+    -- A secondary school says whether it runs O-Level, A-Level or both, because that decides both
+    -- the classes it can enrol into and the UNEB scale its report cards are marked on.
+    'secondary_olevel', 'secondary_alevel', 'secondary',
+    'technical', 'tertiary'
+  ));
 
 -- Which national examination system the level maps onto. Uganda schools grade on UNEB scales;
 -- international schools and institutions report a GPA. Kept separate from school_level because the
@@ -183,6 +209,47 @@ CREATE TABLE IF NOT EXISTS curriculum_chunks (
 -- api_key is stored encrypted (AES-256-GCM under SECRETS_KEY), not merely masked on read: a tenant
 -- database dump is a normal operational artefact — backups, a support copy — and it must not hand
 -- over the school's key. base_url is not secret and is stored plainly.
+-- Every backup this school has taken, so the list survives a container restart and a restore can
+-- name what it is restoring. The dump itself lives on disk under BACKUP_DIR; this is the index.
+--
+-- The status column matters because a dump can fail halfway: a row is written before pg_dump runs
+-- and updated after, so a crash leaves 'running' rather than a file that looks complete and is not.
+CREATE TABLE IF NOT EXISTS school_backups (
+  id TEXT PRIMARY KEY,
+  filename TEXT NOT NULL,
+  size_bytes BIGINT NOT NULL DEFAULT 0,
+  kind TEXT NOT NULL DEFAULT 'manual' CHECK (kind IN ('manual', 'scheduled')),
+  status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'complete', 'failed')),
+  error TEXT NOT NULL DEFAULT '',
+  encrypted BOOLEAN NOT NULL DEFAULT FALSE,
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- The external systems a school has connected: its Moodle, and at most one ERP.
+--
+-- A table rather than columns on school_settings, for three reasons. loadSchoolSettings is read on
+-- every request that renders anything and is serialised into documents and the app header, so
+-- credentials must not travel with it. updateSettings is a full-row replace, so a branding save
+-- would blank a token nobody re-typed. And this is N rows by nature.
+--
+-- Tokens are encrypted at rest under SECRETS_KEY, the same as provider_credentials; base_url and
+-- username are not secret and stay readable so the UI can show what is configured.
+CREATE TABLE IF NOT EXISTS school_integrations (
+  provider TEXT PRIMARY KEY
+    CHECK (provider IN ('moodle', 'odoo', 'erpnext', 'dolibarr')),
+  base_url TEXT NOT NULL DEFAULT '',
+  api_token TEXT NOT NULL DEFAULT '',
+  username TEXT NOT NULL DEFAULT '',
+  api_secret TEXT NOT NULL DEFAULT '',
+  config JSONB NOT NULL DEFAULT '{}'::jsonb,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  last_checked_at TIMESTAMPTZ,
+  last_error TEXT NOT NULL DEFAULT '',
+  updated_by TEXT NOT NULL DEFAULT '',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS provider_credentials (
   provider TEXT PRIMARY KEY,
   api_key TEXT NOT NULL DEFAULT '',

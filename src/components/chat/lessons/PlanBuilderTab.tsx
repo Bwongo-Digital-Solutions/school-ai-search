@@ -1,5 +1,4 @@
 import React, { useCallback, useMemo, useState } from 'react';
-import { Clock, FileDown, Save, Sparkles, Wand2 } from 'lucide-react';
 import Field from '@/components/common/Field';
 import { useAuth } from '@/contexts/AuthContext';
 import { useChatContext } from '@/contexts/ChatContext';
@@ -8,6 +7,8 @@ import { downloadFromUrl } from '@/lib/download';
 import { EmptyState, Panel, PrimaryButton, SecondaryButton } from '../fees/shared';
 import { CitationList, StatusBadge, LESSON_STATUS_STYLES, TERM_OPTIONS, currentAcademicYear } from './shared';
 import type { CurriculumFramework, LessonPlan } from '@/types/teaching';
+import styles from '../tabs.module.scss';
+import { Ai, DocumentDownload, MagicWand, Save, Time } from '@carbon/react/icons';
 
 interface Props {
   frameworks: CurriculumFramework[];
@@ -118,25 +119,25 @@ const PlanBuilderTab: React.FC<Props> = ({ frameworks, runAction, onChanged, bus
   const totalMinutes = (plan?.activities || []).reduce((total, activity) => total + Number(activity.minutes || 0), 0);
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[340px,1fr]">
-      <Panel className="p-4 h-fit">
-        <h3 className="text-sm font-semibold text-gray-800 dark:text-white mb-3 flex items-center gap-2">
-          <Wand2 className="w-4 h-4 text-indigo-500" /> Lesson details
+    <div className={styles.split}>
+      <Panel className={styles.padFit}>
+        <h3 className={styles.subheading}>
+          <MagicWand size={16} /> Lesson details
         </h3>
 
-        <div className="space-y-3">
+        <div className={styles.stackTight}>
           <Field
             label="Curriculum"
             value={form.curriculum}
             onChange={set('curriculum')}
             options={frameworks.map(entry => ({ value: entry.id, label: entry.label }))}
-          />
+ />
           <Field
             label="Year / class"
             value={form.gradeLevel}
             onChange={set('gradeLevel')}
             options={gradeOptionsFor(framework)}
-          />
+ />
           <Field label="Subject" value={form.subjectName} onChange={set('subjectName')} placeholder="Biology" />
           <Field
             label="Topic"
@@ -144,7 +145,7 @@ const PlanBuilderTab: React.FC<Props> = ({ frameworks, runAction, onChanged, bus
             onChange={set('topic')}
             placeholder="Photosynthesis"
             hint="The syllabus topic this lesson covers."
-          />
+ />
           <Field label="Focus (optional)" value={form.subtopic} onChange={set('subtopic')} placeholder="Limiting factors" />
           <Field
             label="Lesson length (minutes)"
@@ -153,107 +154,110 @@ const PlanBuilderTab: React.FC<Props> = ({ frameworks, runAction, onChanged, bus
             max={200}
             value={form.durationMinutes}
             onChange={set('durationMinutes')}
-          />
+ />
 
-          <div className="grid grid-cols-2 gap-2">
+          <div className={styles.grid2}>
             <Field label="Academic year" value={form.academicYear} onChange={set('academicYear')} />
             <Field
               label="Term"
               value={form.term}
               onChange={set('term')}
               options={TERM_OPTIONS.filter(option => option.value)}
-            />
+ />
           </div>
 
-          <div className="grid grid-cols-2 gap-2">
+          <div className={styles.grid2}>
             <Field label="Date (optional)" type="date" value={form.lessonDate} onChange={set('lessonDate')} />
             <Field label="Period (optional)" value={form.period} onChange={set('period')} placeholder="Period 3" />
           </div>
         </div>
 
         <PrimaryButton
-          className="w-full mt-4 justify-center"
+          className={styles.fullWidth}
           onClick={generate}
           disabled={Boolean(busy) || !form.topic.trim() || !canGenerate}
         >
-          <Sparkles className="w-4 h-4" /> Draft this lesson
+          <Ai size={16} /> Draft this lesson
         </PrimaryButton>
 
         {!canGenerate && (
-          <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-2">
+          <p className={styles.warn}>
             Pick a configured AI model in the chat composer first — the Local Rules engine can only search
             student records.
           </p>
         )}
       </Panel>
 
-      <Panel className="p-4">
+      <Panel className={styles.pad}>
         {!plan ? (
           <EmptyState message="Fill in the lesson details and press “Draft this lesson”. The plan is written from your school's curriculum library, and every draft cites the syllabus passages it came from." />
         ) : (
           <div>
-            <div className="flex flex-wrap items-start justify-between gap-3 pb-3 border-b border-gray-100 dark:border-gray-700">
-              <div className="min-w-0">
+            <div className={styles.betweenTopRule}>
+              <div className={styles.rowMain}>
+                {/* The plan's title is edited in place, where it reads as the heading it is —
+                    a labelled field above it would say "Title" over something that already says so. */}
                 <input
                   value={plan.title}
                   onChange={event => setPlan({ ...plan, title: event.target.value })}
-                  className="w-full bg-transparent text-base font-semibold text-gray-800 dark:text-white border-none outline-none focus:bg-gray-50 dark:focus:bg-gray-700 rounded px-1 -mx-1"
+                  className={styles.inlineTitle}
+                  aria-label="Lesson plan title"
                 />
-                <p className="text-xs text-gray-400 mt-0.5">
+                <p className={styles.note}>
                   {plan.subject_name} · {plan.topic} · {plan.duration_minutes} minutes
                 </p>
               </div>
-              <div className="flex items-center gap-2">
+              <div className={styles.actions}>
                 <StatusBadge status={plan.status} styles={LESSON_STATUS_STYLES} />
                 {totalMinutes !== plan.duration_minutes && (
-                  <span className="inline-flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400">
-                    <Clock className="w-3 h-3" /> stages total {totalMinutes} min
+                  <span className={styles.warn}>
+                    <Time size={16} /> stages total {totalMinutes} min
                   </span>
                 )}
               </div>
             </div>
 
-            <div className="mt-4 space-y-4">
+            <div className={styles.stack}>
               <EditableList
                 label="Learning outcomes"
                 items={plan.learning_outcomes}
                 onChange={items => setPlan({ ...plan, learning_outcomes: items })}
-              />
+ />
               <EditableList
                 label="Competencies"
                 items={plan.competencies}
                 onChange={items => setPlan({ ...plan, competencies: items })}
-              />
+ />
               <EditableList
                 label="Teaching aids"
                 items={plan.materials}
                 onChange={items => setPlan({ ...plan, materials: items })}
-              />
+ />
 
               <div>
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-1.5">
+                <p className={styles.label}>
                   Lesson sequence
                 </p>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs min-w-[520px]">
+                <div className={styles.tableWrap}>
+                  <table className={styles.table}>
                     <thead>
-                      <tr className="text-left text-[10px] uppercase tracking-wider text-gray-400">
-                        <th className="pb-1 pr-2 w-28">Stage</th>
-                        <th className="pb-1 pr-2">Teacher does</th>
-                        <th className="pb-1">Learners do</th>
+                      <tr className={styles.thead}>
+                        <th className={styles.th}>Stage</th>
+                        <th>Teacher does</th>
+                        <th>Learners do</th>
                       </tr>
                     </thead>
                     <tbody>
                       {plan.activities.map((activity, index) => (
-                        <tr key={index} className="align-top border-t border-gray-100 dark:border-gray-700">
-                          <td className="py-2 pr-2 font-medium text-gray-700 dark:text-gray-200">
+                        <tr key={index} className={styles.tdTop}>
+                          <td className={styles.tdStrong}>
                             {activity.stage}
-                            <span className="block text-[10px] text-gray-400">{activity.minutes} min</span>
+                            <span className={styles.label}>{activity.minutes} min</span>
                           </td>
-                          <td className="py-2 pr-2 text-gray-600 dark:text-gray-300">
+                          <td className={styles.td}>
                             {activity.teacherActivity || activity.teacher_activity}
                           </td>
-                          <td className="py-2 text-gray-600 dark:text-gray-300">
+                          <td className={styles.td}>
                             {activity.learnerActivity || activity.learner_activity}
                           </td>
                         </tr>
@@ -265,11 +269,11 @@ const PlanBuilderTab: React.FC<Props> = ({ frameworks, runAction, onChanged, bus
 
               {plan.assessment.length > 0 && (
                 <div>
-                  <p className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-1.5">Assessment</p>
-                  <ul className="space-y-1 text-xs text-gray-600 dark:text-gray-300">
+                  <p className={styles.label}>Assessment</p>
+                  <ul className={styles.stackTight}>
                     {plan.assessment.map((entry, index) => (
                       <li key={index}>
-                        <span className="font-medium">{entry.method}:</span> {entry.description}
+                        <span className={styles.strong}>{entry.method}:</span> {entry.description}
                       </li>
                     ))}
                   </ul>
@@ -281,20 +285,20 @@ const PlanBuilderTab: React.FC<Props> = ({ frameworks, runAction, onChanged, bus
                 type="textarea"
                 value={plan.differentiation}
                 onChange={value => setPlan({ ...plan, differentiation: String(value ?? '') })}
-              />
+ />
               <Field
                 label="Homework"
                 type="textarea"
                 value={plan.homework}
                 onChange={value => setPlan({ ...plan, homework: String(value ?? '') })}
-              />
+ />
 
               <CitationList citations={plan.refs} />
             </div>
 
-            <div className="flex flex-wrap gap-2 mt-4 pt-3 border-t border-gray-100 dark:border-gray-700">
+            <div className={styles.actionsRule}>
               <PrimaryButton onClick={saveEdits} disabled={Boolean(busy)}>
-                <Save className="w-4 h-4" /> Save changes
+                <Save size={16} /> Save changes
               </PrimaryButton>
               {plan.status !== 'approved' && (
                 <SecondaryButton onClick={approve} disabled={Boolean(busy)}>
@@ -312,7 +316,7 @@ const PlanBuilderTab: React.FC<Props> = ({ frameworks, runAction, onChanged, bus
                 }
                 disabled={Boolean(busy)}
               >
-                <FileDown className="w-4 h-4" /> Export PDF
+                <DocumentDownload size={16} /> Export PDF
               </SecondaryButton>
             </div>
           </div>
@@ -345,7 +349,7 @@ const EditableList = ({
       )
     }
     hint="One per line."
-  />
+ />
 );
 
 export default PlanBuilderTab;

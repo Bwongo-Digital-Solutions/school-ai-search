@@ -1,0 +1,393 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+// The layout every full-screen workspace shares: a page header, a band of controls under it, and a
+// scrolling body of cards. Shared so the fees, records, monitoring and teaching screens have the
+// same margins and the same scroll behaviour rather than each inventing its own.
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  block-size: 100%;
+  overflow: hidden;
+  background-color: $ui-01;
+}
+
+.controls {
+  padding: layout.$spacing-05;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+  flex-shrink: 0;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: layout.$spacing-03;
+
+  // The search field takes the room the filters do not.
+  > :first-child {
+    flex: 1;
+    min-inline-size: min(14rem, 100%);
+  }
+}
+
+.filter {
+  inline-size: auto;
+  min-inline-size: min(11rem, 100%);
+}
+
+.body {
+  flex: 1;
+  min-block-size: 0;
+  overflow: auto;
+  padding: 0 layout.$spacing-05 layout.$spacing-05;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+}
+
+// A body that starts at the top of the screen, for workspaces with no control band.
+.bodyTop {
+  padding-block-start: layout.$spacing-05;
+}
+
+.loading {
+  display: flex;
+  justify-content: center;
+  padding: layout.$spacing-09 layout.$spacing-05;
+}
+
+// A table inside a card. Scrolls sideways on its own so the page never does.
+.tableWrap {
+  overflow-x: auto;
+}
+
+.numeric {
+  text-align: end;
+}
+
+.strong {
+  @include type.type-style('heading-compact-01');
+  color: $text-01;
+}
+
+.primary {
+  @include type.type-style('body-compact-01');
+  color: $text-01;
+  margin: 0;
+}
+
+.secondary {
+  @include type.type-style('helper-text-01');
+  color: $text-03;
+  margin: 0;
+}
+
+.note {
+  @include type.type-style('label-01');
+  color: $text-03;
+  margin: 0;
+}
+
+// A callout inside the body: a scan result, a warning, a summary worth separating from the list.
+.callout {
+  background: $ui-02;
+  border: 1px solid $ui-03;
+  border-inline-start: 3px solid var(--brand-01, #{$brand-01-fallback});
+}
+
+.calloutHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: layout.$spacing-03;
+  padding: layout.$spacing-03 layout.$spacing-05;
+  border-block-end: 1px solid $ui-03;
+}
+
+.calloutTitle {
+  @include type.type-style('label-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  color: $text-02;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+
+  svg {
+    fill: var(--brand-01, #{$brand-01-fallback});
+  }
+}
+
+.calloutBody {
+  padding: layout.$spacing-05;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+}
+
+.calloutIdentity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: layout.$spacing-03;
+}
+
+.calloutName {
+  @include type.type-style('heading-03');
+  color: $text-01;
+  margin: 0;
+}
+
+:global([data-carbon-theme='g100']) {
+  .screen {
+    background-color: $ui-01-dark;
+  }
+
+  .callout {
+    background: $ui-02-dark;
+    border-color: $ui-03-dark;
+    border-inline-start-color: var(--brand-01, #{$brand-01-fallback});
+  }
+
+  .calloutHead {
+    border-block-end-color: $ui-03-dark;
+  }
+
+  .calloutTitle {
+    color: $text-02-dark;
+  }
+
+  .strong,
+  .primary,
+  .calloutName {
+    color: #f4f4f4;
+  }
+
+  .secondary,
+  .note {
+    color: $text-03-dark;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// A list of events inside a card — gate movements, audit entries, admissions.
+// One shape, because they are all the same thing: who, what, and when.
+// ---------------------------------------------------------------------------
+
+.list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.entry {
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-04;
+  padding: layout.$spacing-04 layout.$spacing-05;
+  border-block-start: 1px solid $ui-03;
+
+  svg {
+    flex-shrink: 0;
+  }
+}
+
+.entryMain {
+  min-inline-size: 0;
+  flex: 1;
+}
+
+.entryTitle {
+  @include type.type-style('body-compact-01');
+  color: $text-01;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entrySub {
+  @include type.type-style('helper-text-01');
+  color: $text-03;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entryTime {
+  @include type.type-style('label-01');
+  color: $text-03;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.entryTag {
+  @include type.type-style('label-01');
+  color: $text-03;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin-inline-start: layout.$spacing-03;
+}
+
+// Initials instead of a photograph. The list is long, the faces are not stored, and two letters
+// give the eye something to find a name by while scanning.
+.initials {
+  inline-size: layout.$spacing-07;
+  block-size: layout.$spacing-07;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: $ui-01;
+  color: var(--brand-01, #{$brand-01-fallback});
+  @include type.type-style('label-01');
+  font-weight: 600;
+}
+
+// A row of counts across the top of a card — present/absent/late/excused, or the day's meals.
+//
+// Two per row on a phone rather than four: at four the labels wrap mid-word and the figures stop
+// being scannable, which is the only reason the row exists.
+.tally {
+  display: grid;
+  gap: layout.$spacing-05 layout.$spacing-03;
+  padding: layout.$spacing-05;
+  border-block-end: 1px solid $ui-03;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+
+  @media (min-width: 34rem) {
+    grid-template-columns: none;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+  }
+}
+
+.tallyItem {
+  text-align: center;
+}
+
+.tallyValue {
+  @include type.type-style('heading-04');
+  color: $text-01;
+  margin: 0;
+}
+
+.tallyLabel {
+  @include type.type-style('label-01');
+  color: $text-03;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin: layout.$spacing-01 0 0;
+}
+
+.grid2 {
+  display: grid;
+  gap: layout.$spacing-05;
+  grid-template-columns: 1fr;
+
+  @media (min-width: 66rem) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.empty {
+  @include type.type-style('body-compact-01');
+  padding: layout.$spacing-07 layout.$spacing-05;
+  text-align: center;
+  color: $text-03;
+  margin: 0;
+}
+
+// Direction and outcome, at the gate. Colour carries meaning here, so it is stated rather than
+// left to the reader to infer from an arrow.
+.iconOut { fill: #b28600; }
+.iconIn { fill: $support-success; }
+.iconDeclined { fill: $support-error; }
+.iconNeutral { fill: var(--brand-01, #{$brand-01-fallback}); }
+
+:global([data-carbon-theme='g100']) {
+  .entry,
+  .tally {
+    border-color: $ui-03-dark;
+  }
+
+  .entryTitle,
+  .tallyValue {
+    color: #f4f4f4;
+  }
+
+  .entrySub,
+  .entryTime,
+  .entryTag,
+  .tallyLabel,
+  .empty {
+    color: $text-03-dark;
+  }
+
+  .initials {
+    background: $ui-03-dark;
+  }
+
+  .iconOut {
+    fill: $support-warning;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The section strip on a workspace: which part of Fees, Lessons or the Examiner
+// is open. Carbon's Tabs, with the school's colour marking the current one — the
+// same device the side rail uses, so "where am I" reads the same at both levels.
+// ---------------------------------------------------------------------------
+
+.tabs {
+  margin-block-start: layout.$spacing-05;
+
+  :global(.cds--tab--list) {
+    padding-inline-start: 0;
+  }
+
+  :global(.cds--tabs__nav-item) {
+    min-inline-size: 9rem;
+  }
+
+  :global(.cds--tabs__nav-item--selected) {
+    box-shadow: inset 0 2px 0 0 var(--brand-01, #{$brand-01-fallback}) !important;
+  }
+
+  :global(.cds--tabs__nav-link:focus),
+  :global(.cds--tabs__nav-link:active) {
+    outline: 2px solid var(--brand-01, #{$brand-01-fallback}) !important;
+  }
+}
+
+// "Saving…", beside the page title while something is in flight.
+.busy {
+  @include type.type-style('label-01');
+  display: inline-flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  color: $text-02;
+}
+
+:global([data-carbon-theme='g100']) .busy {
+  color: $text-02-dark;
+}
+
+
+// Tighter gutters on a phone. At 360px a 1rem gutter each side, plus each card's own padding, is a
+// third of the screen spent on whitespace — and these are dense, working screens.
+@media (max-width: 33.9375rem) {
+  .controls {
+    padding-inline: layout.$spacing-03;
+  }
+  .body {
+    padding-inline: layout.$spacing-03;
+  }
+}

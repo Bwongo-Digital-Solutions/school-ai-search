@@ -1,0 +1,96 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+// The bar across the top of a whole screen. White, with the page's grey starting beneath it, so
+// the eye has a fixed place to look for "where am I" on every screen in the app.
+.pageHeader {
+  @include type.type-style('body-compact-02');
+  color: $text-02;
+  inline-size: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: layout.$spacing-04;
+  background-color: $ui-02;
+  border-block-end: 1px solid $ui-03;
+  padding: layout.$spacing-04 layout.$spacing-05;
+
+  // On a phone the actions wrap under the title, so a fixed 6rem either wastes a third of a short
+  // screen or clips the wrapped row. The height is a minimum only once there is room for it.
+  @media (min-width: 42rem) {
+    min-block-size: layout.$spacing-12;
+    padding: layout.$spacing-05;
+  }
+}
+
+.content {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: layout.$spacing-05;
+  min-width: 0;
+}
+
+// The picture beside the title. Sized to the header, in the school's colour.
+.illustration {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--brand-01, #{$brand-01-fallback});
+
+  svg {
+    fill: currentColor;
+  }
+}
+
+.labels {
+  min-width: 0;
+
+  p:first-of-type {
+    margin: 0 0 layout.$spacing-02;
+  }
+}
+
+// The school's name, small and grey above the page name — so every screen says whose school this
+// is without the page title having to carry it.
+.supraLabel {
+  @include type.type-style('body-compact-02');
+  color: $text-02;
+}
+
+.pageName {
+  @include type.type-style('heading-03');
+  color: $text-01;
+  margin: 0;
+
+  @media (min-width: 42rem) {
+    @include type.type-style('heading-04');
+  }
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+:global([data-carbon-theme='g100']) {
+  .pageHeader {
+    background-color: $ui-02-dark;
+    border-bottom-color: $ui-03-dark;
+    color: $text-02-dark;
+  }
+
+  .supraLabel {
+    color: $text-02-dark;
+  }
+
+  .pageName {
+    color: #f4f4f4;
+  }
+}

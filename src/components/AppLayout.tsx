@@ -11,64 +11,101 @@ import FeeManagementWorkspace from './chat/FeeManagementWorkspace';
 import LessonPlannerWorkspace from './chat/LessonPlannerWorkspace';
 import DigitalExaminerWorkspace from './chat/DigitalExaminerWorkspace';
 import SettingsPanel from './chat/SettingsPanel';
+import SchoolDataWorkspace from './chat/SchoolDataWorkspace';
+import EmbeddedSystem from './chat/EmbeddedSystem';
 import InboxPanel from './chat/InboxPanel';
 import MonitoringDashboard from './chat/MonitoringDashboard';
 import TeacherPerformance from './chat/TeacherPerformance';
 import AppFooter from './common/AppFooter';
+import styles from './app-layout.module.scss';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useAuth } from '@/contexts/AuthContext';
-import { Shield, Clock, Users as UsersIcon } from 'lucide-react';
+import { AccessDenied, PageHeader } from './common';
+import {
+  ACCOUNT_ADMIN_ROLES,
+  FINANCE_ROLES,
+  PRIVILEGED_ROLES,
+  TEACHING_ROLES,
+  getRoleLabel,
+} from '@/lib/roles';
+import type { ActiveView } from '@/contexts/ChatContext';
+import { Time, UserAdmin } from '@carbon/react/icons';
+import { Tag } from '@carbon/react';
 
 const AuditView: React.FC = () => {
   const { isAdmin } = useAuth();
 
   if (!isAdmin) {
     return (
-      <div className="flex flex-col items-center justify-center h-full bg-gradient-to-b from-gray-50/50 to-white dark:from-gray-900/50 dark:to-gray-900 p-8">
-        <div className="max-w-md text-center">
-          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-purple-100 to-indigo-100 dark:from-purple-900/30 dark:to-indigo-900/30 flex items-center justify-center mx-auto mb-4">
-            <Shield className="w-8 h-8 text-purple-500" />
-          </div>
-          <h2 className="text-xl font-bold text-gray-800 dark:text-white mb-2">Admin Access Required</h2>
-          <p className="text-sm text-gray-500 dark:text-gray-400">
-            The audit log is only accessible to administrators. Please sign in with an admin account to view this section.
-          </p>
-        </div>
-      </div>
+      <AccessDenied
+        title="Administrators only"
+        message="The audit trail records who changed which student record and when. It is available to administrators."
+      />
     );
   }
 
   return (
-    <div className="flex flex-col h-full bg-gradient-to-b from-gray-50/50 to-white dark:from-gray-900/50 dark:to-gray-900">
-      <div className="px-6 pt-6 pb-4 border-b border-gray-100 dark:border-gray-800">
-        <div className="flex items-center justify-between mb-2">
-          <div>
-            <h2 className="text-xl font-bold text-gray-800 dark:text-white flex items-center gap-2">
-              <Clock className="w-6 h-6 text-indigo-500" />
-              Audit Trail
-            </h2>
-            <p className="text-xs text-gray-400 mt-0.5">Track all changes made to student records</p>
-          </div>
-          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-medium bg-purple-50 dark:bg-purple-900/20 text-purple-600 dark:text-purple-400 border border-purple-200 dark:border-purple-800">
-            <Shield className="w-3 h-3" /> Admin Only
-          </span>
-        </div>
-      </div>
-      <div className="flex-1 overflow-auto px-6 py-4">
+    <div className={styles.audit}>
+      <PageHeader title="Audit trail" illustration={<Time size={32} />}>
+        <Tag type="purple" size="sm" renderIcon={UserAdmin}>
+          Administrators only
+        </Tag>
+      </PageHeader>
+      <div className={styles.auditBody}>
         <AuditLogPanel />
       </div>
     </div>
   );
 };
 
+/**
+ * Which roles may open each section.
+ *
+ * Stated here, next to the routing, rather than left to each screen. The rail hides what a role
+ * cannot use, but hiding a link is not a permission check — a saved view, a stale link or a role
+ * changed mid-session all arrive here directly. Every screen still guards itself server-side; this
+ * is the structural fence that stops the wrong screen rendering at all.
+ *
+ * A view absent from this map is open to any signed-in staff member.
+ */
+const VIEW_ROLES: Partial<Record<ActiveView, readonly string[]>> = {
+  chat: TEACHING_ROLES,
+  students: TEACHING_ROLES,
+  records: TEACHING_ROLES,
+  lessons: TEACHING_ROLES,
+  examiner: TEACHING_ROLES,
+  messages: [...TEACHING_ROLES, ...FINANCE_ROLES],
+  finance: FINANCE_ROLES,
+  monitoring: PRIVILEGED_ROLES,
+  teaching: PRIVILEGED_ROLES,
+  audit: PRIVILEGED_ROLES,
+  data: PRIVILEGED_ROLES,
+  elearning: [...TEACHING_ROLES, ...FINANCE_ROLES],
+  erp: PRIVILEGED_ROLES,
+  users: ACCOUNT_ADMIN_ROLES,
+  settings: ACCOUNT_ADMIN_ROLES,
+};
+
 const AppLayout: React.FC = () => {
   const { activeView } = useChatContext();
-  const { isAuthenticated, isSupportStaff } = useAuth();
+  const { user, isAuthenticated, isSupportStaff } = useAuth();
 
   const renderMainContent = () => {
     // Non-teaching support staff are limited to school fees payment status.
     if (isSupportStaff) {
       return <FeeStatusPanel />;
+    }
+
+    // Everyone else is checked against the map above before anything renders. Fees are the one
+    // screen every signed-in role can open, so an unlisted view falls through to the switch.
+    const allowed = VIEW_ROLES[activeView];
+    if (allowed && user && !allowed.includes(user.role)) {
+      return (
+        <AccessDenied
+          title="Not available to your role"
+          message={`This section is not part of what a ${getRoleLabel(user.role).toLowerCase()} does here. If you need it, ask an administrator.`}
+        />
+      );
     }
 
     switch (activeView) {
@@ -92,10 +129,18 @@ const AppLayout: React.FC = () => {
         return <DigitalExaminerWorkspace />;
       case 'monitoring':
         return <MonitoringDashboard />;
+      // Teacher performance moved under Monitoring, where its audience already is. Kept as an
+      // alias so an old link or a saved view still lands on the report rather than nowhere.
       case 'teaching':
-        return <TeacherPerformance />;
+        return <MonitoringDashboard />;
       case 'messages':
         return <InboxPanel />;
+      case 'data':
+        return <SchoolDataWorkspace />;
+      case 'elearning':
+        return <EmbeddedSystem kind="elearning" />;
+      case 'erp':
+        return <EmbeddedSystem kind="erp" />;
       case 'settings':
         return <SettingsPanel />;
       default:
@@ -104,19 +149,17 @@ const AppLayout: React.FC = () => {
   };
 
   return (
-    <div className="h-screen flex flex-col bg-white dark:bg-gray-900 overflow-hidden">
-      {/* Header */}
+    <div className={styles.app}>
+      {/* The header carries the brand and the global actions; the section rail hangs off it. */}
       <Header />
 
-      {/* Main content */}
-      <div className="flex-1 flex overflow-hidden">
+      {/* Offset for the rail, which is fixed and 16rem wide once the viewport can afford it. */}
+      <div className={styles.main}>
         {/* Sidebar - only show in chat view */}
         {activeView === 'chat' && isAuthenticated && !isSupportStaff && <ConversationSidebar />}
 
         {/* Main area */}
-        <div className="flex-1 min-w-0">
-          {renderMainContent()}
-        </div>
+        <div className={styles.content}>{renderMainContent()}</div>
       </div>
 
       {/* System-wide product footer */}

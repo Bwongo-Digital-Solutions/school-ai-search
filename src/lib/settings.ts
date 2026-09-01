@@ -5,6 +5,8 @@ export type SchoolLevel =
   | 'pre_school'
   | 'kindergarten'
   | 'primary'
+  | 'secondary_olevel'
+  | 'secondary_alevel'
   | 'secondary'
   | 'technical'
   | 'tertiary';
@@ -29,11 +31,25 @@ export interface SchoolSettings {
  */
 export const SCHOOL_LEVEL_OPTIONS: { value: SchoolLevel; label: string; grades: string }[] = [
   { value: 'pre_school', label: 'Pre-school', grades: 'Development descriptors — no marks or aggregate' },
-  { value: 'kindergarten', label: 'Kindergarten / Nursery', grades: 'Development descriptors — no marks or aggregate' },
-  { value: 'primary', label: 'Primary', grades: 'PLE aggregate points (best 4 subjects) and divisions' },
+  {
+    value: 'kindergarten',
+    label: 'Kindergarten / Nursery',
+    grades: 'Development descriptors — no marks or aggregate',
+  },
+  { value: 'primary', label: 'Primary (PLE)', grades: 'PLE aggregate points (best 4 subjects) and divisions' },
+  {
+    value: 'secondary_olevel',
+    label: 'Secondary — O-Level only (UCE)',
+    grades: 'UCE aggregate points and divisions',
+  },
+  {
+    value: 'secondary_alevel',
+    label: 'Secondary — A-Level only (UACE)',
+    grades: 'UACE principal grades A–F',
+  },
   {
     value: 'secondary',
-    label: 'Secondary',
+    label: 'Secondary — O and A Level',
     grades: 'S1–S4: UCE aggregate points and divisions · S5–S6: UACE principal grades A–F',
   },
   { value: 'technical', label: 'Technical / Vocational', grades: 'Distinction / Credit / Pass' },
