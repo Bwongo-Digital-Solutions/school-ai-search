@@ -1,0 +1,44 @@
+@use '@carbon/layout';
+@use '../../styles/vars' as *;
+
+.modal {
+  // Carbon caps a passive modal's content height for us; this only stops a long form from being
+  // clipped at the bottom on a short window.
+  :global(.cds--modal-content) {
+    padding-block-end: layout.$spacing-05;
+    margin-block-end: 0;
+  }
+}
+
+.heading {
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+
+  svg {
+    fill: var(--brand-01, #{$brand-01-fallback});
+    flex-shrink: 0;
+  }
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+}
+
+// The caller's own buttons. Right-aligned above the modal's bottom edge, separated by the same
+// hairline as everything else.
+.footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: layout.$spacing-03;
+  flex-wrap: wrap;
+  margin-block-start: layout.$spacing-06;
+  padding-block-start: layout.$spacing-05;
+  border-block-start: 1px solid $ui-03;
+}
+
+:global([data-carbon-theme='g100']) .footer {
+  border-block-start-color: $ui-03-dark;
+}

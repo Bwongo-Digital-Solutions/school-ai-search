@@ -1,0 +1,25 @@
+@use '@carbon/layout';
+@use '../../styles/vars' as *;
+
+// A card is a white pane with a hairline border, on the page's grey. That single line of contrast
+// is the whole layering system: it is what tells the eye where one thing ends and the next begins.
+.widgetCard {
+  background-color: $ui-02;
+  border: 1px solid $ui-03;
+}
+
+// A card whose content continues into a toolbar or table below it, so the seam is not drawn twice.
+.flush {
+  border-bottom: none;
+}
+
+.padded {
+  padding: layout.$spacing-05;
+}
+
+:global([data-carbon-theme='g100']) {
+  .widgetCard {
+    background-color: $ui-02-dark;
+    border-color: $ui-03-dark;
+  }
+}

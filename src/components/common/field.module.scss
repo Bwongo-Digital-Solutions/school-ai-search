@@ -1,0 +1,16 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+// Carbon's own form controls carry the label, the helper text and the invalid state, so this only
+// gives the wrapper a consistent block of space in a stacked form.
+.field {
+  display: block;
+  inline-size: 100%;
+}
+
+// A checkbox needs the label beside it rather than above, which is the one shape Carbon's stacked
+// form does not already produce.
+.checkbox {
+  padding-block-start: layout.$spacing-05;
+}

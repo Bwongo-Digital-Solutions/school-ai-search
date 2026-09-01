@@ -1,0 +1,217 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  block-size: 100%;
+  overflow: hidden;
+  background-color: $ui-01;
+}
+
+.body {
+  flex: 1;
+  min-block-size: 0;
+  overflow: auto;
+  padding: layout.$spacing-05;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+}
+
+.columns {
+  display: grid;
+  gap: layout.$spacing-05;
+  align-items: start;
+
+  // The guidance moves beside the list only when both can stay readable.
+  @media (min-width: 66rem) {
+    grid-template-columns: 20rem minmax(0, 1fr);
+  }
+}
+
+.aside {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+}
+
+.asideBody {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+  padding: 0 layout.$spacing-05 layout.$spacing-05;
+}
+
+.asideText {
+  @include type.type-style('body-compact-01');
+  color: $text-02;
+  margin: 0;
+}
+
+.roleName {
+  @include type.type-style('heading-compact-01');
+  color: $text-01;
+  margin: 0 0 layout.$spacing-02;
+}
+
+// A person in a list — the same row whether they are waiting for approval or already active.
+.row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: layout.$spacing-05;
+  padding: layout.$spacing-04 layout.$spacing-05;
+  border-top: 1px solid $ui-03;
+}
+
+// The active list adds a role picker between the person and the actions.
+.activeRow {
+  @media (min-width: 42rem) {
+    grid-template-columns: minmax(0, 1fr) 12rem auto;
+  }
+}
+
+.person {
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-04;
+  min-inline-size: 0;
+}
+
+// A square initial-less avatar, tinted by role. Square because everything here is; tinted because
+// role is the one thing you scan this list for.
+.avatar {
+  inline-size: layout.$spacing-08;
+  block-size: layout.$spacing-08;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: $ui-01;
+  color: $text-02;
+
+  svg {
+    fill: currentColor;
+  }
+}
+
+.avatarAdmin {
+  background: #e8daff;
+  color: #6929c4;
+}
+
+.avatarTeacher {
+  background: #d0e2ff;
+  color: #0043ce;
+}
+
+.avatarSupport {
+  background: #a7f0ba;
+  color: #0e6027;
+}
+
+.avatarPending {
+  background: #fcf4d6;
+  color: #8e6a00;
+}
+
+.identity {
+  min-inline-size: 0;
+}
+
+.name {
+  @include type.type-style('heading-compact-01');
+  color: $text-01;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  flex-wrap: wrap;
+}
+
+.self {
+  @include type.type-style('label-01');
+  color: $text-03;
+}
+
+.email {
+  @include type.type-style('helper-text-01');
+  color: $text-03;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: layout.$spacing-02;
+}
+
+.loading {
+  padding: layout.$spacing-07 layout.$spacing-05;
+  display: flex;
+  justify-content: center;
+}
+
+.fields {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+}
+
+.modalCopy {
+  @include type.type-style('body-01');
+  color: $text-01;
+  margin: 0 0 layout.$spacing-03;
+}
+
+.modalNote {
+  @include type.type-style('helper-text-01');
+  color: $text-02;
+  margin: 0;
+}
+
+:global([data-carbon-theme='g100']) {
+  .screen {
+    background-color: $ui-01-dark;
+  }
+
+  .row {
+    border-top-color: $ui-03-dark;
+  }
+
+  .name,
+  .roleName,
+  .modalCopy {
+    color: #f4f4f4;
+  }
+
+  .asideText,
+  .modalNote {
+    color: $text-02-dark;
+  }
+
+  .email,
+  .self {
+    color: $text-03-dark;
+  }
+
+  .avatar {
+    background: $ui-03-dark;
+    color: $text-02-dark;
+  }
+}
+
+
+// Tighter gutters on a phone. At 360px a 1rem gutter each side, plus each card's own padding, is a
+// third of the screen spent on whitespace — and these are dense, working screens.
+@media (max-width: 33.9375rem) {
+  .body {
+    padding-inline: layout.$spacing-03;
+  }
+}

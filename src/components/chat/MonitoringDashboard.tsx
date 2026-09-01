@@ -1,11 +1,33 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  AlertTriangle, ArrowLeftRight, CheckCircle2, ClipboardList, DoorOpen, Loader2,
-  LogIn, LogOut, MapPin, RefreshCw, ShieldCheck, UtensilsCrossed, XCircle,
-} from 'lucide-react';
+  Button,
+  DatePicker,
+  DatePickerInput,
+  InlineLoading,
+  InlineNotification,
+  Tab,
+  TabList,
+  Tabs,
+  Tag,
+} from '@carbon/react';
+import {
+  CheckmarkFilled,
+  Close,
+  Education,
+  Exit,
+  ListChecked,
+  Location,
+  Login,
+  Renew,
+  Security,
+} from '@carbon/react/icons';
 import { supabase } from '@/lib/supabase';
 import { formatDate, formatDateTime, todayIso } from '@/lib/format';
-import StatTile from '@/components/common/StatTile';
+import { classAndSection } from '@/lib/classLevels';
+import { CardHeader, PageHeader, StatRow, StatTile, WidgetCard } from '@/components/common';
+import TeacherPerformance from './TeacherPerformance';
+import styles from './workspace.module.scss';
+import { useSettings } from '@/contexts/SettingsContext';
 
 /* The shapes returned by POST /api/functions/monitoring. Everything is scoped to one day
    except off_premises, which is resolved over a rolling window — a student who left
@@ -91,33 +113,51 @@ interface Monitoring {
 const Section: React.FC<{
   title: string;
   subtitle?: string;
-  icon: React.ElementType;
   children: React.ReactNode;
-}> = ({ title, subtitle, icon: Icon, children }) => (
-  <section className="bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 rounded-xl overflow-hidden">
-    <div className="px-4 py-3 border-b border-gray-100 dark:border-gray-700">
-      <h3 className="text-sm font-semibold text-gray-800 dark:text-white flex items-center gap-2">
-        <Icon className="w-4 h-4 text-indigo-500" />
-        {title}
-      </h3>
-      {subtitle && <p className="text-xs text-gray-400 mt-0.5">{subtitle}</p>}
-    </div>
+}> = ({ title, subtitle, children }) => (
+  <WidgetCard>
+    <CardHeader title={title}>{subtitle && <span className={styles.note}>{subtitle}</span>}</CardHeader>
     {children}
-  </section>
+  </WidgetCard>
 );
 
 const Empty: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <p className="px-4 py-6 text-xs text-gray-400 text-center">{children}</p>
+  <p className={styles.empty}>{children}</p>
 );
 
+/** Two letters where a photograph would be, so a long list can still be scanned by name. */
 const Initials: React.FC<{ name: string }> = ({ name }) => (
-  <span className="w-7 h-7 shrink-0 rounded-full bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-300 text-[10px] font-semibold flex items-center justify-center">
+  <span className={styles.initials}>
     {name.split(/\s+/).map((part) => part[0] || '').slice(0, 2).join('').toUpperCase()}
   </span>
 );
 
+/** A count with its label under it, for the rows of tallies on the register and meals cards. */
+const Tally: React.FC<{ label: string; value: number }> = ({ label, value }) => (
+  <div className={styles.tallyItem}>
+    <p className={styles.tallyValue}>{value}</p>
+    <p className={styles.tallyLabel}>{label}</p>
+  </div>
+);
+
+/**
+ * The two things an administrator monitors: what happened today, and how the teaching is going.
+ *
+ * Teacher performance used to sit under Teaching, beside the lesson planner. It belongs here: it is
+ * a report *about* teachers rather than a tool *for* them, and its audience is the same person who
+ * reads the gate log and the register.
+ */
+const SECTIONS = [
+  { key: 'today', label: 'Today', icon: ListChecked },
+  { key: 'teaching', label: 'Teacher performance', icon: Education },
+] as const;
+
+type SectionKey = (typeof SECTIONS)[number]['key'];
+
 const MonitoringDashboard: React.FC = () => {
+  const [section, setSection] = useState<SectionKey>('today');
   const [date, setDate] = useState(todayIso());
+  const { settings } = useSettings();
   const [data, setData] = useState<Monitoring | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -140,294 +180,285 @@ const MonitoringDashboard: React.FC = () => {
   useEffect(() => { load(date); }, [date, load]);
 
   return (
-    <div className="flex flex-col h-full bg-gradient-to-b from-gray-50/50 to-white dark:from-gray-900/50 dark:to-gray-900">
-      <div className="px-6 pt-6 pb-4 border-b border-gray-100 dark:border-gray-800">
-        <div className="flex items-start justify-between gap-4 flex-wrap">
-          <div>
-            <h2 className="text-xl font-bold text-gray-800 dark:text-white flex items-center gap-2">
-              <ClipboardList className="w-6 h-6 text-indigo-500" />
-              Monitoring
-            </h2>
-            <p className="text-xs text-gray-400 mt-0.5">
-              Gate movements, exam clearance and the day&apos;s registers
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <input
-              type="date"
-              value={date}
-              onChange={(event) => setDate(event.target.value)}
-              className="px-3 py-1.5 rounded-md text-xs border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200"
-            />
-            <button
-              onClick={() => load(date)}
-              disabled={loading}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:text-gray-800 disabled:opacity-50"
-            >
-              {loading
-                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                : <RefreshCw className="w-3.5 h-3.5" />}
+    <div className={styles.screen}>
+      <PageHeader title="Monitoring" illustration={<ListChecked size={32} />}>
+        {section === 'today' && (
+          <>
+        <DatePicker
+          datePickerType="single"
+          dateFormat="Y-m-d"
+          value={date}
+          onChange={(dates) => {
+            const [picked] = dates;
+            if (picked) setDate(picked.toISOString().slice(0, 10));
+          }}
+        >
+          <DatePickerInput
+            id="monitoring-date"
+            labelText="Day"
+            hideLabel
+            placeholder="yyyy-mm-dd"
+            size="sm"
+          />
+        </DatePicker>
+            <Button kind="ghost" size="sm" renderIcon={Renew} onClick={() => load(date)} disabled={loading}>
               Refresh
-            </button>
-          </div>
+            </Button>
+          </>
+        )}
+      </PageHeader>
+
+      <div className={styles.controls}>
+        <div className={styles.tabs}>
+          <Tabs
+            selectedIndex={SECTIONS.findIndex(entry => entry.key === section)}
+            onChange={({ selectedIndex }) => setSection(SECTIONS[selectedIndex].key)}
+          >
+            <TabList aria-label="Monitoring sections" contained>
+              {SECTIONS.map(({ key, label, icon: Icon }) => (
+                <Tab key={key} renderIcon={Icon}>
+                  {label}
+                </Tab>
+              ))}
+            </TabList>
+          </Tabs>
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto px-6 py-4 space-y-4">
+      {section === 'teaching' && <TeacherPerformance embedded />}
+
+      {section === 'today' && (
+        <div className={`${styles.body} ${styles.bodyTop}`}>
         {error && (
-          <div className="flex items-center gap-2 px-4 py-3 rounded-lg text-sm bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-800">
-            <AlertTriangle className="w-4 h-4 shrink-0" />
-            {error}
-          </div>
+          <InlineNotification
+            kind="error"
+            title="Could not load the monitoring data"
+            subtitle={error}
+            onCloseButtonClick={() => setError('')}
+            lowContrast
+          />
         )}
 
         {loading && !data && (
-          <div className="flex items-center justify-center py-16 text-gray-400 text-sm gap-2">
-            <Loader2 className="w-4 h-4 animate-spin" /> Loading monitoring data…
+          <div className={styles.loading}>
+            <InlineLoading description="Loading monitoring data…" />
           </div>
         )}
 
         {data && (
           <>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <StatTile label="Signed out" value={data.gate.counts.out} icon={LogOut} />
-              <StatTile label="Signed in" value={data.gate.counts.in} icon={LogIn} tone="success" />
+            <StatRow>
+              <StatTile label="Signed out" value={data.gate.counts.out} icon={Exit} />
+              <StatTile label="Signed in" value={data.gate.counts.in} icon={Login} tone="success" />
               <StatTile
                 label="Turned back"
                 value={data.gate.counts.declined}
-                icon={XCircle}
+                icon={Close}
                 tone={data.gate.counts.declined > 0 ? 'danger' : 'default'}
               />
               <StatTile
                 label="Off premises now"
                 value={data.off_premises.length}
-                icon={MapPin}
+                icon={Location}
                 tone={data.off_premises.length > 0 ? 'warning' : 'default'}
               />
-            </div>
+            </StatRow>
 
             {/* Who is out right now is the one thing here that is not about a date — it is a
-                headcount question, and a stale one is worse than none. */}
+                headcount question, and a stale answer is worse than none. */}
             <Section
               title="Off the premises right now"
-              subtitle="Signed out and not yet signed back in, whichever day they left"
-              icon={MapPin}
+              subtitle="Signed out and not yet back, whichever day they left"
             >
-              {data.off_premises.length === 0
-                ? <Empty>Every student is accounted for on the premises.</Empty>
-                : (
-                  <ul className="divide-y divide-gray-100 dark:divide-gray-700">
-                    {data.off_premises.map((student) => (
-                      <li key={student.student_number} className="px-4 py-3 flex items-center gap-3">
-                        <Initials name={student.full_name} />
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm text-gray-800 dark:text-gray-100 truncate">{student.full_name}</p>
-                          <p className="text-xs text-gray-400 truncate">
-                            {student.student_number}
-                            {student.destination ? ` · ${student.destination}` : ''}
-                            {student.authorised_by ? ` · allowed by ${student.authorised_by}` : ''}
-                          </p>
-                        </div>
-                        <span className="text-xs text-gray-400 shrink-0">
-                          since {formatDateTime(student.since)}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+              {data.off_premises.length === 0 ? (
+                <Empty>Every student is accounted for on the premises.</Empty>
+              ) : (
+                <ul className={styles.list}>
+                  {data.off_premises.map((student) => (
+                    <li key={student.student_number} className={styles.entry}>
+                      <Initials name={student.full_name} />
+                      <div className={styles.entryMain}>
+                        <p className={styles.entryTitle}>{student.full_name}</p>
+                        <p className={styles.entrySub}>
+                          {student.student_number}
+                          {student.destination ? ` · ${student.destination}` : ''}
+                          {student.authorised_by ? ` · allowed by ${student.authorised_by}` : ''}
+                        </p>
+                      </div>
+                      <span className={styles.entryTime}>since {formatDateTime(student.since)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </Section>
 
             <Section
               title="Gate movements"
               subtitle={`${data.gate.counts.total} recorded on ${formatDate(data.date)}`}
-              icon={ArrowLeftRight}
             >
-              {data.gate.movements.length === 0
-                ? <Empty>Nobody passed the gate on this day.</Empty>
-                : (
-                  <ul className="divide-y divide-gray-100 dark:divide-gray-700">
-                    {data.gate.movements.map((movement) => {
-                      const declined = movement.decision === 'declined';
-                      const Icon = declined ? XCircle : movement.direction === 'out' ? LogOut : LogIn;
-                      return (
-                        <li key={movement.id} className="px-4 py-3 flex items-center gap-3">
-                          <Icon className={`w-4 h-4 shrink-0 ${
-                            declined ? 'text-red-500'
-                              : movement.direction === 'out' ? 'text-amber-500' : 'text-emerald-500'}`} />
-                          <div className="min-w-0 flex-1">
-                            <p className="text-sm text-gray-800 dark:text-gray-100 truncate">
-                              {movement.full_name}
-                              <span className="ml-2 text-[10px] uppercase tracking-wide text-gray-400">
-                                {movement.direction}
-                              </span>
-                            </p>
-                            <p className="text-xs text-gray-400 truncate">
-                              {movement.student_number}
-                              {movement.authorised_by ? ` · allowed by ${movement.authorised_by}` : ''}
-                              {movement.destination ? ` · ${movement.destination}` : ''}
-                              {movement.note ? ` · ${movement.note}` : ''}
-                            </p>
-                          </div>
-                          <span className="text-xs text-gray-400 shrink-0">
-                            {formatDateTime(movement.recorded_at)}
-                          </span>
-                          {declined && (
-                            <span className="shrink-0 px-2 py-0.5 rounded-full text-[10px] font-medium bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-800">
-                              Declined
-                            </span>
-                          )}
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
+              {data.gate.movements.length === 0 ? (
+                <Empty>Nobody passed the gate on this day.</Empty>
+              ) : (
+                <ul className={styles.list}>
+                  {data.gate.movements.map((movement) => {
+                    const declined = movement.decision === 'declined';
+                    const Icon = declined ? Close : movement.direction === 'out' ? Exit : Login;
+                    const tone = declined
+                      ? styles.iconDeclined
+                      : movement.direction === 'out'
+                        ? styles.iconOut
+                        : styles.iconIn;
+                    return (
+                      <li key={movement.id} className={styles.entry}>
+                        <Icon size={16} className={tone} />
+                        <div className={styles.entryMain}>
+                          <p className={styles.entryTitle}>
+                            {movement.full_name}
+                            <span className={styles.entryTag}>{movement.direction}</span>
+                          </p>
+                          <p className={styles.entrySub}>
+                            {movement.student_number}
+                            {movement.authorised_by ? ` · allowed by ${movement.authorised_by}` : ''}
+                            {movement.destination ? ` · ${movement.destination}` : ''}
+                            {movement.note ? ` · ${movement.note}` : ''}
+                          </p>
+                        </div>
+                        <span className={styles.entryTime}>{formatDateTime(movement.recorded_at)}</span>
+                        {declined && (
+                          <Tag type="red" size="sm">
+                            Declined
+                          </Tag>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
             </Section>
 
             <Section
               title="Gate passes awaiting the gate"
               subtitle="Granted and not yet used, declined or cancelled"
-              icon={DoorOpen}
             >
-              {data.gate.active_permissions.length === 0
-                ? <Empty>No permission slips are outstanding.</Empty>
-                : (
-                  <ul className="divide-y divide-gray-100 dark:divide-gray-700">
-                    {data.gate.active_permissions.map((permission) => (
-                      <li key={permission.id} className="px-4 py-3 flex items-center gap-3">
-                        <Initials name={permission.full_name} />
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm text-gray-800 dark:text-gray-100 truncate">
-                            {permission.full_name}
-                          </p>
-                          <p className="text-xs text-gray-400 truncate">
-                            {permission.reason} · {permission.destination} · allowed by {permission.granted_by}
-                          </p>
-                        </div>
-                        <span className="text-xs text-gray-400 shrink-0">
-                          {permission.expected_return
-                            ? `back by ${formatDate(permission.expected_return)}`
-                            : formatDateTime(permission.granted_at)}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+              {data.gate.active_permissions.length === 0 ? (
+                <Empty>No permission slips are outstanding.</Empty>
+              ) : (
+                <ul className={styles.list}>
+                  {data.gate.active_permissions.map((permission) => (
+                    <li key={permission.id} className={styles.entry}>
+                      <Initials name={permission.full_name} />
+                      <div className={styles.entryMain}>
+                        <p className={styles.entryTitle}>{permission.full_name}</p>
+                        <p className={styles.entrySub}>
+                          {permission.reason} · {permission.destination} · allowed by{' '}
+                          {permission.granted_by}
+                        </p>
+                      </div>
+                      <span className={styles.entryTime}>
+                        {permission.expected_return
+                          ? `back by ${formatDate(permission.expected_return)}`
+                          : formatDateTime(permission.granted_at)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </Section>
 
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className={styles.grid2}>
               <Section
                 title="Exam clearance"
                 subtitle={`${data.exams.active_clearances} active · ${data.exams.admitted} admitted · ${data.exams.rejected} turned away`}
-                icon={ShieldCheck}
               >
-                {data.exams.admissions.length === 0 && data.exams.clearances.length === 0
-                  ? <Empty>No clearance has been granted or checked yet.</Empty>
-                  : (
-                    <ul className="divide-y divide-gray-100 dark:divide-gray-700">
-                      {data.exams.admissions.slice(0, 8).map((admission) => (
-                        <li key={admission.id} className="px-4 py-3 flex items-center gap-3">
-                          {admission.decision === 'approved'
-                            ? <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-500" />
-                            : <XCircle className="w-4 h-4 shrink-0 text-red-500" />}
-                          <div className="min-w-0 flex-1">
-                            <p className="text-sm text-gray-800 dark:text-gray-100 truncate">
-                              {admission.full_name}
-                            </p>
-                            <p className="text-xs text-gray-400 truncate">
-                              {admission.decision === 'approved' ? 'Admitted' : 'Turned away'}
-                              {admission.note ? ` · ${admission.note}` : ''}
-                              {admission.recorded_by ? ` · ${admission.recorded_by}` : ''}
-                            </p>
-                          </div>
-                          <span className="text-xs text-gray-400 shrink-0">
-                            {formatDateTime(admission.recorded_at)}
-                          </span>
-                        </li>
-                      ))}
-                      {data.exams.clearances.filter((c) => c.status === 'active').slice(0, 6).map((clearance) => (
-                        <li key={clearance.id} className="px-4 py-3 flex items-center gap-3">
-                          <ShieldCheck className="w-4 h-4 shrink-0 text-indigo-500" />
-                          <div className="min-w-0 flex-1">
-                            <p className="text-sm text-gray-800 dark:text-gray-100 truncate">
-                              {clearance.full_name}
-                            </p>
-                            <p className="text-xs text-gray-400 truncate">
+                {data.exams.admissions.length === 0 && data.exams.clearances.length === 0 ? (
+                  <Empty>No clearance has been granted or checked yet.</Empty>
+                ) : (
+                  <ul className={styles.list}>
+                    {data.exams.admissions.slice(0, 8).map((admission) => (
+                      <li key={admission.id} className={styles.entry}>
+                        {admission.decision === 'approved' ? (
+                          <CheckmarkFilled size={16} className={styles.iconIn} />
+                        ) : (
+                          <Close size={16} className={styles.iconDeclined} />
+                        )}
+                        <div className={styles.entryMain}>
+                          <p className={styles.entryTitle}>{admission.full_name}</p>
+                          <p className={styles.entrySub}>
+                            {admission.decision === 'approved' ? 'Admitted' : 'Turned away'}
+                            {admission.note ? ` · ${admission.note}` : ''}
+                            {admission.recorded_by ? ` · ${admission.recorded_by}` : ''}
+                          </p>
+                        </div>
+                        <span className={styles.entryTime}>{formatDateTime(admission.recorded_at)}</span>
+                      </li>
+                    ))}
+                    {data.exams.clearances
+                      .filter((c) => c.status === 'active')
+                      .slice(0, 6)
+                      .map((clearance) => (
+                        <li key={clearance.id} className={styles.entry}>
+                          <Security size={16} className={styles.iconNeutral} />
+                          <div className={styles.entryMain}>
+                            <p className={styles.entryTitle}>{clearance.full_name}</p>
+                            <p className={styles.entrySub}>
                               Cleared by {clearance.granted_by}
                               {clearance.note ? ` · ${clearance.note}` : ''}
                             </p>
                           </div>
-                          <span className="text-xs text-gray-400 shrink-0">
-                            {formatDate(clearance.granted_at)}
-                          </span>
+                          <span className={styles.entryTime}>{formatDate(clearance.granted_at)}</span>
                         </li>
                       ))}
-                    </ul>
-                  )}
+                  </ul>
+                )}
               </Section>
 
               <Section
                 title="Register"
                 subtitle={`${data.attendance.marked} marked on ${formatDate(data.attendance.date)}`}
-                icon={ClipboardList}
               >
-                <div className="px-4 py-3 grid grid-cols-4 gap-2 border-b border-gray-100 dark:border-gray-700">
-                  {([
-                    ['Present', data.attendance.present],
-                    ['Absent', data.attendance.absent],
-                    ['Late', data.attendance.late],
-                    ['Excused', data.attendance.excused],
-                  ] as const).map(([label, value]) => (
-                    <div key={label} className="text-center">
-                      <p className="text-lg font-bold text-gray-800 dark:text-white">{value}</p>
-                      <p className="text-[10px] uppercase tracking-wide text-gray-400">{label}</p>
-                    </div>
-                  ))}
+                <div className={styles.tally}>
+                  <Tally label="Present" value={data.attendance.present} />
+                  <Tally label="Absent" value={data.attendance.absent} />
+                  <Tally label="Late" value={data.attendance.late} />
+                  <Tally label="Excused" value={data.attendance.excused} />
                 </div>
-                {data.attendance.by_class.length === 0
-                  ? <Empty>No register has been called on this day.</Empty>
-                  : (
-                    <ul className="divide-y divide-gray-100 dark:divide-gray-700">
-                      {data.attendance.by_class.map((row) => (
-                        <li
-                          key={`${row.grade_level}-${row.class_section}`}
-                          className="px-4 py-2.5 flex items-center justify-between gap-3"
-                        >
-                          <span className="text-sm text-gray-700 dark:text-gray-200">
-                            Grade {row.grade_level} · {row.class_section}
+                {data.attendance.by_class.length === 0 ? (
+                  <Empty>No register has been called on this day.</Empty>
+                ) : (
+                  <ul className={styles.list}>
+                    {data.attendance.by_class.map((row) => (
+                      <li key={`${row.grade_level}-${row.class_section}`} className={styles.entry}>
+                        <span className={styles.entryMain}>
+                          <span className={styles.entryTitle}>
+                            {classAndSection(settings.school_level, row.grade_level, row.class_section)}
                           </span>
-                          <span className="text-xs text-gray-400">
-                            {row.present} present · {row.absent} absent
-                            {row.late ? ` · ${row.late} late` : ''}
-                            {row.excused ? ` · ${row.excused} excused` : ''}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
+                        </span>
+                        <span className={styles.entryTime}>
+                          {row.present} present · {row.absent} absent
+                          {row.late ? ` · ${row.late} late` : ''}
+                          {row.excused ? ` · ${row.excused} excused` : ''}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </Section>
             </div>
 
             <Section
               title="Meals served"
               subtitle={`${data.meals.served} servings on ${formatDate(data.meals.date)}`}
-              icon={UtensilsCrossed}
             >
-              <div className="px-4 py-4 grid grid-cols-3 gap-3">
-                {([
-                  ['Breakfast', data.meals.breakfast],
-                  ['Lunch', data.meals.lunch],
-                  ['Supper', data.meals.supper],
-                ] as const).map(([label, value]) => (
-                  <div key={label} className="text-center">
-                    <p className="text-lg font-bold text-gray-800 dark:text-white">{value}</p>
-                    <p className="text-[10px] uppercase tracking-wide text-gray-400">{label}</p>
-                  </div>
-                ))}
+              <div className={styles.tally}>
+                <Tally label="Breakfast" value={data.meals.breakfast} />
+                <Tally label="Lunch" value={data.meals.lunch} />
+                <Tally label="Supper" value={data.meals.supper} />
               </div>
             </Section>
           </>
         )}
-      </div>
+        </div>
+      )}
     </div>
   );
 };

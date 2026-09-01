@@ -1,22 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  Bold,
-  Check,
-  Copy,
-  Eye,
-  FileDown,
-  Heading,
-  Italic,
-  Link2,
-  List,
-  ListOrdered,
-  Pencil,
-  Redo2,
-  Save,
-  Undo2,
-} from 'lucide-react';
 import MarkdownRenderer from '../MarkdownRenderer';
 import { Panel, PrimaryButton, SecondaryButton } from '../fees/shared';
+import styles from '../tabs.module.scss';
+import editorStyles from './question-editor.module.scss';
+import { Button } from '@carbon/react';
+import { Checkmark, Copy, DocumentDownload, Edit, Link, ListBulleted, ListNumbered, Redo, Save, TextBold, TextFont, TextItalic, Undo, View } from '@carbon/react/icons';
 
 /**
  * The editing surface for whatever the Digital Examiner produced.
@@ -280,80 +268,80 @@ const QuestionEditor: React.FC<Props> = ({
     action: () => void,
     disabled = false,
   ) => (
-    <button
+    <Button
       key={name}
-      type="button"
-      title={label}
-      aria-label={label}
+      hasIconOnly
+      kind="ghost"
+      size="sm"
+      renderIcon={Icon}
+      iconDescription={label}
+      tooltipPosition="bottom"
       onClick={action}
       disabled={disabled || preview}
-      className="p-1.5 rounded-md text-gray-500 hover:text-gray-800 hover:bg-gray-100 dark:text-gray-400 dark:hover:text-gray-100 dark:hover:bg-gray-700 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
-    >
-      <Icon className="w-4 h-4" />
-    </button>
+    />
   );
 
   return (
     <Panel
-      className={`p-4 ${tone === 'warning' ? 'border-amber-200 dark:border-amber-800' : ''}`}
+      className={tone === 'warning' ? styles.padWarn : styles.pad}
     >
-      <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
-        <div className="min-w-0">
-          <p className="text-sm font-semibold text-gray-800 dark:text-white">
+      <div className={styles.betweenTop}>
+        <div className={styles.rowMain}>
+          <p className={styles.subheading}>
             {title || 'Draft questions'}
           </p>
-          <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
+          <p className={styles.note}>
             {hint ||
               'Edit anything here — stems, options, answers, marks. Save writes it back to the question bank.'}
           </p>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
-          {status && <span className="text-[11px] text-emerald-600 dark:text-emerald-400">{status}</span>}
+        <div className={styles.actions}>
+          {status && <span className={styles.positive}>{status}</span>}
           <SecondaryButton onClick={copy}>
-            {copied ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
+            {copied ? <Checkmark size={16} /> : <Copy size={16} />}
             {copied ? 'Copied' : 'Copy'}
           </SecondaryButton>
           <SecondaryButton onClick={download}>
-            <FileDown className="w-4 h-4" /> Download
+            <DocumentDownload size={16} /> Download
           </SecondaryButton>
           {onSave && (
             <PrimaryButton onClick={onSave} disabled={busy || value.trim() === ''}>
-              <Save className="w-4 h-4" /> Save to question bank
+              <Save size={16} /> Save to question bank
             </PrimaryButton>
           )}
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-0.5 rounded-t-lg border border-b-0 border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/50 px-1.5 py-1">
-        {toolbarButton('bold', Bold, 'Bold (Ctrl+B)', () => run('bold'))}
-        {toolbarButton('italic', Italic, 'Italic (Ctrl+I)', () => run('italic'))}
-        {toolbarButton('heading', Heading, 'Heading', () => run('heading'))}
-        <span className="w-px h-4 bg-gray-200 dark:bg-gray-700 mx-1" />
-        {toolbarButton('bullet', List, 'Bullet list', () => run('bullet'))}
-        {toolbarButton('numbered', ListOrdered, 'Numbered list', () => run('numbered'))}
-        {toolbarButton('link', Link2, 'Link', () => run('link'))}
-        <span className="w-px h-4 bg-gray-200 dark:bg-gray-700 mx-1" />
-        {toolbarButton('undo', Undo2, 'Undo (Ctrl+Z)', () => step(-1), depth.undo === 0)}
-        {toolbarButton('redo', Redo2, 'Redo (Ctrl+Shift+Z)', () => step(1), depth.redo === 0)}
+      <div className={editorStyles.toolbar}>
+        {toolbarButton('bold', TextBold, 'TextBold (Ctrl+B)', () => run('bold'))}
+        {toolbarButton('italic', TextItalic, 'TextItalic (Ctrl+I)', () => run('italic'))}
+        {toolbarButton('heading', TextFont, 'TextFont', () => run('heading'))}
+        <span className={editorStyles.divider} />
+        {toolbarButton('bullet', ListBulleted, 'Bullet list', () => run('bullet'))}
+        {toolbarButton('numbered', ListNumbered, 'Numbered list', () => run('numbered'))}
+        {toolbarButton('link', Link, 'Link', () => run('link'))}
+        <span className={editorStyles.divider} />
+        {toolbarButton('undo', Undo, 'Undo (Ctrl+Z)', () => step(-1), depth.undo === 0)}
+        {toolbarButton('redo', Redo, 'Redo (Ctrl+Shift+Z)', () => step(1), depth.redo === 0)}
 
-        <div className="ml-auto flex items-center gap-2 pr-1">
-          <span className="text-[11px] text-gray-400">
+        <div className={editorStyles.toolbarEnd}>
+          <span className={editorStyles.count}>
             {total} question{total === 1 ? '' : 's'}
           </span>
-          <button
-            type="button"
+          <Button
+            kind="ghost"
+            size="sm"
+            renderIcon={preview ? Edit : View}
             onClick={() => setPreview(!preview)}
-            className="inline-flex items-center gap-1.5 text-[11px] text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-100"
           >
-            {preview ? <Pencil className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
             {preview ? 'Edit' : 'Preview'}
-          </button>
+          </Button>
         </div>
       </div>
 
       {preview ? (
-        <div className="rounded-b-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4 min-h-[24rem] max-h-[36rem] overflow-y-auto text-sm">
+        <div className={editorStyles.surface}>
           <MarkdownRenderer content={forPreview(value)} />
         </div>
       ) : (
@@ -363,7 +351,8 @@ const QuestionEditor: React.FC<Props> = ({
           onChange={event => apply(event.target.value, { coalesce: true })}
           onKeyDown={onKeyDown}
           spellCheck
-          className="w-full min-h-[24rem] max-h-[36rem] rounded-b-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3 font-mono text-[12px] leading-relaxed text-gray-800 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 resize-y"
+          className={editorStyles.textarea}
+          aria-label="Question paper source"
         />
       )}
     </Panel>

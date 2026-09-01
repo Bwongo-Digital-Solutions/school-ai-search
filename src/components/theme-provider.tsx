@@ -1,10 +1,18 @@
-"use client"
-
 import * as React from "react"
 import { createContext, useContext, useEffect, useState } from "react"
-import { ThemeProviderProps } from "next-themes/dist/types"
 
 type Theme = "dark" | "light" | "system"
+
+/**
+ * This provider is hand-written — it only ever borrowed its props type from next-themes, which is
+ * otherwise unused. Declared here so the dependency could go with the rest of the old design system.
+ */
+interface ThemeProviderProps {
+  children: React.ReactNode
+  defaultTheme?: Theme
+  /** Accepted and ignored, for compatibility with the shape callers were written against. */
+  value?: unknown
+}
 
 type ThemeContextType = {
   theme: Theme
@@ -16,8 +24,6 @@ const ThemeContext = createContext<ThemeContextType | null>(null)
 export function ThemeProvider({
   children,
   defaultTheme = "system",
-  value: _value,
-  ...props
 }: ThemeProviderProps) {
   const [theme, setTheme] = useState<Theme>(() => {
     if (typeof window !== "undefined") {
@@ -54,7 +60,7 @@ export function ThemeProvider({
   }
 
   return (
-    <ThemeContext.Provider value={value} {...props}>
+    <ThemeContext.Provider value={value}>
       {children}
     </ThemeContext.Provider>
   )

@@ -29,6 +29,13 @@ type ActiveView =
   | 'settings';
 
 
+/** Where a search result points. `studentId` is the students table's own id, not the school's. */
+export interface RecordFocus {
+  view: ActiveView;
+  studentId?: string;
+  query?: string;
+}
+
 interface ChatContextType {
   messages: Message[];
   conversations: Conversation[];
@@ -40,6 +47,17 @@ interface ChatContextType {
   selectedModelId: string;
   activeView: ActiveView;
   setActiveView: (view: ActiveView) => void;
+  /**
+   * A record the user asked to open, set by global search and consumed by the screen that shows it.
+   *
+   * Switching to the right screen is only half of "open this result" — landing on a roster of 400
+   * students having searched for one of them is barely better than not searching. The destination
+   * reads this on mount, moves to the record, and clears it, so a later visit to the same screen
+   * does not re-trigger.
+   */
+  focus: RecordFocus | null;
+  openRecord: (focus: RecordFocus) => void;
+  clearFocus: () => void;
   chatOptions: ChatOptions;
   setChatOptions: (options: ChatOptions) => void;
   mcpServers: McpServer[];
@@ -105,6 +123,14 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [aiModels, setAiModels] = useState<AiModelOption[]>([]);
   const [selectedModelId, setSelectedModelId] = useState('local-rules');
   const [activeView, setActiveView] = useState<ActiveView>('chat');
+  const [focus, setFocus] = useState<RecordFocus | null>(null);
+
+  const openRecord = useCallback((next: RecordFocus) => {
+    setFocus(next);
+    setActiveView(next.view);
+  }, []);
+
+  const clearFocus = useCallback(() => setFocus(null), []);
   const [chatOptions, setChatOptions] = useState<ChatOptions>({
     agentMode: false,
     useRag: false,
@@ -321,6 +347,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       value={{
         messages, conversations, currentConversationId, isLoading,
         isSidebarOpen, students, aiModels, selectedModelId, activeView, setActiveView,
+        focus, openRecord, clearFocus,
         chatOptions, setChatOptions, mcpServers,
         setSelectedModelId, refreshStudents,
         sendMessage, startNewConversation, loadConversation, loadConversations,

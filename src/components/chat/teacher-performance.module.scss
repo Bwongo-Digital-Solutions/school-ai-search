@@ -1,0 +1,167 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+// Where a figure came from. An estimate must never be mistaken for a record, so the note sits
+// inside the card it qualifies rather than in a footnote — it is read before the numbers are.
+.sourceNote {
+  padding: layout.$spacing-03 layout.$spacing-05;
+}
+
+// The pass/fail bar under each subject. Red is the whole width, green overlays the passes — so the
+// bar is read as "how much of this got through", not as two competing colours.
+.passBar {
+  block-size: layout.$spacing-03;
+  background: #ffd7d9;
+  overflow: hidden;
+}
+
+.passBarFill {
+  block-size: 100%;
+  background: $support-success;
+}
+
+.subject {
+  padding: layout.$spacing-04 layout.$spacing-05;
+  border-block-start: 1px solid $ui-03;
+}
+
+.subjectHead {
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-04;
+  margin-block-end: layout.$spacing-03;
+}
+
+.subjectName {
+  @include type.type-style('body-compact-01');
+  flex: 1;
+  min-inline-size: 0;
+  color: $text-01;
+}
+
+.subjectStat {
+  @include type.type-style('label-01');
+  color: $text-03;
+  white-space: nowrap;
+}
+
+.passed {
+  color: $support-success;
+  font-weight: 600;
+}
+
+.failed {
+  color: $support-error;
+  font-weight: 600;
+}
+
+.classRow {
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-04;
+  padding: layout.$spacing-04 layout.$spacing-05;
+  border-block-start: 1px solid $ui-03;
+
+  svg {
+    fill: var(--brand-01, #{$brand-01-fallback});
+    flex-shrink: 0;
+  }
+}
+
+.className {
+  @include type.type-style('heading-compact-01');
+  color: $text-01;
+  white-space: nowrap;
+}
+
+.classSubjects {
+  @include type.type-style('label-01');
+  flex: 1;
+  min-inline-size: 0;
+  color: $text-03;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// Assigning a class. Administrators only, and set apart from the list it adds to.
+.assign {
+  padding: layout.$spacing-05;
+  border-block-start: 1px solid $ui-03;
+  background: $ui-01;
+}
+
+.assignNote {
+  @include type.type-style('label-01');
+  color: $text-02;
+  margin: 0 0 layout.$spacing-04;
+}
+
+.assignFields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: layout.$spacing-03;
+}
+
+.fieldSubject { inline-size: 10rem; }
+.fieldNarrow { inline-size: 6rem; }
+.fieldYear { inline-size: 7rem; }
+.fieldTerm { inline-size: 8rem; }
+
+// The pass-mark slider and the teacher picker, above the report.
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: layout.$spacing-05;
+}
+
+.teacherPicker {
+  min-inline-size: min(16rem, 100%);
+}
+
+.slider {
+  min-inline-size: min(14rem, 100%);
+}
+
+:global([data-carbon-theme='g100']) {
+  .subject,
+  .classRow,
+  .assign {
+    border-block-start-color: $ui-03-dark;
+  }
+
+  .subjectName,
+  .className {
+    color: #f4f4f4;
+  }
+
+  .subjectStat,
+  .classSubjects {
+    color: $text-03-dark;
+  }
+
+  .assign {
+    background: $ui-01-dark;
+  }
+
+  .assignNote {
+    color: $text-02-dark;
+  }
+
+  .passBar {
+    background: #a2191f;
+  }
+}
+
+// Shown as a section of Monitoring rather than as its own screen: no page header, no background of
+// its own, and it scrolls inside whatever is holding it.
+.embedded {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-block-size: 0;
+  overflow: hidden;
+}

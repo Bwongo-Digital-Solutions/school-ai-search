@@ -4462,6 +4462,8 @@ test('the school level chooses the grading system, and secondary splits O-Level 
     'pre_school',
     'kindergarten',
     'primary',
+    'secondary_olevel',
+    'secondary_alevel',
     'secondary',
     'technical',
     'tertiary',
@@ -4486,6 +4488,16 @@ test('the school level chooses the grading system, and secondary splits O-Level 
     assert.equal(academicLevelFor('secondary', grade), 'secondary-a', `grade ${grade} is A-Level`);
     assert.match(ugandan('secondary', grade).label, /A-Level \(UACE\)/);
   }
+
+  // A school that runs only one of the two says so, and every one of its students is marked on that
+  // scale — including a student whose stored class is outside the usual range, which is exactly the
+  // case a combined school cannot resolve from the grade alone.
+  for (const grade of [8, 11, 12, 13, 99]) {
+    assert.equal(academicLevelFor('secondary_olevel', grade), 'secondary-o');
+    assert.equal(academicLevelFor('secondary_alevel', grade), 'secondary-a');
+  }
+  assert.match(ugandan('secondary_olevel', 12).label, /O-Level \(UCE\)/);
+  assert.match(ugandan('secondary_alevel', 8).label, /A-Level \(UACE\)/);
 
   // International schools and institutions report a GPA rather than UNEB grades.
   assert.match(resolveGradingScheme({ country: 'international', schoolLevel: 'tertiary' }).label, /GPA/);

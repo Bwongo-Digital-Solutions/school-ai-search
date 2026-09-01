@@ -1,7 +1,28 @@
 import React from 'react';
-import { X } from 'lucide-react';
+import { Modal } from '@carbon/react';
+import styles from './modal-shell.module.scss';
 
-/** The overlay + panel used by the dialogs across the chat screens, with a sticky header. */
+type Width = 'max-w-sm' | 'max-w-md' | 'max-w-lg' | 'max-w-xl' | 'max-w-2xl' | 'max-w-3xl' | string;
+
+/** The old Tailwind width classes, mapped onto Carbon's four modal sizes. */
+const SIZES: Record<string, 'xs' | 'sm' | 'md' | 'lg'> = {
+  'max-w-sm': 'xs',
+  'max-w-md': 'sm',
+  'max-w-lg': 'sm',
+  'max-w-xl': 'md',
+  'max-w-2xl': 'md',
+  'max-w-3xl': 'lg',
+  'max-w-4xl': 'lg',
+};
+
+/**
+ * The dialog used across the chat screens.
+ *
+ * Carbon's `Modal` underneath, which brings the things a hand-rolled overlay has to get right and
+ * usually does not: a focus trap, Escape to close, `aria-modal`, and returning focus to whatever
+ * opened it. The `footer` slot keeps working for the callers that pass their own buttons — Carbon's
+ * `passiveModal` turns off its built-in button row so ours is the only one.
+ */
 const ModalShell = ({
   title,
   subtitle,
@@ -17,42 +38,29 @@ const ModalShell = ({
   onClose: () => void;
   children: React.ReactNode;
   footer?: React.ReactNode;
-  width?: string;
+  width?: Width;
 }) => (
-  <div
-    className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4"
-    onClick={onClose}
+  <Modal
+    open
+    passiveModal
+    modalHeading={
+      Icon ? (
+        <span className={styles.heading}>
+          <Icon size={16} />
+          {title}
+        </span>
+      ) : (
+        title
+      )
+    }
+    modalLabel={subtitle}
+    onRequestClose={onClose}
+    size={SIZES[width] ?? 'sm'}
+    className={styles.modal}
   >
-    <div
-      className={`bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full ${width} max-h-[90vh] flex flex-col overflow-hidden`}
-      onClick={event => event.stopPropagation()}
-    >
-      <div className="flex items-start justify-between gap-4 px-5 py-4 border-b border-gray-100 dark:border-gray-700">
-        <div>
-          <h3 className="text-base font-bold text-gray-800 dark:text-white flex items-center gap-2">
-            {Icon && <Icon className="w-4 h-4 text-indigo-500" />}
-            {title}
-          </h3>
-          {subtitle && <p className="text-xs text-gray-400 mt-0.5">{subtitle}</p>}
-        </div>
-        <button
-          onClick={onClose}
-          aria-label="Close"
-          className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
-        >
-          <X className="w-4 h-4 text-gray-400" />
-        </button>
-      </div>
-
-      <div className="flex-1 overflow-auto px-5 py-4">{children}</div>
-
-      {footer && (
-        <div className="px-5 py-3 border-t border-gray-100 dark:border-gray-700 flex justify-end gap-2">
-          {footer}
-        </div>
-      )}
-    </div>
-  </div>
+    <div className={styles.body}>{children}</div>
+    {footer && <div className={styles.footer}>{footer}</div>}
+  </Modal>
 );
 
 export default ModalShell;

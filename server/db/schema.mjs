@@ -105,7 +105,13 @@ CREATE TABLE IF NOT EXISTS school_settings (
 ALTER TABLE school_settings ADD COLUMN IF NOT EXISTS school_level TEXT NOT NULL DEFAULT 'secondary';
 ALTER TABLE school_settings DROP CONSTRAINT IF EXISTS school_settings_level_check;
 ALTER TABLE school_settings ADD CONSTRAINT school_settings_level_check
-  CHECK (school_level IN ('pre_school', 'kindergarten', 'primary', 'secondary', 'technical', 'tertiary'));
+  CHECK (school_level IN (
+    'pre_school', 'kindergarten', 'primary',
+    -- A secondary school says whether it runs O-Level, A-Level or both, because that decides both
+    -- the classes it can enrol into and the UNEB scale its report cards are marked on.
+    'secondary_olevel', 'secondary_alevel', 'secondary',
+    'technical', 'tertiary'
+  ));
 
 -- Which national examination system the level maps onto. Uganda schools grade on UNEB scales;
 -- international schools and institutions report a GPA. Kept separate from school_level because the

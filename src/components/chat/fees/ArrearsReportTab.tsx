@@ -1,14 +1,19 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, Download, RefreshCw } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
+import { useSettings } from '@/contexts/SettingsContext';
 import { callFees } from '@/lib/fees';
 import { formatAmount, formatDate, todayIso } from '@/lib/format';
+import { classAndSection, classOptionsFor } from '@/lib/classLevels';
 import Field from '@/components/common/Field';
 import type { ArrearsReport } from '@/types/feeAdmin';
 import { AGING_COLUMNS, EmptyState, Panel, SecondaryButton, StandingBadge, zebra } from './shared';
+import styles from '../tabs.module.scss';
+import { Download, Renew, Warning } from '@carbon/react/icons';
+import { InlineNotification } from '@carbon/react';
 
 const ArrearsReportTab = ({ runAction }: { runAction: (label: string, handler: () => Promise<void>) => Promise<void> }) => {
   const { user } = useAuth();
+  const { settings } = useSettings();
   const [report, setReport] = useState<ArrearsReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [asOf, setAsOf] = useState(todayIso());
@@ -61,86 +66,102 @@ const ArrearsReportTab = ({ runAction }: { runAction: (label: string, handler: (
     });
 
   return (
-    <div className="space-y-4">
-      <Panel className="p-4">
-        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+    <div className={styles.stack}>
+      <Panel className={styles.pad}>
+        <div className={styles.grid4}>
           <Field label="As at" type="date" value={asOf} onChange={value => setAsOf(String(value))} />
-          <Field label="Grade level" value={gradeLevel} onChange={value => setGradeLevel(String(value))} placeholder="All grades" />
+          <Field
+            label="Class"
+            value={gradeLevel}
+            onChange={value => setGradeLevel(String(value))}
+            options={[
+              { value: '', label: 'All classes' },
+              ...classOptionsFor(settings.school_level).map(option => ({
+                value: String(option.value),
+                label: option.label,
+              })),
+            ]}
+          />
           <Field label="Minimum balance" type="number" min={0} value={minBalance} onChange={value => setMinBalance(Number(value))} />
-          <div className="flex items-end gap-2">
+          <div className={styles.toolbar}>
             <SecondaryButton onClick={load} disabled={loading}>
-              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> Refresh
+              <Renew size={16} /> Refresh
             </SecondaryButton>
             <SecondaryButton onClick={exportCsv} disabled={!report || report.rows.length === 0}>
-              <Download className="w-3.5 h-3.5" /> CSV
+              <Download size={16} /> CSV
             </SecondaryButton>
           </div>
         </div>
       </Panel>
 
-      <Panel className="overflow-hidden">
+      <Panel >
         {loading ? (
           <EmptyState message="Building arrears report…" />
         ) : !report || report.rows.length === 0 ? (
           <EmptyState message="No outstanding balances match these filters." />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 dark:bg-gray-900/40 text-xs text-gray-500 dark:text-gray-400">
+          <div className={styles.tableWrap}>
+            <table className={styles.table}>
+              <thead className={styles.thead}>
                 <tr>
-                  <th className="text-left font-medium px-4 py-2.5">Student</th>
-                  <th className="text-left font-medium px-4 py-2.5">Class</th>
+                  <th>Student</th>
+                  <th>Class</th>
                   {AGING_COLUMNS.map(column => (
-                    <th key={column.key} className="text-right font-medium px-4 py-2.5">{column.label}</th>
+                    <th key={column.key} className={styles.numeric}>{column.label}</th>
                   ))}
-                  <th className="text-right font-medium px-4 py-2.5">Total</th>
-                  <th className="text-left font-medium px-4 py-2.5">Oldest due</th>
-                  <th className="text-left font-medium px-4 py-2.5">Standing</th>
+                  <th className={styles.numeric}>Total</th>
+                  <th>Oldest due</th>
+                  <th>Standing</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+              <tbody className={styles.rows}>
                 {report.rows.map(row => (
                   <tr key={row.student_id} className={zebra}>
-                    <td className="px-4 py-2.5">
-                      <p className="font-medium text-gray-800 dark:text-white">{row.full_name}</p>
-                      <p className="text-xs text-gray-400">{row.student_number}</p>
+                    <td>
+                      <p className={styles.strong}>{row.full_name}</p>
+                      <p className={styles.note}>{row.student_number}</p>
                     </td>
-                    <td className="px-4 py-2.5 text-gray-600 dark:text-gray-300">
-                      Grade {row.grade_level} {row.class_section}
+                    <td>
+                      {classAndSection(settings.school_level, row.grade_level, row.class_section)}
                     </td>
+                    {/* A zero in an ageing bucket is not news, so it recedes; a figure in the
+                        90-plus column should be the loudest thing in the row. */}
                     {AGING_COLUMNS.map(column => (
-                      <td key={column.key} className={`px-4 py-2.5 text-right ${row[column.key] > 0 ? column.tone : 'text-gray-300 dark:text-gray-600'}`}>
+                      <td
+                        key={column.key}
+                        className={`${styles.numeric} ${row[column.key] > 0 ? column.tone : styles.muted}`}
+                      >
                         {row[column.key] > 0 ? formatAmount(row[column.key], report.currency) : '—'}
                       </td>
                     ))}
-                    <td className="px-4 py-2.5 text-right font-medium text-gray-800 dark:text-white">
+                    <td className={styles.tdStrong}>
                       {formatAmount(row.total_outstanding, report.currency)}
                     </td>
-                    <td className="px-4 py-2.5 text-gray-600 dark:text-gray-300">
+                    <td>
                       {row.oldest_due_date ? (
-                        <span className="flex items-center gap-1">
+                        <span className={styles.actions}>
                           {formatDate(row.oldest_due_date)}
-                          <span className="text-[10px] text-red-500">({row.days_overdue}d)</span>
+                          <span className={styles.negative}>({row.days_overdue}d)</span>
                         </span>
                       ) : '—'}
                     </td>
-                    <td className="px-4 py-2.5">
-                      {row.standing ? <StandingBadge standing={row.standing} source="manual" /> : <span className="text-xs text-gray-400">—</span>}
+                    <td>
+                      {row.standing ? <StandingBadge standing={row.standing} source="manual" /> : <span className={styles.note}>—</span>}
                     </td>
                   </tr>
                 ))}
               </tbody>
-              <tfoot className="bg-gray-50 dark:bg-gray-900/40 text-sm font-medium">
+              <tfoot className={styles.thead}>
                 <tr>
-                  <td className="px-4 py-2.5 text-gray-700 dark:text-gray-200" colSpan={2}>
+                  <td className={styles.td} colSpan={2}>
                     Totals · {report.rows.length} student{report.rows.length === 1 ? '' : 's'}
                   </td>
                   {AGING_COLUMNS.map(column => (
-                    <td key={column.key} className="px-4 py-2.5 text-right text-gray-700 dark:text-gray-200">
+                    <td key={column.key} className={styles.tdNumeric}>
                       {formatAmount(report.totals[column.key], report.currency)}
                     </td>
                   ))}
-                  <td className="px-4 py-2.5 text-right text-gray-900 dark:text-white">
+                  <td className={styles.tdStrong}>
                     {formatAmount(report.totals.total, report.currency)}
                   </td>
                   <td colSpan={2} />
@@ -152,12 +173,13 @@ const ArrearsReportTab = ({ runAction }: { runAction: (label: string, handler: (
       </Panel>
 
       {report && report.totals.days_90_plus > 0 && (
-        <div className="flex items-start gap-2 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg px-4 py-3">
-          <AlertTriangle className="w-4 h-4 text-red-500 mt-0.5" />
-          <p className="text-sm text-red-700 dark:text-red-300">
-            {formatAmount(report.totals.days_90_plus, report.currency)} has been outstanding for more than 90 days.
-          </p>
-        </div>
+        <InlineNotification
+          kind="error"
+          title="Long-overdue debt"
+          subtitle={`${formatAmount(report.totals.days_90_plus, report.currency)} has been outstanding for more than 90 days.`}
+          lowContrast
+          hideCloseButton
+        />
       )}
     </div>
   );

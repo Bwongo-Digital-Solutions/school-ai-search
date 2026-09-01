@@ -1,0 +1,52 @@
+// The app's styleguide tokens.
+//
+// Named and valued after @openmrs/esm-styleguide's, because this app is being built to the same
+// house style and every component stylesheet here should read the way theirs does. Carbon supplies
+// the components and the spacing scale; this supplies the surfaces and the text colours that turn a
+// pile of Carbon components into one product.
+//
+// The layering is the part that matters most and the part that was missing: a grey page carrying
+// white cards with a hairline border. Without it every surface is the same surface and nothing
+// reads as a distinct thing.
+
+// Surfaces, lightest content to darkest chrome.
+$ui-background: #ffffff; // inside a card
+$ui-01: #f4f4f4; // the page behind the cards
+$ui-02: #ffffff; // a card
+$ui-03: #e0e0e0; // hairline borders and dividers
+$ui-04: #8d8d8d; // icon strokes on grey
+$ui-05: #161616; // strongest text
+$field-01: #f4f4f4; // the fill behind a text input
+
+// Text, in descending emphasis.
+$text-01: #161616;
+$text-02: #525252; // section titles, secondary copy — the workhorse
+$text-03: #a8a8a8; // captions, placeholders
+
+// Status. Carbon's own values, so a Tag and a hand-written rule agree.
+$support-success: #24a148;
+$support-info: #0043ce;
+$support-warning: #f1c21b;
+$support-error: #da1e28;
+$warning-background: #fff8e1;
+
+// The brand is a runtime value: each school sets its own colour under Settings, and it already
+// drives every report card and receipt. src/lib/brand.ts writes --brand-01/02/03 onto the document
+// from that setting; these are only the fallbacks for the moment before it loads.
+//
+// Used as `var(--brand-01)` and never as a Sass variable, so a change of school repaints the app
+// without a rebuild.
+$brand-01-fallback: #2952a3;
+$brand-02-fallback: #1d3a75;
+$brand-03-fallback: #3a6bc7;
+
+// Dark mode. Carbon's g100 tokens do the heavy lifting; these are the same roles inverted, applied
+// under [data-carbon-theme='g100'] wherever a rule needs a literal rather than a --cds- token.
+$ui-01-dark: #161616;
+$ui-02-dark: #262626;
+$ui-03-dark: #393939;
+$text-02-dark: #c6c6c6;
+$text-03-dark: #8d8d8d;
+
+$breakpoint-tablet-max: 1023px;
+$breakpoint-desktop-min: 1024px;

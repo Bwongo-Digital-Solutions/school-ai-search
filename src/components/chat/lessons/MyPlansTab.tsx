@@ -1,12 +1,14 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Copy, FileDown, Trash2 } from 'lucide-react';
 import Field from '@/components/common/Field';
 import { useAuth } from '@/contexts/AuthContext';
+import { useNotifications } from '@/contexts/NotificationContext';
 import { callLessonPlanner, teachingDocumentUrl } from '@/lib/teaching';
 import { downloadFromUrl } from '@/lib/download';
-import { EmptyState, Panel, SecondaryButton, zebra } from '../fees/shared';
+import { DangerButton, EmptyState, Panel, SecondaryButton, zebra } from '../fees/shared';
 import { CitationList, StatusBadge, LESSON_STATUS_STYLES, TERM_OPTIONS } from './shared';
 import type { LessonPlan } from '@/types/teaching';
+import styles from '../tabs.module.scss';
+import { Copy, DocumentDownload, TrashCan } from '@carbon/react/icons';
 
 interface Props {
   runAction: (label: string, handler: () => Promise<void>) => Promise<void>;
@@ -23,6 +25,7 @@ const STATUS_FILTER = [
 ];
 
 const MyPlansTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey }) => {
+  const { confirm } = useNotifications();
   const { user } = useAuth();
   const [plans, setPlans] = useState<LessonPlan[]>([]);
   const [filters, setFilters] = useState({ status: '', term: '', subjectName: '' });
@@ -59,27 +62,27 @@ const MyPlansTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey })
   );
 
   return (
-    <div className="space-y-4">
-      <Panel className="p-3">
-        <div className="grid gap-2 sm:grid-cols-3">
+    <div className={styles.stack}>
+      <Panel className={styles.padTight}>
+        <div className={styles.grid3}>
           <Field
             label="Status"
             value={filters.status}
             onChange={value => setFilters({ ...filters, status: String(value ?? '') })}
             options={STATUS_FILTER}
-          />
+ />
           <Field
             label="Term"
             value={filters.term}
             onChange={value => setFilters({ ...filters, term: String(value ?? '') })}
             options={TERM_OPTIONS}
-          />
+ />
           <Field
             label="Subject"
             value={filters.subjectName}
             onChange={value => setFilters({ ...filters, subjectName: String(value ?? '') })}
             placeholder="Any subject"
-          />
+ />
         </div>
       </Panel>
 
@@ -87,17 +90,17 @@ const MyPlansTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey })
         {plans.length === 0 ? (
           <EmptyState message="No lesson plans yet. Draft one from the Plan Builder." />
         ) : (
-          <div className="divide-y divide-gray-100 dark:divide-gray-700">
+          <div className={styles.rows}>
             {plans.map(plan => (
               <div key={plan.id} className={zebra}>
                 <button
                   type="button"
                   onClick={() => setExpandedId(expandedId === plan.id ? null : plan.id)}
-                  className="w-full text-left px-4 py-3 flex flex-wrap items-center justify-between gap-2"
+                  className={styles.expandRow}
                 >
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-gray-800 dark:text-white truncate">{plan.title}</p>
-                    <p className="text-[11px] text-gray-400">
+                  <div className={styles.rowMain}>
+                    <p className={styles.strong}>{plan.title}</p>
+                    <p className={styles.note}>
                       {[plan.subject_name, plan.topic, plan.term, `${plan.duration_minutes} min`]
                         .filter(Boolean)
                         .join(' · ')}
@@ -107,13 +110,13 @@ const MyPlansTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey })
                 </button>
 
                 {expandedId === plan.id && (
-                  <div className="px-4 pb-4">
+                  <div className={styles.padBody}>
                     {plan.learning_outcomes.length > 0 && (
-                      <div className="mb-3">
-                        <p className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-1">
+                      <div >
+                        <p className={styles.label}>
                           Learning outcomes
                         </p>
-                        <ul className="list-disc pl-4 text-xs text-gray-600 dark:text-gray-300 space-y-0.5">
+                        <ul className={styles.bullets}>
                           {plan.learning_outcomes.map((outcome, index) => (
                             <li key={index}>{outcome}</li>
                           ))}
@@ -123,7 +126,7 @@ const MyPlansTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey })
 
                     <CitationList citations={plan.refs} />
 
-                    <div className="flex flex-wrap gap-2 mt-3">
+                    <div className={styles.actions}>
                       {plan.status !== 'approved' && (
                         <SecondaryButton onClick={() => setStatus(plan, 'approved')} disabled={Boolean(busy)}>
                           Approve
@@ -144,7 +147,7 @@ const MyPlansTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey })
                         }
                         disabled={Boolean(busy)}
                       >
-                        <Copy className="w-4 h-4" /> Duplicate
+                        <Copy size={16} /> Duplicate
                       </SecondaryButton>
                       <SecondaryButton
                         onClick={() =>
@@ -157,11 +160,20 @@ const MyPlansTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey })
                         }
                         disabled={Boolean(busy)}
                       >
-                        <FileDown className="w-4 h-4" /> PDF
+                        <DocumentDownload size={16} /> PDF
                       </SecondaryButton>
-                      <SecondaryButton
-                        onClick={() => {
-                          if (!window.confirm(`Delete “${plan.title}”? This cannot be undone.`)) return;
+                      <DangerButton
+                        onClick={async () => {
+                          if (
+                            !(await confirm({
+                              title: 'Delete this lesson plan?',
+                              message: `“${plan.title}” will be removed. This cannot be undone.`,
+                              confirmLabel: 'Delete',
+                              danger: true,
+                            }))
+                          ) {
+                            return;
+                          }
                           runAction('Deleting the lesson plan', async () => {
                             await callLessonPlanner('delete', { id: plan.id }, user);
                             await load();
@@ -169,10 +181,10 @@ const MyPlansTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey })
                           });
                         }}
                         disabled={Boolean(busy)}
-                        className="text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20"
+
                       >
-                        <Trash2 className="w-4 h-4" /> Delete
-                      </SecondaryButton>
+                        <TrashCan size={16} /> Delete
+                      </DangerButton>
                     </div>
                   </div>
                 )}

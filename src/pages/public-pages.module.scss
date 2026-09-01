@@ -1,0 +1,331 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../styles/vars' as *;
+
+// The pages served outside a school: signing a school up, the platform operator's console, and
+// the 404. They render outside SettingsProvider, so there is no school colour to read — these use
+// the stylesheet's own brand fallbacks throughout.
+
+.page {
+  min-block-size: 100vh;
+  min-block-size: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: $ui-01;
+}
+
+.centred {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: layout.$spacing-06;
+}
+
+.card {
+  inline-size: 100%;
+  max-inline-size: 32rem;
+  background: $ui-02;
+  border: 1px solid $ui-03;
+}
+
+.cardNarrow {
+  max-inline-size: 24rem;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+  padding: layout.$spacing-06;
+}
+
+// The product mark above a sign-up form. The one place the brand appears on a pre-tenant page.
+.brand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: layout.$spacing-03;
+  margin-block-end: layout.$spacing-06;
+}
+
+.brandMark {
+  inline-size: layout.$spacing-08;
+  block-size: layout.$spacing-08;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--brand-01, #{$brand-01-fallback});
+  color: #ffffff;
+
+  svg {
+    fill: currentColor;
+  }
+}
+
+.brandName {
+  @include type.type-style('heading-03');
+  color: $text-01;
+}
+
+.title {
+  @include type.type-style('heading-04');
+  color: $text-01;
+  margin: 0;
+}
+
+.lede {
+  @include type.type-style('body-01');
+  color: $text-02;
+  margin: 0;
+}
+
+.note {
+  @include type.type-style('label-01');
+  color: $text-03;
+  margin: 0;
+}
+
+.centredText {
+  text-align: center;
+}
+
+// The subdomain field: a text box joined to the fixed domain that follows it, so the whole address
+// reads as one thing while only the first part is editable.
+.hostRow {
+  display: flex;
+  align-items: flex-end;
+}
+
+.hostField {
+  flex: 1;
+  min-inline-size: 0;
+}
+
+.hostSuffix {
+  @include type.type-style('body-compact-01');
+  display: flex;
+  align-items: center;
+  block-size: 2.5rem;
+  padding: 0 layout.$spacing-04;
+  background: $ui-01;
+  border: 1px solid $ui-03;
+  border-inline-start: none;
+  color: $text-02;
+  white-space: nowrap;
+}
+
+.availability {
+  @include type.type-style('label-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-02;
+  min-block-size: layout.$spacing-05;
+  margin-block-start: layout.$spacing-02;
+
+  svg {
+    fill: currentColor;
+    flex-shrink: 0;
+  }
+}
+
+.available {
+  color: $support-success;
+}
+
+.unavailable {
+  color: $support-error;
+}
+
+.checking {
+  color: $text-03;
+}
+
+.providers {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: layout.$spacing-03;
+}
+
+.provider {
+  @include type.type-style('label-01');
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: layout.$spacing-02;
+  padding: layout.$spacing-04 layout.$spacing-03;
+  background: none;
+  border: 1px solid $ui-03;
+  cursor: pointer;
+  color: $text-02;
+
+  svg {
+    fill: currentColor;
+  }
+
+  &:hover {
+    border-color: var(--brand-01, #{$brand-01-fallback});
+  }
+}
+
+.providerChosen {
+  border-color: var(--brand-01, #{$brand-01-fallback});
+  color: var(--brand-01, #{$brand-01-fallback});
+  box-shadow: inset 0 0 0 1px var(--brand-01, #{$brand-01-fallback});
+}
+
+.reference {
+  @include type.type-style('code-01');
+  padding: layout.$spacing-03 layout.$spacing-04;
+  background: $ui-01;
+  border: 1px solid $ui-03;
+  color: $text-01;
+}
+
+.spinner {
+  display: flex;
+  justify-content: center;
+}
+
+.footer {
+  @include type.type-style('label-01');
+  text-align: center;
+  color: $text-03;
+  padding: layout.$spacing-04;
+}
+
+// ---------------------------------------------------------------------------
+// The platform operator's console
+// ---------------------------------------------------------------------------
+
+.console {
+  min-block-size: 100vh;
+  min-block-size: 100dvh;
+  background: $ui-01;
+  padding: layout.$spacing-07 layout.$spacing-05;
+}
+
+.consoleInner {
+  max-inline-size: 60rem;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+}
+
+.consoleHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: layout.$spacing-04;
+}
+
+.consoleTitle {
+  @include type.type-style('heading-04');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  color: $text-01;
+  margin: 0;
+
+  svg {
+    fill: var(--brand-01, #{$brand-01-fallback});
+  }
+}
+
+.tenantRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: layout.$spacing-04;
+  padding: layout.$spacing-04 layout.$spacing-05;
+  border-block-start: 1px solid $ui-03;
+}
+
+.tenantName {
+  @include type.type-style('heading-compact-01');
+  color: $text-01;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tenantMeta {
+  @include type.type-style('helper-text-01');
+  color: $text-03;
+  margin: layout.$spacing-01 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tenantActions {
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  flex-shrink: 0;
+}
+
+.statusPicker {
+  inline-size: 10rem;
+}
+
+.grid3 {
+  display: grid;
+  gap: layout.$spacing-05;
+  grid-template-columns: 1fr;
+
+  @media (min-width: 48rem) {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+:global([data-carbon-theme='g100']) {
+  .page,
+  .console {
+    background: $ui-01-dark;
+  }
+
+  .card {
+    background: $ui-02-dark;
+    border-color: $ui-03-dark;
+  }
+
+  .brandName,
+  .title,
+  .consoleTitle,
+  .tenantName,
+  .reference {
+    color: #f4f4f4;
+  }
+
+  .lede,
+  .hostSuffix {
+    color: $text-02-dark;
+  }
+
+  .note,
+  .footer,
+  .tenantMeta,
+  .checking {
+    color: $text-03-dark;
+  }
+
+  .hostSuffix,
+  .reference {
+    background: $ui-01-dark;
+    border-color: $ui-03-dark;
+  }
+
+  .provider {
+    border-color: $ui-03-dark;
+    color: $text-02-dark;
+  }
+
+  .tenantRow {
+    border-block-start-color: $ui-03-dark;
+  }
+}

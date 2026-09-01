@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Camera, CameraOff, Keyboard, Loader2, ScanLine, X } from 'lucide-react';
+import { Button, Modal, TextInput } from '@carbon/react';
+import { Video, VideoOff } from '@carbon/react/icons';
+import styles from './student-id-scanner.module.scss';
 
 /**
  * Reads a student ID card three ways:
@@ -129,92 +131,75 @@ const StudentIdScanner: React.FC<StudentIdScannerProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div
-        className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden"
-        onClick={event => event.stopPropagation()}
-      >
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 dark:border-gray-700">
-          <h3 className="font-semibold text-gray-800 dark:text-white flex items-center gap-2">
-            <ScanLine className="w-5 h-5 text-indigo-500" />
-            {title}
-          </h3>
-          <button onClick={onClose} className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700">
-            <X className="w-4 h-4 text-gray-400" />
-          </button>
-        </div>
+    <Modal
+      open
+      passiveModal
+      modalHeading={title}
+      onRequestClose={onClose}
+      size="sm"
+    >
+      <div className={styles.body}>
+        <p className={styles.hint}>{hint}</p>
 
-        <div className="p-5 space-y-4">
-          <p className="text-xs text-gray-500 dark:text-gray-400">{hint}</p>
-
-          <form
-            onSubmit={event => {
-              event.preventDefault();
-              submit(manualCode);
-            }}
-          >
-            <label className="text-xs font-medium text-gray-700 dark:text-gray-200 flex items-center gap-1.5 mb-1.5">
-              <Keyboard className="w-3.5 h-3.5 text-indigo-500" />
-              Student number
-            </label>
-            <div className="flex gap-2">
-              <input
-                ref={inputRef}
-                value={manualCode}
-                onChange={event => setManualCode(event.target.value)}
-                placeholder="STU-2026-001"
-                autoComplete="off"
-                className="flex-1 bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
-              />
-              <button
-                type="submit"
-                disabled={!manualCode.trim()}
-                className="px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 disabled:opacity-40"
-              >
-                Look Up
-              </button>
-            </div>
-            <p className="text-[10px] text-gray-400 mt-1.5">
-              A handheld barcode or QR scanner types into this box and submits automatically.
-            </p>
-          </form>
-
-          <div className="border-t border-gray-100 dark:border-gray-700 pt-4">
-            {cameraOn ? (
-              <div className="space-y-2">
-                <div className="relative rounded-lg overflow-hidden bg-black aspect-video">
-                  <video ref={videoRef} className="w-full h-full object-cover" muted playsInline />
-                  <div className="absolute inset-6 border-2 border-white/70 rounded-lg pointer-events-none" />
-                </div>
-                <button
-                  onClick={stopCamera}
-                  className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-600 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
-                >
-                  <CameraOff className="w-4 h-4" /> Stop Camera
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={startCamera}
-                disabled={starting || !cameraSupported()}
-                className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-600 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
-              >
-                {starting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />}
-                Scan QR with Camera
-              </button>
-            )}
-
-            {!cameraSupported() && (
-              <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-2">
-                Camera scanning needs a browser with the Barcode Detection API (Chrome or Edge). A handheld
-                scanner and manual entry work everywhere.
-              </p>
-            )}
-            {cameraError && <p className="text-[10px] text-red-500 mt-2">{cameraError}</p>}
+        <form
+          onSubmit={event => {
+            event.preventDefault();
+            if (manualCode.trim()) onScan(manualCode.trim());
+          }}
+        >
+          <div className={styles.lookupRow}>
+            <TextInput
+              ref={inputRef}
+              id="student-code"
+              labelText="Student number"
+              size="md"
+              value={manualCode}
+              onChange={event => setManualCode(event.target.value)}
+              placeholder="STU-2026-001"
+              autoComplete="off"
+            />
+            <Button kind="primary" size="md" type="submit" disabled={!manualCode.trim()}>
+              Look up
+            </Button>
           </div>
+          <p className={styles.note}>
+            A handheld barcode or QR scanner types into this box and submits automatically.
+          </p>
+        </form>
+
+        <div className={styles.camera}>
+          {cameraOn ? (
+            <>
+              <div className={styles.viewport}>
+                <video ref={videoRef} className={styles.video} muted playsInline />
+                <div className={styles.reticle} />
+              </div>
+              <Button kind="tertiary" size="md" renderIcon={VideoOff} onClick={stopCamera}>
+                Stop the camera
+              </Button>
+            </>
+          ) : (
+            <Button
+              kind="tertiary"
+              size="md"
+              renderIcon={Video}
+              onClick={startCamera}
+              disabled={starting || !cameraSupported()}
+            >
+              {starting ? 'Starting the camera…' : 'Scan the QR code with the camera'}
+            </Button>
+          )}
+
+          {!cameraSupported() && (
+            <p className={styles.warn}>
+              Camera scanning needs a browser with the Barcode Detection API (Chrome or Edge). A
+              handheld scanner and typing the number work everywhere.
+            </p>
+          )}
+          {cameraError && <p className={styles.failure}>{cameraError}</p>}
         </div>
       </div>
-    </div>
+    </Modal>
   );
 };
 

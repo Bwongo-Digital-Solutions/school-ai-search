@@ -1,12 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Layers, Save, Trash2 } from 'lucide-react';
 import Field from '@/components/common/Field';
 import { useAuth } from '@/contexts/AuthContext';
+import { useNotifications } from '@/contexts/NotificationContext';
 import { callDigitalExaminer, gradeOptionsFor } from '@/lib/teaching';
-import { EmptyState, Panel, PrimaryButton, SecondaryButton, zebra } from '../fees/shared';
+import { DangerButton, EmptyState, Panel, PrimaryButton, SecondaryButton, zebra } from '../fees/shared';
 import { TERM_OPTIONS, currentAcademicYear } from '../lessons/shared';
 import { MixEditor } from './shared';
 import type { CurriculumFramework, ExamBlueprint } from '@/types/teaching';
+import styles from '../tabs.module.scss';
+import { Layers, Save, TrashCan } from '@carbon/react/icons';
 
 interface Props {
   frameworks: CurriculumFramework[];
@@ -44,6 +46,7 @@ const emptyForm = () => ({
  * reads it, so tuning here changes every paper produced from it.
  */
 const BlueprintTab: React.FC<Props> = ({ frameworks, runAction, onChanged, busy, refreshKey, onUseBlueprint }) => {
+  const { confirm } = useNotifications();
   const { user } = useAuth();
   const [blueprints, setBlueprints] = useState<ExamBlueprint[]>([]);
   const [form, setForm] = useState(emptyForm());
@@ -131,14 +134,14 @@ const BlueprintTab: React.FC<Props> = ({ frameworks, runAction, onChanged, busy,
   }, []);
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[380px,1fr]">
-      <Panel className="p-4 h-fit">
-        <h3 className="text-sm font-semibold text-gray-800 dark:text-white mb-3 flex items-center gap-2">
-          <Layers className="w-4 h-4 text-indigo-500" />
+    <div className={styles.split}>
+      <Panel className={styles.padFit}>
+        <h3 className={styles.subheading}>
+          <Layers size={16} />
           {form.id ? 'Edit blueprint' : 'New blueprint'}
         </h3>
 
-        <div className="space-y-3">
+        <div className={styles.stackTight}>
           <Field label="Blueprint name" value={form.name} onChange={set('name')} placeholder="S2 Biology — Term 1 Test" />
           <Field
             label="Curriculum"
@@ -146,16 +149,16 @@ const BlueprintTab: React.FC<Props> = ({ frameworks, runAction, onChanged, busy,
             onChange={set('curriculum')}
             options={frameworks.map(entry => ({ value: entry.id, label: entry.label }))}
             hint={framework?.examBody}
-          />
-          <div className="grid grid-cols-2 gap-2">
+ />
+          <div className={styles.grid2}>
             <Field label="Year / class" value={form.gradeLevel} onChange={set('gradeLevel')} options={gradeOptionsFor(framework)} />
             <Field label="Subject" value={form.subjectName} onChange={set('subjectName')} />
           </div>
-          <div className="grid grid-cols-2 gap-2">
+          <div className={styles.grid2}>
             <Field label="Academic year" value={form.academicYear} onChange={set('academicYear')} />
             <Field label="Term" value={form.term} onChange={set('term')} options={TERM_OPTIONS.filter(o => o.value)} />
           </div>
-          <div className="grid grid-cols-3 gap-2">
+          <div className={styles.grid3}>
             <Field label="Type" value={form.assessmentType} onChange={set('assessmentType')} options={ASSESSMENT_TYPES} />
             <Field label="Minutes" type="number" min={10} value={form.durationMinutes} onChange={set('durationMinutes')} />
             <Field label="Marks" type="number" min={1} value={form.totalMarks} onChange={set('totalMarks')} />
@@ -166,7 +169,7 @@ const BlueprintTab: React.FC<Props> = ({ frameworks, runAction, onChanged, busy,
             value={topicText}
             onChange={value => setTopicText(String(value ?? ''))}
             hint="One syllabus topic per line."
-          />
+ />
 
           <MixEditor label="Difficulty spread" keys={['easy', 'moderate', 'challenging']} mix={difficultyMix} onChange={setDifficultyMix} />
           <MixEditor
@@ -174,18 +177,18 @@ const BlueprintTab: React.FC<Props> = ({ frameworks, runAction, onChanged, busy,
             keys={['remember', 'understand', 'apply', 'analyse', 'evaluate', 'create']}
             mix={bloomMix}
             onChange={setBloomMix}
-          />
+ />
           <MixEditor
             label="Question type spread"
             keys={framework?.questionTypes || []}
             mix={typeMix}
             onChange={setTypeMix}
-          />
+ />
         </div>
 
-        <div className="flex gap-2 mt-4">
+        <div className={styles.actions}>
           <PrimaryButton onClick={save} disabled={Boolean(busy) || !form.name.trim()}>
-            <Save className="w-4 h-4" /> {form.id ? 'Update' : 'Create'}
+            <Save size={16} /> {form.id ? 'Update' : 'Create'}
           </PrimaryButton>
           {form.id && (
             <SecondaryButton onClick={() => { setForm(emptyForm()); setTopicText(''); }} disabled={Boolean(busy)}>
@@ -199,12 +202,12 @@ const BlueprintTab: React.FC<Props> = ({ frameworks, runAction, onChanged, busy,
         {blueprints.length === 0 ? (
           <EmptyState message="No blueprints yet. A blueprint fixes the curriculum, year, subject and mark spread for a paper, so you can regenerate it consistently each term." />
         ) : (
-          <div className="divide-y divide-gray-100 dark:divide-gray-700">
+          <div className={styles.rows}>
             {blueprints.map(blueprint => (
               <div key={blueprint.id} className={`px-4 py-3 flex flex-wrap items-center justify-between gap-2 ${zebra}`}>
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-gray-800 dark:text-white truncate">{blueprint.name}</p>
-                  <p className="text-[11px] text-gray-400">
+                <div className={styles.rowMain}>
+                  <p className={styles.strong}>{blueprint.name}</p>
+                  <p className={styles.note}>
                     {[
                       blueprint.subject_name,
                       blueprint.term,
@@ -216,16 +219,25 @@ const BlueprintTab: React.FC<Props> = ({ frameworks, runAction, onChanged, busy,
                       .join(' · ')}
                   </p>
                 </div>
-                <div className="flex gap-2">
+                <div className={styles.actions}>
                   <SecondaryButton onClick={() => onUseBlueprint(blueprint)} disabled={Boolean(busy)}>
                     Generate from this
                   </SecondaryButton>
                   <SecondaryButton onClick={() => edit(blueprint)} disabled={Boolean(busy)}>
                     Edit
                   </SecondaryButton>
-                  <SecondaryButton
-                    onClick={() => {
-                      if (!window.confirm(`Delete “${blueprint.name}”? Questions already generated from it are kept.`)) return;
+                  <DangerButton
+                    onClick={async () => {
+                      if (
+                        !(await confirm({
+                          title: 'Delete this blueprint?',
+                          message: `“${blueprint.name}” will be removed. Questions already generated from it are kept.`,
+                          confirmLabel: 'Delete',
+                          danger: true,
+                        }))
+                      ) {
+                        return;
+                      }
                       runAction('Deleting the blueprint', async () => {
                         await callDigitalExaminer('delete_blueprint', { id: blueprint.id }, user);
                         await load();
@@ -233,10 +245,10 @@ const BlueprintTab: React.FC<Props> = ({ frameworks, runAction, onChanged, busy,
                       });
                     }}
                     disabled={Boolean(busy)}
-                    className="text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20"
+
                   >
-                    <Trash2 className="w-4 h-4" />
-                  </SecondaryButton>
+                    <TrashCan size={16} />
+                  </DangerButton>
                 </div>
               </div>
             ))}

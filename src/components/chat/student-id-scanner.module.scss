@@ -1,0 +1,94 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+}
+
+.hint {
+  @include type.type-style('body-compact-01');
+  color: $text-02;
+  margin: 0;
+}
+
+// Typing the number and looking it up. Kept on one line, because a handheld scanner types into the
+// box and presses Enter — the button is for the times somebody reads the card themselves.
+.lookupRow {
+  display: flex;
+  align-items: flex-end;
+  gap: layout.$spacing-03;
+
+  > :first-child {
+    flex: 1;
+    min-inline-size: 0;
+  }
+}
+
+.note {
+  @include type.type-style('label-01');
+  color: $text-03;
+  margin: layout.$spacing-03 0 0;
+}
+
+.camera {
+  border-block-start: 1px solid $ui-03;
+  padding-block-start: layout.$spacing-05;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-04;
+}
+
+.viewport {
+  position: relative;
+  overflow: hidden;
+  background: #000000;
+  aspect-ratio: 16 / 9;
+}
+
+.video {
+  inline-size: 100%;
+  block-size: 100%;
+  object-fit: cover;
+}
+
+// The frame someone lines the card up inside. Inset rather than full-bleed, so there is visibly a
+// right place to hold the card.
+.reticle {
+  position: absolute;
+  inset: layout.$spacing-06;
+  border: 2px solid rgb(255 255 255 / 70%);
+  pointer-events: none;
+}
+
+.warn {
+  @include type.type-style('label-01');
+  color: #8e6a00;
+  margin: 0;
+}
+
+.failure {
+  @include type.type-style('label-01');
+  color: $support-error;
+  margin: 0;
+}
+
+:global([data-carbon-theme='g100']) {
+  .hint {
+    color: $text-02-dark;
+  }
+
+  .note {
+    color: $text-03-dark;
+  }
+
+  .camera {
+    border-block-start-color: $ui-03-dark;
+  }
+
+  .warn {
+    color: $support-warning;
+  }
+}

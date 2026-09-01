@@ -1,0 +1,168 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+// The assistant's answer, rendered from markdown.
+//
+// Styled here rather than per-element in the TSX so the whole answer reads as one piece of prose:
+// a heading and the paragraph under it share a rhythm because they were set together, not because
+// two separate class strings happened to agree.
+.markdown {
+  @include type.type-style('body-01');
+  color: $text-01;
+
+  > * + * {
+    margin-block-start: layout.$spacing-03;
+  }
+
+  h1,
+  h2,
+  h3 {
+    color: $text-01;
+    margin-block: layout.$spacing-05 layout.$spacing-03;
+  }
+
+  h1 { @include type.type-style('heading-03'); }
+  h2 { @include type.type-style('heading-02'); }
+  h3 { @include type.type-style('heading-compact-02'); }
+
+  p {
+    margin: 0;
+  }
+
+  strong {
+    font-weight: 600;
+  }
+
+  hr {
+    border: none;
+    border-block-start: 1px solid $ui-03;
+    margin-block: layout.$spacing-05;
+  }
+
+  // Inline code sits on the surrounding surface with a faint fill, not a colour of its own —
+  // a coloured monospace run inside a sentence reads as a link that cannot be clicked.
+  code {
+    @include type.type-style('code-01');
+    background: $ui-01;
+    padding: 0 layout.$spacing-02;
+    color: $text-01;
+  }
+}
+
+.codeBlock {
+  @include type.type-style('code-01');
+  background: $ui-05;
+  color: #f4f4f4;
+  padding: layout.$spacing-05;
+  margin-block: layout.$spacing-05;
+  overflow-x: auto;
+
+  code {
+    background: none;
+    padding: 0;
+    color: inherit;
+  }
+}
+
+// A table in an answer. Carbon's DataTable is for interactive lists; this is prose, so it takes the
+// same borders and type without the sorting and selection machinery.
+.tableWrap {
+  overflow-x: auto;
+  margin-block: layout.$spacing-05;
+}
+
+.table {
+  border-collapse: collapse;
+  min-inline-size: 100%;
+  border: 1px solid $ui-03;
+
+  th {
+    @include type.type-style('heading-compact-01');
+    text-align: start;
+    color: $text-02;
+    background: $ui-01;
+    padding: layout.$spacing-03 layout.$spacing-05;
+    border-block-end: 1px solid $ui-03;
+    white-space: nowrap;
+  }
+
+  td {
+    @include type.type-style('body-compact-01');
+    color: $text-01;
+    padding: layout.$spacing-03 layout.$spacing-05;
+    border-block-end: 1px solid $ui-03;
+  }
+
+  tr:nth-child(even) td {
+    background: $ui-01;
+  }
+
+  tr:last-child td {
+    border-block-end: none;
+  }
+}
+
+// Lists. A marker in the school's colour, aligned to the first line of text rather than centred on
+// the whole item, which is what makes a two-line bullet look right.
+.listItem {
+  display: flex;
+  align-items: flex-start;
+  gap: layout.$spacing-03;
+}
+
+.bullet {
+  inline-size: layout.$spacing-02;
+  block-size: layout.$spacing-02;
+  border-radius: 50%;
+  background: var(--brand-01, #{$brand-01-fallback});
+  margin-block-start: 0.5em;
+  flex-shrink: 0;
+}
+
+.ordinal {
+  @include type.type-style('body-compact-01');
+  color: var(--brand-01, #{$brand-01-fallback});
+  font-weight: 600;
+  min-inline-size: 1.25rem;
+  flex-shrink: 0;
+}
+
+.spacer {
+  block-size: layout.$spacing-03;
+}
+
+:global([data-carbon-theme='g100']) {
+  .markdown,
+  .markdown h1,
+  .markdown h2,
+  .markdown h3,
+  .table td {
+    color: #f4f4f4;
+  }
+
+  .markdown code {
+    background: $ui-03-dark;
+    color: #f4f4f4;
+  }
+
+  .markdown hr,
+  .table,
+  .table th,
+  .table td {
+    border-color: $ui-03-dark;
+  }
+
+  .table th {
+    background: $ui-01-dark;
+    color: $text-02-dark;
+  }
+
+  .table tr:nth-child(even) td {
+    background: $ui-01-dark;
+  }
+
+  .codeBlock {
+    background: #000000;
+  }
+}

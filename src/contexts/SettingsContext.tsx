@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useCallback, useEffect, useState } from 'react';
 import { EMPTY_SETTINGS, fetchSchoolSettings, type SchoolSettings } from '@/lib/settings';
+import { applyBrand } from '@/lib/brand';
 
 interface SettingsContextType {
   settings: SchoolSettings;
@@ -29,6 +30,13 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   useEffect(() => {
     refreshSettings();
   }, [refreshSettings]);
+
+  // The school's colour, onto the document, for every stylesheet to read as var(--brand-01/02/03).
+  // Kept here rather than in a component so it survives navigation and applies to portals — Carbon
+  // renders modals and overflow menus outside the React tree, and they need the brand too.
+  useEffect(() => {
+    applyBrand(settings.theme_color);
+  }, [settings.theme_color]);
 
   return (
     <SettingsContext.Provider value={{ settings, refreshSettings, setSettings }}>

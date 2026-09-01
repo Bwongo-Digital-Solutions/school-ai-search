@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
-import { AlertTriangle, BookMarked, ChevronDown, ChevronRight, Plug, Terminal } from 'lucide-react';
+import { Button } from '@carbon/react';
+import { Book, ChevronDown, ChevronRight, Plug, Terminal, WarningAlt } from '@carbon/react/icons';
 import type { MessageMetadata } from '@/types/chat';
+import styles from './agent-trace.module.scss';
 
 const formatDuration = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`);
 
@@ -25,42 +27,42 @@ const AgentTrace: React.FC<{ metadata?: MessageMetadata }> = ({ metadata }) => {
   if (!hasAnything) return null;
 
   return (
-    <div className="mt-2 space-y-2">
+    <div className={styles.trace}>
       {metadata.notice && (
-        <p className="text-[11px] text-amber-600 dark:text-amber-400 flex items-start gap-1.5">
-          <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
+        <p className={styles.warning}>
+          <WarningAlt size={16} />
           {metadata.notice}
         </p>
       )}
 
       {metadata.stoppedAtStepLimit && (
-        <p className="text-[11px] text-amber-600 dark:text-amber-400 flex items-start gap-1.5">
-          <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
+        <p className={styles.warning}>
+          <WarningAlt size={16} />
           The assistant reached its tool-step limit, so this answer may be incomplete.
         </p>
       )}
 
       {mcpErrors.map(error => (
-        <p key={error.serverId} className="text-[11px] text-red-500 flex items-start gap-1.5">
-          <Plug className="w-3 h-3 mt-0.5 shrink-0" />
+        <p key={error.serverId} className={styles.failure}>
+          <Plug size={16} />
           MCP server “{error.serverName}” could not be reached: {error.message}
         </p>
       ))}
 
       {citations.length > 0 && (
         <div>
-          <p className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-1 flex items-center gap-1">
-            <BookMarked className="w-3 h-3" /> Sources
+          <p className={styles.sectionLabel}>
+            <Book size={16} /> Sources
           </p>
-          <ul className="space-y-0.5">
+          <ul className={styles.citations}>
             {citations.map(citation => (
               <li
                 key={citation.chunkId || `${citation.documentId}-${citation.citationIndex}`}
-                className="text-[11px] text-gray-500 dark:text-gray-400 flex gap-1.5"
+                className={styles.citation}
               >
-                <span className="shrink-0 font-medium text-indigo-500">[{citation.citationIndex}]</span>
-                <span className="min-w-0">
-                  <span className="font-medium text-gray-600 dark:text-gray-300">{citation.title}</span>
+                <span className={styles.citationIndex}>[{citation.citationIndex}]</span>
+                <span>
+                  <span className={styles.citationTitle}>{citation.title}</span>
                   {citation.heading && <span> — {citation.heading}</span>}
                 </span>
               </li>
@@ -71,30 +73,28 @@ const AgentTrace: React.FC<{ metadata?: MessageMetadata }> = ({ metadata }) => {
 
       {steps.length > 0 && (
         <div>
-          <button
-            type="button"
+          <Button
+            kind="ghost"
+            size="sm"
+            renderIcon={showSteps ? ChevronDown : ChevronRight}
             onClick={() => setShowSteps(previous => !previous)}
-            className="inline-flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+            aria-expanded={showSteps}
           >
-            {showSteps ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-            <Terminal className="w-3 h-3" />
-            {steps.length} tool {steps.length === 1 ? 'call' : 'calls'}
-          </button>
+            <Terminal size={16} /> {steps.length} tool {steps.length === 1 ? 'call' : 'calls'}
+          </Button>
 
           {showSteps && (
-            <ol className="mt-1.5 space-y-1.5 border-l-2 border-gray-100 dark:border-gray-700 pl-2.5">
+            <ol className={styles.steps}>
               {steps.map((step, index) => (
-                <li key={index} className="text-[11px]">
-                  <div className="flex items-center gap-1.5">
-                    <code className={step.isError ? 'text-red-500' : 'text-indigo-500'}>{step.tool}</code>
-                    <span className="text-gray-400">{formatDuration(step.ms)}</span>
+                <li key={index} className={styles.step}>
+                  <div className={styles.stepHead}>
+                    <code className={`${styles.stepTool} ${step.isError ? styles.stepToolError : ''}`}>
+                      {step.tool}
+                    </code>
+                    <span className={styles.stepTime}>{formatDuration(step.ms)}</span>
                   </div>
-                  <p className="font-mono text-gray-400 truncate">{JSON.stringify(step.input)}</p>
-                  <p
-                    className={`whitespace-pre-wrap line-clamp-3 ${
-                      step.isError ? 'text-red-400' : 'text-gray-500 dark:text-gray-400'
-                    }`}
-                  >
+                  <p className={styles.stepInput}>{JSON.stringify(step.input)}</p>
+                  <p className={`${styles.stepOutput} ${step.isError ? styles.stepOutputError : ''}`}>
                     {step.output}
                   </p>
                 </li>

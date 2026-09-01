@@ -1,0 +1,152 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+// The two controls that sit inside the composer: attaching a picture, and recording a question.
+// Both replace themselves with a status while they are busy, so the composer stays one line tall.
+
+// ---------------------------------------------------------------------------
+// Image upload
+// ---------------------------------------------------------------------------
+
+.attached {
+  display: inline-flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  padding: layout.$spacing-03;
+  background: $ui-01;
+  border: 1px solid $ui-03;
+}
+
+.thumb {
+  inline-size: layout.$spacing-08;
+  block-size: layout.$spacing-08;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.attachedText {
+  min-inline-size: 0;
+}
+
+.attachedName {
+  @include type.type-style('label-01');
+  display: block;
+  color: $text-01;
+  font-weight: 600;
+  max-inline-size: 10rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachedHint {
+  @include type.type-style('label-01');
+  display: block;
+  color: $text-03;
+}
+
+.hiddenInput {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+// A drop target that is also a button. The ring appears only while something is over it.
+.dragging {
+  outline: 2px solid var(--brand-01, #{$brand-01-fallback});
+  outline-offset: -2px;
+}
+
+// ---------------------------------------------------------------------------
+// Voice recorder
+// ---------------------------------------------------------------------------
+
+.recording {
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-04;
+  padding: layout.$spacing-02 layout.$spacing-04;
+  background: #fff1f1;
+  border: 1px solid $support-error;
+}
+
+.recordingDot {
+  inline-size: layout.$spacing-03;
+  block-size: layout.$spacing-03;
+  border-radius: 50%;
+  background: $support-error;
+  flex-shrink: 0;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+// The live level meter. Bars rather than a number, because the useful question while recording is
+// "is it hearing me", and a moving bar answers that without being read.
+.levels {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  block-size: layout.$spacing-06;
+}
+
+.level {
+  inline-size: 3px;
+  background: $support-error;
+  transition: block-size 75ms linear;
+}
+
+.duration {
+  @include type.type-style('code-01');
+  color: $support-error;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.transcribing {
+  display: flex;
+  align-items: center;
+  padding: layout.$spacing-02 layout.$spacing-04;
+  background: $ui-01;
+  border: 1px solid $ui-03;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .recordingDot {
+    animation: none;
+  }
+
+  .level {
+    transition: none;
+  }
+}
+
+:global([data-carbon-theme='g100']) {
+  .attached,
+  .transcribing {
+    background: $ui-01-dark;
+    border-color: $ui-03-dark;
+  }
+
+  .attachedName {
+    color: #f4f4f4;
+  }
+
+  .attachedHint {
+    color: $text-03-dark;
+  }
+
+  .recording {
+    background: rgb(218 30 40 / 15%);
+  }
+}
