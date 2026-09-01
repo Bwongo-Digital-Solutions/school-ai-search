@@ -61,7 +61,7 @@ const WelcomeScreen: React.FC = () => {
         <Education size={32} />
       </div>
 
-      <h1 className={styles.title}>SchoolBot AI</h1>
+      <h1 className={styles.title}>eSchool SchoolBot AI</h1>
       <p className={styles.lede}>
         Your school information assistant. Ask anything about students, grades and attendance.
       </p>

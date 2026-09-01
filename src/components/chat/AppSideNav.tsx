@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   SideNav,
   SideNavDivider,
@@ -8,7 +8,10 @@ import {
   SideNavMenuItem,
 } from '@carbon/react';
 import {
+  Application,
   ArrowsHorizontal,
+  DataBase,
+  Education,
   Chat,
   Email,
   Group,
@@ -24,6 +27,7 @@ import {
 import { useAuth } from '@/contexts/AuthContext';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useLive } from '@/contexts/LiveContext';
+import { loadIntegrations, type Integration } from '@/lib/integrations';
 import styles from './app-side-nav.module.scss';
 
 /**
@@ -46,7 +50,21 @@ interface AppSideNavProps {
 
 const AppSideNav: React.FC<AppSideNavProps> = ({ expanded, onOverlayClick }) => {
   const { activeView, setActiveView } = useChatContext();
-  const { isAuthenticated, isAdmin, isSupportStaff } = useAuth();
+  const { isAuthenticated, isAdmin, isSupportStaff, isPrivileged, canSeeStudents, canSeeFinance } =
+    useAuth();
+  const [systems, setSystems] = useState<Integration[]>([]);
+
+  // Which external systems this school has connected decides whether those entries exist at all —
+  // a menu item leading to "nothing is configured" is worse than no menu item.
+  useEffect(() => {
+    if (!isAuthenticated || isSupportStaff) return;
+    loadIntegrations()
+      .then((state) => setSystems(state.integrations.filter((entry) => entry.enabled && entry.baseUrl)))
+      .catch(() => setSystems([]));
+  }, [isAuthenticated, isSupportStaff]);
+
+  const elearning = systems.find((entry) => entry.kind === 'elearning');
+  const erp = systems.find((entry) => entry.kind === 'erp');
   const { unread } = useLive();
 
   if (!isAuthenticated) return null;
@@ -71,15 +89,22 @@ const AppSideNav: React.FC<AppSideNavProps> = ({ expanded, onOverlayClick }) => 
       className={styles.nav}
     >
       <SideNavItems>
-        <SideNavLink renderIcon={Chat} isActive={isCurrent('chat')} href="#" onClick={go('chat')}>
-          Chat
-        </SideNavLink>
-        <SideNavLink renderIcon={Group} isActive={isCurrent('students')} href="#" onClick={go('students')}>
-          Students
-        </SideNavLink>
-        <SideNavLink renderIcon={ListChecked} isActive={isCurrent('records')} href="#" onClick={go('records')}>
-          Records
-        </SideNavLink>
+        {/* The assistant answers from full student records, so it follows the same fence they do. */}
+        {canSeeStudents && (
+          <SideNavLink renderIcon={Chat} isActive={isCurrent('chat')} href="#" onClick={go('chat')}>
+            Chat
+          </SideNavLink>
+        )}
+        {canSeeStudents && (
+          <SideNavLink renderIcon={Group} isActive={isCurrent('students')} href="#" onClick={go('students')}>
+            Students
+          </SideNavLink>
+        )}
+        {canSeeStudents && (
+          <SideNavLink renderIcon={ListChecked} isActive={isCurrent('records')} href="#" onClick={go('records')}>
+            Records
+          </SideNavLink>
+        )}
 
         <SideNavLink renderIcon={Email} isActive={isCurrent('messages')} href="#" onClick={go('messages')}>
           <span className={styles.itemRow}>
@@ -88,23 +113,54 @@ const AppSideNav: React.FC<AppSideNavProps> = ({ expanded, onOverlayClick }) => 
           </span>
         </SideNavLink>
 
-        <SideNavDivider />
+        {canSeeStudents && <SideNavDivider />}
 
-        <SideNavMenu renderIcon={Notebook} title="Teaching" defaultExpanded={['lessons', 'examiner'].includes(activeView)}>
-          <SideNavMenuItem isActive={isCurrent('lessons')} href="#" onClick={go('lessons')}>
-            Lesson Planner
-          </SideNavMenuItem>
-          <SideNavMenuItem isActive={isCurrent('examiner')} href="#" onClick={go('examiner')}>
-            Digital Examiner
-          </SideNavMenuItem>
-        </SideNavMenu>
+        {canSeeStudents && (
+          <SideNavMenu renderIcon={Notebook} title="Teaching" defaultExpanded={['lessons', 'examiner'].includes(activeView)}>
+            <SideNavMenuItem isActive={isCurrent('lessons')} href="#" onClick={go('lessons')}>
+              Lesson Planner
+            </SideNavMenuItem>
+            <SideNavMenuItem isActive={isCurrent('examiner')} href="#" onClick={go('examiner')}>
+              Digital Examiner
+            </SideNavMenuItem>
+          </SideNavMenu>)}
 
         <SideNavLink renderIcon={Wallet} isActive={isCurrent('fees')} href="#" onClick={go('fees')}>
           Fees
         </SideNavLink>
-        {isAdmin && (
+        {canSeeFinance && (
           <SideNavLink renderIcon={Money} isActive={isCurrent('finance')} href="#" onClick={go('finance')}>
             Fee Management
+          </SideNavLink>
+        )}
+
+        {/* Only offered once the school has actually connected something. */}
+        {elearning && (
+          <SideNavLink renderIcon={Education} isActive={isCurrent('elearning')} href="#" onClick={go('elearning')}>
+            E-Learning
+          </SideNavLink>
+        )}
+        {erp && isPrivileged && (
+          <SideNavLink renderIcon={Application} isActive={isCurrent('erp')} href="#" onClick={go('erp')}>
+            {erp.label}
+          </SideNavLink>
+        )}
+
+        {isPrivileged && <SideNavDivider />}
+
+        {isPrivileged && (
+          <SideNavLink renderIcon={DataBase} isActive={isCurrent('data')} href="#" onClick={go('data')}>
+            School Data
+          </SideNavLink>
+        )}
+        {isPrivileged && (
+          <SideNavLink renderIcon={ArrowsHorizontal} isActive={isCurrent('monitoring')} href="#" onClick={go('monitoring')}>
+            Monitoring
+          </SideNavLink>
+        )}
+        {isPrivileged && (
+          <SideNavLink renderIcon={Time} isActive={isCurrent('audit')} href="#" onClick={go('audit')}>
+            Audit Log
           </SideNavLink>
         )}
 
@@ -113,16 +169,6 @@ const AppSideNav: React.FC<AppSideNavProps> = ({ expanded, onOverlayClick }) => 
         {isAdmin && (
           <SideNavLink renderIcon={UserAdmin} isActive={isCurrent('users')} href="#" onClick={go('users')}>
             Staff Access
-          </SideNavLink>
-        )}
-        {isAdmin && (
-          <SideNavLink renderIcon={ArrowsHorizontal} isActive={isCurrent('monitoring')} href="#" onClick={go('monitoring')}>
-            Monitoring
-          </SideNavLink>
-        )}
-        {isAdmin && (
-          <SideNavLink renderIcon={Time} isActive={isCurrent('audit')} href="#" onClick={go('audit')}>
-            Audit Log
           </SideNavLink>
         )}
         {isAdmin && (

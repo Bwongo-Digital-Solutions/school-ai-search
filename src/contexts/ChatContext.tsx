@@ -13,7 +13,9 @@ import type { JsonRecord } from '@/types/auth';
 // registers — the same records the mobile app writes, read back in one place.
 // 'teaching' reports each teacher's lessons, their students' attendance and their results, and
 // is where classes are assigned to teachers in the first place.
-type ActiveView =
+// 'data' is backup, export and import — the school's records as a whole rather than one student's.
+// 'elearning' and 'erp' open the systems the school has connected under Settings.
+export type ActiveView =
   | 'chat'
   | 'students'
   | 'records'
@@ -26,6 +28,9 @@ type ActiveView =
   | 'monitoring'
   | 'teaching'
   | 'messages'
+  | 'data'
+  | 'elearning'
+  | 'erp'
   | 'settings';
 
 

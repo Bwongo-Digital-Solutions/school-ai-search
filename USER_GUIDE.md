@@ -10,17 +10,36 @@ For architecture, endpoints and deployment, see [TECHNICAL_OVERVIEW.md](TECHNICA
 
 ## 1. Who can do what (roles)
 
-Every person signs in with one of three roles. The first account ever created becomes the
-**Administrator** automatically.
+Every person signs in with one of six roles. The first account ever created becomes the
+**Administrator** automatically; every role after that is assigned by an administrator under
+**Staff Access**.
 
 | Role | Sees | Can do |
 | --- | --- | --- |
-| **Administrator** | Everything | Manage students, records, fees, settings, staff accounts, reports; approve new sign-ups. |
-| **Teacher** | Student records (view), records workspace, teaching tools | View students; record attendance, academic, discipline, admissions, allocations, lifecycle; plan lessons; write and bank exam questions; use the AI assistant. |
-| **Support staff** | School Fees Status only | Look up a student's fee balance/status (by search or by scanning an ID card). Nothing else. |
+| **Administrator** | Everything | Everything below, plus staff accounts and roles, the audit trail, and the school settings. |
+| **Head Teacher** | Everything except staff and settings | Every student record, the fees, the whole of monitoring, and the school's data — backups, export, import, and the connected systems. Cannot change roles or system settings. |
+| **Accountant** | Fees, reports, school data | Fee structures, billing runs, payments, arrears, bursaries, ratings and financial reports. Backups, export and import. Does not see student records or the teaching tools. |
+| **Bursar** | Fees, reports, school data | The same reach as the accountant, and the counter work that goes with it — receipting payments and answering on a family's account. |
+| **Teacher** | Student records, teaching tools | View students; record attendance, academic, discipline, admissions, allocations and lifecycle; plan lessons; write and bank exam questions; use the AI assistant. |
+| **Support staff** | School Fees Status only | Look up a student's fee balance or status, by search or by scanning an ID card. Nothing else. |
 
-Support staff are non-teaching staff — gatekeepers, bursary desk, cooks, drivers — who need to
-confirm whether fees are cleared and nothing more.
+Two divisions run through that table. **Student records** are for the people who teach — the
+administrator, the head teacher and teachers. **Money** is for the people who keep the books — the
+administrator, the head teacher, the accountant and the bursar. The head teacher is in both,
+because running a school means answering for both.
+
+The third division is narrower: **the school's data as a whole** — a backup, or a bulk export — is
+every student record in one file. That is for the four roles that answer for the institution, not
+for a teacher who may perfectly well read any one of those records on their own.
+
+Support staff are non-teaching staff — gatekeepers, matrons, cooks, drivers — who need to confirm
+whether fees are cleared and nothing more. A support-staff account can be given a **post** (gate,
+dormitory or kitchen) which decides what a student ID scan shows them.
+
+> **A note if you are upgrading.** The bursar used to be a *post* on an administrator's account.
+> It is a role now — keeping the books is a job, not a posting, and it should not require handing
+> somebody the administrator's keys. Existing bursar accounts are moved across automatically the
+> first time the new version starts.
 
 ---
 
@@ -253,6 +272,64 @@ composer.
 e-School's own tools also work the other way round: with a server token configured, tools like
 student search and curriculum lookup can be used from Claude Desktop, Claude Code or another MCP
 client. See [TECHNICAL_OVERVIEW.md](TECHNICAL_OVERVIEW.md) for setup.
+
+### Integrations — your Moodle and your business system
+
+Most schools already run something. **Settings → Integrations** records where those systems are, so
+staff reach them from inside e-School instead of hunting for a bookmark.
+
+**E-Learning.** Enter your Moodle's address and save. An **E-Learning** entry appears in the side
+menu and opens Moodle inside the app. Some systems refuse to be shown inside another site — a
+sensible thing for them to do, since it is what stops an untrusted page wrapping their login — and
+when that happens you get a button that opens it in its own tab instead. Nothing is broken; that is
+the system protecting itself.
+
+**Business system.** One of Odoo, ERPNext or Dolibarr. One at a time on purpose: connecting a second
+stands the first down, so the menu never shows two and leaves you guessing which one is real.
+
+An API token is optional. If you set one it is encrypted before it is stored, and it never comes
+back out — the screen shows only its last four characters, enough to recognise it and not enough to
+use it. Saving the address again leaves the stored token alone; to remove it, clear the token box
+explicitly and save.
+
+Two things the screen enforces, both about that token:
+
+- **The address must be https.** A token travels on every request, and one sent over plain http can
+  be read by anyone on the same network. It is refused when you enter it rather than being quietly
+  insecure afterwards.
+- **The server needs `SECRETS_KEY` set** to store a token at all. Without it you can still save an
+  address, and the screen says so rather than pretending to have saved a credential.
+
+**Test** asks the system whether it is really there and shows what came back — an unreachable
+address or an error code, kept against the row so it is still there after a reload.
+
+### Your school's data — backups, export and import
+
+**School Data** in the side menu, for the administrator, head teacher, accountant and bursar. Three
+tabs, answering the same worry from different directions.
+
+**Backups** are complete copies of your school's database, taken on the server. Press **Back up
+now**, and the backup appears in the list with its size and who took it. **Download** brings it to
+your computer.
+
+> Be careful with a downloaded backup. It contains every student record, every payment, and the
+> accounts your staff sign in with. Keep it wherever you would keep the paper register — not in a
+> shared folder or an email attachment.
+
+**Export** is different, and for a different purpose. A backup is for restoring this school; an
+export is a readable copy for a spreadsheet or another system. Choose the tables you want, then CSV
+(one file per table, opens in Excel or LibreOffice) or JSON (for another system to read). Credentials
+are never exported: no password hashes, and no keys for the services you are connected to.
+
+**Import** reads a JSON export back in. It always checks the file first and tells you what it found
+before writing anything — how many rows in each table, and any problems, such as rows with no id
+that could not be matched. Only once it is clean will the import button work.
+
+> **Take a backup before an import.** An import writes over records that are already here, matching
+> on their id. It is the one thing on this screen that cannot be undone.
+
+Every one of these — taking a backup, downloading one, deleting one, exporting, importing — is
+written to the audit trail with who did it and when.
 
 ---
 
@@ -540,12 +617,67 @@ would rather not think about renewals at all.
 Once the wildcard is in place, **a new school needs no DNS work**: it is reachable the moment it is
 created, at 10pm on a Sunday if that is when someone pays.
 
+### Which database the stack uses
+
+By default the stack brings its own PostgreSQL container — one machine, nothing else to look after.
+That is the right choice for a single school on a single VPS.
+
+You can point it at your own database instead: a managed Postgres from a cloud provider, one already
+running on the host, or one on another machine. Set the connection in `.env.production` and choose
+**option 17** in `./containers.sh`, or set `DB_MODE=external`:
+
+```bash
+DATABASE_URL=postgres://schoolapp:secret@db.example.org:5432/school_ai_search
+DATABASE_SSL=true
+```
+
+For a Postgres running on the host rather than in Docker, use `host.docker.internal` as the host
+name — the container is already set up to reach it.
+
+Choosing external stops the bundled container from starting at all. The script checks the connection
+before it starts anything, so a wrong address or password fails with a message rather than an app
+container that restarts forever saying nothing useful.
+
+`DATABASE_SSL=true` is almost always right for a managed database. Set
+`DATABASE_SSL_REJECT_UNAUTHORIZED=false` only for a server presenting a self-signed certificate on a
+network you trust — it turns off the check that the certificate belongs to the host you asked for.
+
+### Backups
+
+Backups are written inside the app container to `BACKUP_DIR` (`/var/backups/eschool`), which is a
+named Docker volume — so they survive the container being rebuilt or replaced.
+
+They are taken from the app itself, under **School Data**, by an administrator, head teacher,
+accountant or bursar. There is nothing to run on the server for a routine backup.
+
+Two things worth knowing:
+
+- **A backup volume is not off-site.** It survives a container being replaced; it does not survive
+  the machine being lost. Copy the volume somewhere else on whatever schedule the school's risk
+  deserves.
+- **A dump contains everything**, including password hashes and the tokens for any MCP servers the
+  school has connected. Treat the volume and any downloaded copy as you would the database itself.
+
+Restoring is an operator job on the server, with the ordinary PostgreSQL tools:
+
+```bash
+docker compose cp app:/var/backups/eschool/<file>.dump ./restore.dump
+pg_restore --clean --if-exists --no-owner -d "$DATABASE_URL" ./restore.dump
+```
+
 ---
 
 ## 13. Troubleshooting
 
 | Symptom | Likely cause / fix |
 | --- | --- |
+| **"Backups cannot be taken on this server"** | The PostgreSQL client tools are missing from the image, or the app is running against an in-memory database. Rebuild the image (`./containers.sh build`) — `pg_dump` ships in it. |
+| **A backup is stuck at "In progress"** | The dump was interrupted, usually by the container restarting. Delete that row and take another; a half-written file is deliberately never listed as complete. |
+| **An import will not start** | It has not been checked yet, or the check found problems. The button stays off until the file reads cleanly — the list of problems above it says what to fix. |
+| **A connected system shows "will not open inside the app"** | That system sends `X-Frame-Options`, refusing to be displayed inside another site. This is normal and is that system protecting its own login. Use the "Open in a new tab" button. |
+| **"The stored token can no longer be decrypted"** | `SECRETS_KEY` changed on the server. The old value cannot be recovered; enter the token again under Settings → Integrations. |
+| **A token will not save** | `SECRETS_KEY` is not set on the server, so there is nothing to encrypt it with. Set it (`openssl rand -hex 32`) and restart. An address alone still saves without it. |
+| **The app will not start against my own Postgres** | Check `DATABASE_URL` is reachable from the container (`host.docker.internal` for a database on the host, not `localhost`), and that `DATABASE_SSL=true` if the server requires TLS — most managed ones do. `./containers.sh` option 17 tests the connection before starting anything. |
 | *"Your account is awaiting administrator approval."* | Ask an admin to approve you under **Staff → Pending Approval**. |
 | Everyone is signed out whenever the server restarts | `SESSION_SECRET` is not set on the server, so it invents a new signing key each time it starts. Set it (`openssl rand -hex 32`) and restart once more. |
 | You are signed out after about half a day | Expected — a session lasts 12 hours and is extended while you are working. Sign in again. |

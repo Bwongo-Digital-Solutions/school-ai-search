@@ -2817,13 +2817,24 @@ test('a scan card carries only the sections the staff profile grants', async () 
   });
 
   try {
-    const bursar = await card('admin', 'bursar');
+    // Bursar is a role now rather than a designation on an administrator's account, but the card
+    // it grants is unchanged — that contract is what the promotion had to preserve.
+    const BOOKKEEPING_SECTIONS = [
+      'fees', 'payments', 'bio', 'class', 'dormitory', 'parents', 'gate_permission', 'exam_clearance_grant',
+    ];
+
+    const bursar = await card('bursar', null);
     assert.equal(bursar.status, 200);
     assert.equal(bursar.body.data.profile.label, 'Bursar');
     // 'payments' is the ledger behind the balance — the bursar answering "has this family paid?"
     // needs it, and it arrived with the payment-history work.
-    assert.deepEqual(bursar.body.data.sections,
-      ['fees', 'payments', 'bio', 'class', 'dormitory', 'parents', 'gate_permission', 'exam_clearance_grant']);
+    assert.deepEqual(bursar.body.data.sections, BOOKKEEPING_SECTIONS);
+
+    // The accountant keeps the same books, and the head teacher answers for the whole school.
+    for (const role of ['accountant', 'head_teacher', 'admin']) {
+      const other = await card(role, null);
+      assert.deepEqual(other.body.data.sections, BOOKKEEPING_SECTIONS, `${role} card`);
+    }
 
     // The gate needs to know who the student is and whether they may leave — nothing else.
     const askari = await card('support_staff', 'askari');
@@ -2975,6 +2986,334 @@ test('a meal is served once per student per day', async () => {
   }
 });
 
+test('a school connects its own Moodle and one ERP, and the token never comes back out', async () => {
+  const previousKey = process.env.SECRETS_KEY;
+  process.env.SECRETS_KEY = 'k'.repeat(40);
+
+  // The connection test is the one action that reaches outwards, so the client is injected —
+  // otherwise this test would depend on DNS and on a school's server being up.
+  const attempted = [];
+  const { runtime, cleanup } = await startTestRuntime({
+    httpClient: async (url) => {
+      attempted.push(String(url));
+      throw new Error('getaddrinfo ENOTFOUND');
+    },
+  });
+  const { INTEGRATION_ACTIONS } = await import('../server/services/integrations.mjs');
+  const call = (body) => dispatch(runtime, 'POST', '/api/functions/integrations', body);
+
+  try {
+    for (const action of INTEGRATION_ACTIONS) {
+      for (const requesterRole of ['teacher', 'support_staff', undefined]) {
+        const response = await call({ action, requesterRole, provider: 'moodle' });
+        assert.equal(response.status, 403, `${action} as ${requesterRole}`);
+      }
+    }
+
+    // A token travels on every request, so an address that cannot protect it is refused at the
+    // point of configuration rather than being quietly insecure afterwards.
+    const overHttp = await call({
+      action: 'save', requesterRole: 'admin', provider: 'moodle', baseUrl: 'http://moodle.school.ac.ug',
+    });
+    assert.equal(overHttp.status, 400);
+    assert.match(overHttp.body.error, /https/);
+
+    const saved = await call({
+      action: 'save',
+      requesterRole: 'head_teacher',
+      provider: 'moodle',
+      baseUrl: 'https://moodle.school.ac.ug/',
+      apiToken: 'tok-secret-abcd',
+    });
+    const moodle = saved.body.data.integrations.find((i) => i.provider === 'moodle');
+    assert.equal(moodle.baseUrl, 'https://moodle.school.ac.ug', 'the trailing slash is normalised away');
+    // Enough of the token to recognise it, never enough to use it.
+    assert.equal(moodle.tokenPreview, '••••••••abcd');
+    assert.ok(!JSON.stringify(saved.body).includes('tok-secret-abcd'), 'the token never leaves the server');
+
+    // Saving the address again must not blank a token nobody re-typed.
+    const readdressed = await call({
+      action: 'save', requesterRole: 'admin', provider: 'moodle', baseUrl: 'https://vle.school.ac.ug',
+    });
+    const kept = readdressed.body.data.integrations.find((i) => i.provider === 'moodle');
+    assert.equal(kept.tokenPreview, '••••••••abcd');
+
+    // ...while an explicit empty string is a deliberate clearing.
+    const cleared = await call({
+      action: 'save', requesterRole: 'admin', provider: 'moodle', baseUrl: 'https://vle.school.ac.ug', apiToken: '',
+    });
+    assert.equal(cleared.body.data.integrations.find((i) => i.provider === 'moodle').hasToken, false);
+
+    // A school runs one ERP. Enabling the second stands the first down rather than leaving two
+    // menu entries and no way to tell which is real.
+    await call({ action: 'save', requesterRole: 'admin', provider: 'odoo', baseUrl: 'https://odoo.school.ac.ug' });
+    const second = await call({ action: 'save', requesterRole: 'admin', provider: 'erpnext', baseUrl: 'https://erp.school.ac.ug' });
+    const enabledErps = second.body.data.integrations.filter((i) => i.kind === 'erp' && i.enabled);
+    assert.deepEqual(enabledErps.map((i) => i.provider), ['erpnext']);
+
+    // A failed connection test is a successful request: the reason is what the admin came to read,
+    // and a top-level error would return a 400 with a null body instead.
+    const unreachable = await call({
+      action: 'test', requesterRole: 'admin', provider: 'erpnext',
+    });
+    assert.equal(unreachable.status, 200);
+    assert.equal(unreachable.body.data.connected, false);
+    assert.match(unreachable.body.data.connectionError, /ENOTFOUND/);
+    assert.deepEqual(attempted, ['https://erp.school.ac.ug']);
+
+    // The reason is kept against the row, so the screen still shows it after a reload.
+    const stored = await runtime.database.query(
+      "SELECT last_error, last_checked_at FROM school_integrations WHERE provider = 'erpnext'",
+    );
+    assert.match(stored.rows[0].last_error, /ENOTFOUND/);
+    assert.ok(stored.rows[0].last_checked_at, 'and when it was last tried');
+  } finally {
+    await cleanup();
+    if (previousKey === undefined) delete process.env.SECRETS_KEY;
+    else process.env.SECRETS_KEY = previousKey;
+  }
+});
+
+test('exporting the school leaves the credentials behind, and importing needs a preview first', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const { DATA_TRANSFER_ACTIONS } = await import('../server/services/data-transfer.mjs');
+  const data = (body) => dispatch(runtime, 'POST', '/api/functions/data', body);
+
+  try {
+    // Same fence as backups: a copy of the school is not a teacher's to take.
+    for (const action of DATA_TRANSFER_ACTIONS) {
+      for (const requesterRole of ['teacher', 'support_staff', undefined]) {
+        const response = await data({ action, requesterRole, data: {} });
+        assert.equal(response.status, 403, `${action} as ${requesterRole}`);
+        assert.equal(response.body.error, 'Unauthorized');
+      }
+    }
+
+    const listed = await data({ action: 'list_tables', requesterRole: 'accountant' });
+    assert.equal(listed.status, 200);
+
+    // No table offers a credential column, whatever the table list happens to contain. Asserted on
+    // what comes back rather than on the exclusion list, so the test still holds if the list moves.
+    for (const table of listed.body.data.tables) {
+      for (const column of ['password_hash', 'api_key', 'auth_token', 'api_secret']) {
+        assert.ok(!table.columns.includes(column), `${table.name} must not export ${column}`);
+      }
+    }
+
+    const exported = await data({ action: 'export', requesterRole: 'bursar', format: 'csv', tables: ['students'] });
+    assert.equal(exported.status, 200);
+    const [file] = exported.body.data.files;
+    assert.equal(file.name, 'students.csv');
+    assert.ok(file.rows > 0, 'the seeded roster comes out');
+    // A header row and one line per student — the shape a spreadsheet expects.
+    assert.equal(file.content.split('\n').length, file.rows + 1);
+
+    // Taking a copy is an event, so it is on the audit trail with who took it.
+    const audit = await runtime.database.query(
+      "SELECT user_role FROM audit_logs WHERE action = 'data_exported'",
+    );
+    assert.equal(audit.rows[0].user_role, 'bursar');
+
+    // An import will not run until it has been previewed. This is the one action here that can
+    // overwrite records rather than copy them.
+    const unchecked = await data({
+      action: 'import',
+      requesterRole: 'admin',
+      data: { students: [{ id: 'x', student_id: 'STU-X', first_name: 'A', last_name: 'B', grade_level: 8, class_section: 'A' }] },
+    });
+    assert.equal(unchecked.status, 400);
+    assert.match(unchecked.body.error, /previewed/);
+
+    // The preview reports what it found and writes nothing.
+    const before = await runtime.database.query('SELECT COUNT(*)::int AS count FROM students');
+    const checked = await data({
+      action: 'check_import',
+      requesterRole: 'admin',
+      data: { students: [{ id: 'x', student_id: 'STU-X', first_name: 'A', last_name: 'B', grade_level: 8, class_section: 'A' }] },
+    });
+    assert.equal(checked.body.data.token, 'ready');
+    assert.deepEqual(checked.body.data.summary, [{ table: 'students', rows: 1 }]);
+    const after = await runtime.database.query('SELECT COUNT(*)::int AS count FROM students');
+    assert.equal(after.rows[0].count, before.rows[0].count, 'a preview writes nothing');
+
+    // A row missing an id cannot be matched or written, and the preview says so instead of
+    // discovering it halfway through the import.
+    const bad = await data({ action: 'check_import', requesterRole: 'admin', data: { students: [{ first_name: 'No id' }] } });
+    assert.equal(bad.body.data.token, '');
+    assert.match(bad.body.data.problems[0].problem, /no id/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('backups are for the roles that answer for the school, and nobody else', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const { BACKUP_ACTIONS } = await import('../server/services/backup.mjs');
+  const backup = (body) => dispatch(runtime, 'POST', '/api/functions/backup', body);
+
+  try {
+    // A backup is every student record in one file. Teaching and non-teaching staff are refused
+    // every action, as is a caller with no session at all.
+    for (const action of BACKUP_ACTIONS) {
+      for (const requesterRole of ['teacher', 'support_staff', undefined]) {
+        const response = await backup({ action, requesterRole, id: 'anything' });
+        assert.equal(response.status, 403, `${action} as ${requesterRole}`);
+        assert.equal(response.body.error, 'Unauthorized');
+      }
+    }
+
+    // Nothing was written on the way past the guard.
+    const { rows } = await runtime.database.query('SELECT COUNT(*)::int AS count FROM school_backups');
+    assert.equal(rows[0].count, 0);
+
+    // The four privileged roles all get the list.
+    for (const requesterRole of ['admin', 'head_teacher', 'accountant', 'bursar']) {
+      const response = await backup({ action: 'list', requesterRole });
+      assert.equal(response.status, 200, requesterRole);
+      assert.deepEqual(response.body.data.backups, []);
+      // And it says plainly that this server cannot take one, rather than offering a button that
+      // would fail: pg_dump has no in-memory database to read.
+      assert.equal(response.body.data.available, false);
+    }
+
+    const onMemory = await backup({ action: 'create', requesterRole: 'admin' });
+    assert.equal(onMemory.status, 400);
+    assert.match(onMemory.body.error, /in-memory/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a backup names the right file and records who took it', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const { handleBackupFunction } = await import('../server/services/backup.mjs');
+
+  try {
+    // pg_dump is injected, so what it would have been asked to do is assertable without a Postgres
+    // or a subprocess — which is the whole reason the service takes it as an argument.
+    const calls = [];
+    const runPgDump = async (options) => {
+      calls.push(options);
+      await import('node:fs/promises').then((fs) => fs.writeFile(options.destination, 'PGDMP-stub'));
+    };
+
+    // The service refuses an in-memory database by design, so the pool is dressed as a real one.
+    const database = {
+      ...runtime.database,
+      kind: 'postgres',
+      pool: { options: { connectionString: 'postgres://user:pw@db:5432/school' } },
+    };
+
+    process.env.BACKUP_DIR = '/tmp/eschool-backup-test';
+    const result = await handleBackupFunction(
+      database,
+      { action: 'create', requesterRole: 'bursar' },
+      { tenantId: 'kampala-high', runPgDump },
+    );
+    delete process.env.BACKUP_DIR;
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].connectionString, 'postgres://user:pw@db:5432/school');
+    // Named for the school and the moment, and inside the backup directory rather than anywhere
+    // a filename from the database could point.
+    assert.match(calls[0].destination, /^\/tmp\/eschool-backup-test\/kampala-high-[\dTZ-]+\.dump$/);
+
+    const [row] = result.backups;
+    assert.equal(row.status, 'complete');
+    assert.equal(row.kind, 'manual');
+    assert.ok(row.size_bytes > 0, 'the size is read back off disk, not assumed');
+
+    // Taking one is written to the audit trail — a copy of the school leaving is an event.
+    const audit = await runtime.database.query(
+      "SELECT user_role, entity_name FROM audit_logs WHERE action = 'backup_created'",
+    );
+    assert.equal(audit.rows.length, 1);
+    assert.equal(audit.rows[0].user_role, 'bursar');
+    assert.equal(audit.rows[0].entity_name, row.filename);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the role list covers every post, and bursar reads as a role rather than a designation', async () => {
+  const { USER_ROLES, PRIVILEGED_ROLES, TEACHING_ROLES, FINANCE_ROLES } = await import(
+    '../server/auth/roles.mjs'
+  );
+
+  // The full set, asserted closed. The frontend keeps its own copy in src/lib/roles.ts and the two
+  // are kept in step by hand, so a drift has to fail here rather than in production.
+  assert.deepEqual(USER_ROLES, [
+    'admin', 'head_teacher', 'accountant', 'bursar', 'teacher', 'support_staff',
+  ]);
+
+  // Who is trusted with the school's data as a whole. A teacher is not, and support staff never.
+  assert.deepEqual(PRIVILEGED_ROLES, ['admin', 'head_teacher', 'accountant', 'bursar']);
+  for (const role of ['teacher', 'support_staff']) {
+    assert.ok(!PRIVILEGED_ROLES.includes(role), `${role} must not be privileged`);
+  }
+
+  // The finance posts read money but not student records; the teaching posts the reverse.
+  for (const role of ['accountant', 'bursar']) {
+    assert.ok(FINANCE_ROLES.includes(role), `${role} sees money`);
+    assert.ok(!TEACHING_ROLES.includes(role), `${role} does not see student records`);
+  }
+  assert.ok(TEACHING_ROLES.includes('head_teacher') && FINANCE_ROLES.includes('head_teacher'));
+});
+
+test('an administrator who was a bursar becomes one, and the migration is idempotent', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const auth = (payload) => dispatch(runtime, 'POST', '/api/functions/auth', payload);
+
+  // The two statements schema.mjs runs to move bursars off the designation column. Re-running the
+  // whole schema is how a real deployment migrates, but pg-mem cannot parse it twice on one
+  // instance, so the migration itself is exercised here rather than the file that carries it.
+  const migrate = async () => {
+    await runtime.database.query(
+      "UPDATE users SET role = 'bursar', designation = NULL WHERE designation = 'bursar' AND role = 'admin'",
+    );
+    await runtime.database.query("UPDATE users SET designation = NULL WHERE designation = 'bursar'");
+  };
+
+  try {
+    await auth({ action: 'signup', email: 'books@school.local', password: 'password123', displayName: 'Books' });
+    await auth({ action: 'signup', email: 'gate@school.local', password: 'password123', displayName: 'Gate' });
+
+    // Put the rows back the way a database written before this change would hold them: a bursar
+    // riding on an administrator account, and — only reachable by hand — one on support staff.
+    // The constraint no longer permits either, so it comes off first; that is exactly the order
+    // schema.mjs uses, and the reason it does.
+    await runtime.database.query('ALTER TABLE users DROP CONSTRAINT IF EXISTS users_designation_check');
+    await runtime.database.query(
+      "UPDATE users SET role = 'admin', designation = 'bursar' WHERE auth_email = 'books@school.local'",
+    );
+    await runtime.database.query(
+      "UPDATE users SET role = 'support_staff', designation = 'bursar' WHERE auth_email = 'gate@school.local'",
+    );
+
+    const read = async (email) => {
+      const { rows } = await runtime.database.query(
+        'SELECT role, designation FROM users WHERE auth_email = $1',
+        [email],
+      );
+      return rows[0];
+    };
+
+    await migrate();
+
+    // The administrator who kept the books is now a bursar, and keeps nothing else.
+    assert.deepEqual(await read('books@school.local'), { role: 'bursar', designation: null });
+    // The hand-edited row keeps its role and loses a designation that no longer exists.
+    assert.deepEqual(await read('gate@school.local'), { role: 'support_staff', designation: null });
+
+    // Running it again changes nothing, which is what lets every boot re-run the schema.
+    await migrate();
+    assert.deepEqual(await read('books@school.local'), { role: 'bursar', designation: null });
+    assert.deepEqual(await read('gate@school.local'), { role: 'support_staff', designation: null });
+  } finally {
+    await cleanup();
+  }
+});
+
 test('designations are constrained to the role that owns them', async () => {
   const { runtime, cleanup } = await startTestRuntime();
   const auth = (payload) => dispatch(runtime, 'POST', '/api/functions/auth', payload);
@@ -2990,9 +3329,13 @@ test('designations are constrained to the role that owns them', async () => {
     assert.equal(ok.status, 200);
     assert.equal(ok.body.data.user.designation, 'cook');
 
-    // A bursar keeps the books, so it belongs to an admin and not to support staff.
-    const wrongRole = await auth({ action: 'set_designation', email: 'cook@school.local', designation: 'bursar' });
-    assert.equal(wrongRole.status, 400);
+    // 'bursar' is a role now, not a designation, so it is no longer assignable here at all.
+    const retiredDesignation = await auth({ action: 'set_designation', email: 'cook@school.local', designation: 'bursar' });
+    assert.equal(retiredDesignation.status, 400);
+
+    // Nor to an administrator, which is where it used to live.
+    const onAdmin = await auth({ action: 'set_designation', email: 'head@school.local', designation: 'bursar' });
+    assert.equal(onAdmin.status, 400);
 
     // The designation reaches the app through the ordinary sign-in payload.
     const signin = await auth({ action: 'signin', email: 'cook@school.local', password: 'password123' });

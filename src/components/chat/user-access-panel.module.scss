@@ -215,3 +215,15 @@
     padding-inline: layout.$spacing-03;
   }
 }
+
+// The two leadership and finance posts. Kept distinct from the administrator's purple so the
+// list can be scanned for "who runs the school" and "who keeps the books" separately.
+.avatarHead {
+  background: #d9fbfb;
+  color: #005d5d;
+}
+
+.avatarFinance {
+  background: #d1fae5;
+  color: #0e6027;
+}

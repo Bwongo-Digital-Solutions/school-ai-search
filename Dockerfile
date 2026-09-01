@@ -25,16 +25,24 @@ ENV LOCAL_BACKEND_HOST=0.0.0.0
 ENV LOCAL_BACKEND_PORT=8787
 ENV LOCAL_STATIC_ROOT=/app/dist
 
+# pg_dump and pg_restore, for the backup service. The client is a few megabytes and is the
+# difference between a backup that restores and one written by hand that might not — foreign keys,
+# sequences and the order they must be applied in are exactly where a home-made restore loses data.
+RUN apk add --no-cache postgresql16-client
+
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/server ./server
 COPY --from=build /app/package.json ./package.json
 
-# Runs as a normal user. Nothing here writes to disk — PDFs are generated in memory and every record
-# lives in Postgres — so the whole filesystem can stay read-only to the process.
+# Runs as a normal user. The only thing written to disk is a database backup, into BACKUP_DIR — a
+# mounted volume owned by this user. PDFs are still generated in memory and every record still
+# lives in Postgres, so nothing else here needs to be writable.
 RUN addgroup -S appgroup \
  && adduser -S appuser -G appgroup \
- && chown -R appuser:appgroup /app
+ && chown -R appuser:appgroup /app \
+ && mkdir -p /var/backups/eschool \
+ && chown -R appuser:appgroup /var/backups/eschool
 USER appuser
 
 EXPOSE 8787

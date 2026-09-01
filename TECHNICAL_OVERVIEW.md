@@ -33,7 +33,35 @@ School AI Search is a school administration, teaching and student-search applica
 
 ## Main Technical Stack
 
-- Frontend: React 18, TypeScript, Vite, Tailwind CSS, shadcn/ui-style components, Radix UI primitives.
+- Frontend: React 18, TypeScript, Vite, and IBM Carbon (`@carbon/react`) with SCSS modules.
+
+  The UI was Tailwind and shadcn/ui until the Carbon migration; those, along with Radix, are gone.
+  Component styling now lives in co-located `*.module.scss` files built on `src/styles/_vars.scss`,
+  which carries the same token names and roles OpenMRS uses — a grey page (`$ui-01`) holding white
+  cards (`$ui-02`) with `1px solid $ui-03` borders. Typography is always
+  `@include type.type-style(...)` in SCSS and **never** a `cds--type-*` class: Carbon v11 ships no
+  such utilities, so those classes style nothing at all while looking as though they do.
+
+  A small set of shared pieces in `src/components/common/` — `CardHeader`, `WidgetCard`,
+  `EmptyState`, `ErrorState`, `PageHeader`, `StatTile`, `AccessDenied`, `Field`, `StudentPicker` —
+  is what makes screens by different hands look like one product. Compose from those rather than
+  from raw divs.
+
+  Two things about the Carbon stylesheet are load-bearing and non-obvious. `styles/carbon.scss` uses
+  the **blanket** `@use '@carbon/react'`: importing only the components in use saves ~36KB gzipped
+  and was tried, but `scss/layout` is easy to miss and emits no components of its own — yet Carbon
+  sizes every control with `clamp(max(var(--cds-layout-size-height-min), …))`, so without it buttons
+  keep their colours and lose all geometry. A component's directory index also does not forward its
+  sub-partials, so `components/data-table` gives the table but not `data-table/sort`. Both faults
+  look like design mistakes rather than missing imports, and neither shows up in a type check, a
+  lint run or a build. Second: Carbon's own `@font-face` rules point at webpack-style `~@ibm/plex/…`
+  paths Vite cannot resolve, so `$css--font-face: false` is set and IBM Plex is loaded from Google
+  Fonts in `index.css` instead — without that the whole type scale silently renders in a fallback
+  font.
+
+  `src/main.tsx` imports the stylesheets **before** `App`. Vite emits CSS in import order, so with
+  `App` first every component module landed ahead of Carbon's and lost every override at equal
+  specificity.
 - Backend: Node.js HTTP server using native `http` APIs.
 - Database: PostgreSQL through `pg`; tests can run against `pg-mem`.
 - AI: multi-provider tool calling over raw `fetch` (no vendor SDK), a bounded agent loop, and hybrid retrieval (embeddings with a BM25 fallback).
@@ -64,6 +92,10 @@ The local backend lives in `server/local-backend.mjs`.
 | `/api/functions/fee-status` | `POST` | Per-student school fees payment status only; the sole student-facing endpoint the `support_staff` role reads. An optional `code` (scanned ID card payload) narrows the response to one student. |
 | `/api/functions/ai-chat` | `POST` | Creates chat messages and returns a student-search response. Requires `requesterRole` of `admin` or `teacher`. Accepts `mode` (`direct` or `agent`), `useRag`, and `mcpServerIds`; returns the tool trace and citations alongside the answer. |
 | `/api/functions/ai-models` | `POST` | Lists selectable AI search models and provider configuration state. |
+| `/api/functions/backup` | `POST` | Database backups, dispatched by an `action` field: `list`, `create`, `delete`. `PRIVILEGED_ROLES` only. `pg_dump` is injected rather than called directly, so the argv, the filename and the audit row are testable without a subprocess. |
+| `/api/backups/<id>.dump` | `GET` | Downloads one completed backup. Gated exactly as the service is rather than trusting that whoever holds the id was allowed to ask, and the download itself is audited. |
+| `/api/functions/data` | `POST` | Export and import, dispatched by an `action` field: `list_tables`, `export`, `check_import`, `import`. `PRIVILEGED_ROLES` only. An import refuses to run until `check_import` has passed and its token is handed back. |
+| `/api/functions/integrations` | `POST` | The school's Moodle and at most one ERP, dispatched by an `action` field: `list`, `save`, `disable`, `test`. `PRIVILEGED_ROLES` only. `test` returns `connected: false` with the reason rather than a top-level error, because the reason is what the screen exists to show. |
 | `/api/functions/lesson-planner` | `POST` | Lesson planning, dispatched by an `action` field: `list`, `get`, `generate`, `scheme_of_work`, `save`, `set_status`, `duplicate`, `delete`. Requires `requesterRole` of `admin` or `teacher`. |
 | `/api/functions/digital-examiner` | `POST` | Question and paper authoring, dispatched by an `action` field: blueprint CRUD, `generate_questions`, question-bank CRUD and review, `assemble_paper`, `publish_paper`, and paper listing/deletion. Requires `requesterRole` of `admin` or `teacher`. |
 | `/api/functions/curriculum` | `POST` | Curriculum library, dispatched by an `action` field: `list_documents`, `upload_document`, `delete_document`, `search`, `reindex`, `frameworks`. Teaching staff only; deleting a bundled outline is admin-only. |
@@ -120,7 +152,9 @@ Schema creation is handled by `server/db/schema.mjs`.
 | Table | Purpose |
 | --- | --- |
 | `students` | Student profiles, GPA, attendance, subjects, and notes. |
-| `users` | Local auth users with password hashes and a role of `admin`, `teacher`, or `support_staff` (non-teaching staff). |
+| `users` | Local auth users with password hashes and a role of `admin`, `head_teacher`, `accountant`, `bursar`, `teacher`, or `support_staff`. `designation` is a support-staff post (`askari`, `matron`, `cook`) deciding what a student ID scan reveals. `bursar` was a designation before it was a role; `schema.mjs` migrates those rows. |
+| `school_backups` | The index of backups taken, so the list survives a container restart. A row is written before `pg_dump` runs and completed after, so an interrupted dump leaves `running` rather than a file that reads as usable. |
+| `school_integrations` | Where the school's Moodle and ERP are, with tokens encrypted at rest under `SECRETS_KEY`. A table rather than columns on `school_settings`, because that row is read on every request that renders anything and is serialised into documents. |
 | `conversations` | Chat conversation metadata. |
 | `messages` | User and assistant chat messages. |
 | `audit_logs` | Administrative action history. |
@@ -465,7 +499,29 @@ Use the root helper script:
 
 The script opens an interactive menu where you choose the environment and then select numbered actions for build, start, stop, restart, delete, status, and logs.
 It also includes an endpoints option that shows where to find the frontend, backend API, backend health check, and database connection after containers are running — and, when a reverse proxy is selected, the HTTPS addresses schools actually use.
-Options 10–14 cover the reverse proxy and its TLS certificate.
+Options 10–14 cover the reverse proxy and its TLS certificate. Option 17 chooses the database.
+
+### The database: bundled or external
+
+The bundled PostgreSQL container sits behind a Compose profile (`bundled-db`), so a school running
+its own database simply does not start one. `DB_MODE=external`, or option 17, drops the profile and
+leaves `DATABASE_URL` pointing wherever you say — a managed Postgres, one on the host
+(`host.docker.internal`), or one on another machine.
+
+Nothing in `server/` needed changing for this: `connection.mjs` has always read `DATABASE_URL` and
+honoured the two SSL variables. Three things in Compose blocked it, and all three are fixed:
+
+- `DATABASE_SSL` was **hardcoded to `"false"`** in the app service, silently overriding whatever was
+  in `.env`. Since managed Postgres almost always requires TLS, an external database was
+  unreachable whatever `DATABASE_URL` said. It is now `${DATABASE_SSL:-false}`, and
+  `DATABASE_SSL_REJECT_UNAUTHORIZED` is passed through at all.
+- the `db` service had no profile, so it always started;
+- `depends_on` waited on it unconditionally, so the app would not start without it. It now carries
+  `required: false`, which Compose honours when the bundled database is running and ignores when it
+  is not.
+
+`containers.sh` checks the connection with `pg_isready` before starting anything, so a wrong address
+or password fails with a message rather than an app container restarting forever.
 
 You can also run commands directly:
 
@@ -556,7 +612,9 @@ certificate, given `ACME_EMAIL` and a DNS API token.
 | `HSTS_MAX_AGE` | `Strict-Transport-Security` max-age, sent only over HTTPS. Default 180 days. |
 | `DATABASE_URL` | PostgreSQL connection string. |
 | `DATABASE_SSL` | Enables PostgreSQL SSL when set to `true`. |
-| `DATABASE_SSL_REJECT_UNAUTHORIZED` | Controls SSL certificate verification. |
+| `DATABASE_SSL_REJECT_UNAUTHORIZED` | Controls SSL certificate verification. Set `false` only for a self-signed certificate on a trusted network. |
+| `DB_MODE` | `bundled` (default) starts the Postgres container in the compose file; `external` does not, and uses `DATABASE_URL` alone. |
+| `BACKUP_DIR` | Where database dumps are written inside the container. Defaults to `/var/backups/eschool`, a named volume. |
 | `DATABASE_POOL_SIZE` | PostgreSQL pool size. |
 | `LOCAL_BACKEND_HOST` | Backend bind host. |
 | `LOCAL_BACKEND_PORT` | Backend port. |
@@ -803,6 +861,116 @@ There is **no broker**, deliberately. A broker carries events between processes;
 
 Most mobile HTTP clients will not keep an HttpOnly cookie, so `authenticateRequest` accepts the same session token from `Authorization: Bearer` when there is no cookie. Same signature, same tenant binding, same expiry — a transport difference, not a second credential. `signin` returns the token in the body only when the caller passes `issueToken: true`; browsers never ask, so it stays out of reach of anything running on the page. The cookie wins when both are present.
 
+## Roles
+
+Six roles, listed once in `server/auth/roles.mjs` and mirrored in `src/lib/roles.ts`:
+
+| List | Roles | Gates |
+| --- | --- | --- |
+| `TEACHING_ROLES` | admin, head_teacher, teacher | Student records, the assistant, lesson planning, the examiner |
+| `FINANCE_ROLES` | admin, head_teacher, accountant, bursar | Invoices, payments, arrears, the finance tables in `/api/db` |
+| `PRIVILEGED_ROLES` | admin, head_teacher, accountant, bursar | Backups, export/import, integrations, monitoring, the audit trail |
+| `ACCOUNT_ADMIN_ROLES` | admin | Staff accounts, roles, school settings |
+
+The lists exist because `hasRole` is plain allowlist membership with no hierarchy — a role is
+invisible to a gate until it is named in one. Spelling a list out at each call site is how a role
+silently keeps access to one screen and loses it on another, so the lists are named once and
+imported. The two copies are kept in step by hand, and the role test asserts the full set so a drift
+fails there rather than in production.
+
+`bursar` was a *designation* on an administrator's account before it was a role. Keeping the books
+is a job rather than a posting, and it should not require handing somebody the administrator's keys.
+`schema.mjs` widens the role constraint, moves the rows, then narrows the designation constraint —
+in that order, because either half alone fails on live data.
+
+### Where a new role fails silently
+
+Worth knowing before adding a seventh, because none of these produce an error:
+
+- `server/services/scan-profiles.mjs` — an unknown role falls back to support staff and is served
+  the fees-only ID card. The safe direction, and a silent one.
+- `server/search/indexer.mjs` — a role absent from an index's `roles` array gets **zero hits with a
+  200**, indistinguishable from "nothing matched".
+- `server/agent/tools.mjs` — an unknown role yields an empty tool list, so the agent answers with no
+  tools and looks like a bad model rather than a permissions problem.
+- `local-backend.mjs` `DB_TABLE_ROLES` — an unlisted role gets 403 on every table.
+- `src/components/AppLayout.tsx` `VIEW_ROLES` — the structural fence in front of the router. The
+  side rail hides what a role cannot use, but hiding a link is not a permission check: a saved view
+  or a stale link arrives at the router directly.
+
+## Backup and Restore
+
+`server/services/backup.mjs`. A backup is a real `pg_dump` — `--format=custom --no-owner --no-acl` —
+not a hand-rolled dump. Writing one is easy and restoring one correctly is not; foreign keys,
+sequences and the order they must be applied in are exactly where a home-made restore loses data.
+
+`pg_dump` is injected rather than called directly, the way `provisioning.mjs` injects
+`createPhysicalDatabase`, so the argv, the filename, the role gate and the audit row are all
+testable without a Postgres or a subprocess. The connection string comes from
+`database.pool.options.connectionString`, which is the only place a request handler can reach it —
+the control plane deliberately never hands `db_url` to a caller. `database.kind === 'postgres'`
+gates the service, so pg-mem refuses cleanly rather than producing an empty file.
+
+Dumps are written to `BACKUP_DIR` (`/var/backups/eschool`), a named volume. The runtime image gains
+`postgresql16-client` for this, and it is the only thing the container writes to disk — the
+Dockerfile comment that said nothing is written was corrected rather than left to mislead.
+
+Three properties follow from what a dump contains — every student record, every password hash, and
+the MCP tokens `mcp_servers` still stores in plaintext:
+
+- the filename is validated against the backup directory before use, because it comes from a
+  database row and joining it onto a path unchecked would let `../` out of the directory;
+- it is reachable only by `PRIVILEGED_ROLES`, download included;
+- taking, downloading, deleting one is audited.
+
+Restoring is deliberately not in the app. It is `pg_restore` on the server, by an operator, against
+a database they have chosen — the one operation where doing it by hand is the safer default.
+
+## Data Export and Import
+
+`server/services/data-transfer.mjs`. Pure SQL in Node, so it runs identically on pg-mem and is
+tested end to end.
+
+Distinct from a backup on purpose. A backup is opaque, complete, and for restoring this database. An
+export is readable — CSV a bursar opens in a spreadsheet, JSON another system reads. Neither
+replaces the other.
+
+Never exported, by column name wherever they appear: `password_hash` (a hash is still a credential),
+`api_key` and `api_secret` (ciphertext meaningless outside this deployment's `SECRETS_KEY`), and
+`auth_token` (stored in plaintext, so exporting it hands over live tokens). Skipped as rebuildable:
+`curriculum_chunks`, `analytics_snapshots`, `compliance_reports`, `internal_message_reads`. The
+Meilisearch index is not exported either — Postgres is the system of record, and a restore ends by
+reindexing rather than carrying a copy of something derived.
+
+Import requires a dry run first and refuses without its token. `RESTORE_ORDER` fixes the write order
+by foreign-key dependency — students before invoices, invoices before payments, payments before
+receipts, permissions before gate passes. Existing rows are updated rather than rejected, because an
+import is usually a re-import and failing the file because one student is already on the roll helps
+nobody. The write is wrapped in `withTransaction`; note that the test suite must not assert rollback,
+because pg-mem treats `BEGIN`/`COMMIT` as no-ops.
+
+## Per-School Integrations
+
+`server/services/integrations.mjs`, `school_integrations`. Where the school's Moodle and at most one
+ERP (Odoo, ERPNext or Dolibarr) live, so they open from inside the app rather than from a bookmark.
+This is a launcher, not a sync — no records move in either direction.
+
+Credentials reuse `encryptSecret`/`decryptSecret` from `provider-credentials.mjs` rather than
+repeating the cipher; see [Per-School AI Keys](#per-school-ai-keys) for the `SECRETS_KEY` posture,
+which is identical. Two conventions are copied from `mcp-servers.mjs` because both were learned the
+hard way there: an omitted token means *leave the stored one alone* while an explicit empty string
+clears it, and `test` returns `connected: false` with the reason rather than a top-level `error` —
+an error becomes a 400 with a null body, hiding the diagnosis the screen exists to show.
+
+`http` addresses are refused. The token travels on every request, so an integration configured over
+plain http would leak it to anyone on the same network; better to refuse at configuration time than
+be quietly insecure afterwards. Enabling a second ERP stands the first down, because a school runs
+one.
+
+The UI frames the system and falls back to a new tab on a timeout, since `X-Frame-Options` refusals
+are not observable from script — no error event, no readable status, the `load` event simply never
+fires. That is a guess, and it is the honest one available.
+
 ## Authentication and Sessions
 
 Identity used to be self-declared: the signed-in user was a JSON blob in `localStorage` and every request carried its own `requesterRole` in the body, so editing one word in devtools made a teacher an administrator. Two files replace that — `server/auth/session.mjs` (the token and cookie) and `server/auth/actor.mjs` (who a handler is acting for).
@@ -855,7 +1023,22 @@ The backend test suite uses an in-memory PostgreSQL-compatible database and veri
 - the MCP server's bearer gate, tool listing and tool calls;
 - question generation honouring a blueprint and attaching citations, and paper publishing writing real `exams` and `exam_schedules` rows;
 - every role gate refusing non-teaching staff **without writing anything**;
-- exam papers, marking schemes and lesson plans rendering as valid PDFs.
+- exam papers, marking schemes and lesson plans rendering as valid PDFs;
+- the role list asserted as a closed set, in both directions — that a teacher and support staff are
+  not privileged, and that the finance posts see money but not student records. The frontend keeps
+  its own copy in `src/lib/roles.ts`, so a drift between the two has to fail here;
+- the bursar migration moving an administrator's designation to a role, clearing a hand-edited one
+  on any other role, and changing nothing when it runs a second time;
+- backups and export/import refusing every unprivileged role across every action, then a row count
+  proving nothing was written past the guard;
+- a backup building the right `pg_dump` arguments and filename, reading its size back off disk and
+  auditing who took it — all without spawning a subprocess, because the runner is injected;
+- an export carrying no `password_hash`, `api_key`, `auth_token` or `api_secret`, asserted against
+  what comes back rather than against the exclusion list, so it still holds if the list moves;
+- an import refusing to run before its dry run, and the dry run writing nothing;
+- an integration token surviving a save that omits it, clearing on an explicit empty string, and
+  never appearing in a response; one ERP standing another down; and a failed connection test
+  returning `connected: false` with a reason rather than a 400 with a null body.
 
 Outbound model, embedding and MCP calls all go through an injectable `httpClient`, so every provider path is exercised without a network.
 

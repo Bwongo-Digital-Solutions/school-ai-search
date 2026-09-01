@@ -28,6 +28,7 @@ import {
   type StaffMessage,
 } from '@/lib/messages';
 import styles from './inbox-panel.module.scss';
+import { ROLE_LABELS, USER_ROLES, getRoleShortLabel } from '@/lib/roles';
 
 /**
  * The staff inbox — the first screen migrated to Carbon, and the pattern the rest follow.
@@ -293,7 +294,7 @@ const InboxPanel: React.FC = () => {
                         <SelectItem
                           key={person.id}
                           value={person.auth_email}
-                          text={`${person.display_name} — ${person.role.replace('_', ' ')}${
+                          text={`${person.display_name} — ${getRoleShortLabel(person.role)}${
                             onlineIds.has(person.id) ? ' (online)' : ''
                           }`}
                         />
@@ -308,10 +309,13 @@ const InboxPanel: React.FC = () => {
                       value={form.audienceValue}
                       onChange={(event) => setForm({ ...form, audienceValue: event.target.value })}
                     >
+                      {/* Driven from USER_ROLES rather than written out. Hand-listing them is how
+                          a role added later silently becomes unaddressable by message — it renders
+                          three options, compiles, and nobody notices. */}
                       <SelectItem value="" text="Choose a role…" />
-                      <SelectItem value="admin" text="Administrators" />
-                      <SelectItem value="teacher" text="Teachers" />
-                      <SelectItem value="support_staff" text="Support staff" />
+                      {USER_ROLES.map((role) => (
+                        <SelectItem key={role} value={role} text={ROLE_LABELS[role]} />
+                      ))}
                     </Select>
                   )}
 
@@ -389,7 +393,7 @@ const InboxPanel: React.FC = () => {
                       <li key={person.id} className={styles.presenceRow}>
                         <span className={styles.presenceDot} />
                         {person.name}
-                        <span className={styles.presenceRole}>{person.role.replace('_', ' ')}</span>
+                        <span className={styles.presenceRole}>{getRoleShortLabel(person.role)}</span>
                       </li>
                       ))}
                 </ul>

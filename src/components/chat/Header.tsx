@@ -53,7 +53,8 @@ import styles from './header.module.scss';
  */
 const Header: React.FC = () => {
   const { messages, activeView, setActiveView, currentConversationId } = useChatContext();
-  const { user, isAuthenticated, isAdmin, isSupportStaff, signOut } = useAuth();
+  const { user, isAuthenticated, isAdmin, isSupportStaff, isPrivileged, canSeeStudents, canSeeFinance, signOut } =
+    useAuth();
   const { unread } = useLive();
   const { theme, setTheme } = useTheme();
   const { notify } = useNotifications();
@@ -213,7 +214,7 @@ const Header: React.FC = () => {
   return (
     <>
       <Theme theme="g100">
-        <CarbonHeader aria-label="SchoolBot AI" className={styles.header}>
+        <CarbonHeader aria-label="eSchool" className={styles.header}>
           <SkipToContent />
           <HeaderMenuButton
             aria-label={navExpanded ? 'Close navigation' : 'Open navigation'}
@@ -285,18 +286,19 @@ const Header: React.FC = () => {
                 menuOptionsClass={styles.menu}
               >
                 <OverflowMenuItem itemText={`${user.display_name} — ${getRoleLabel(user.role)}`} disabled />
-                {!isSupportStaff && (
+                {canSeeStudents && (
                   <OverflowMenuItem itemText="Student Management" onClick={go('students')} hasDivider />
                 )}
-                {!isSupportStaff && <OverflowMenuItem itemText="Student Records" onClick={go('records')} />}
+                {canSeeStudents && <OverflowMenuItem itemText="Student Records" onClick={go('records')} />}
                 {!isSupportStaff && <OverflowMenuItem itemText="Messages" onClick={go('messages')} />}
-                {!isSupportStaff && <OverflowMenuItem itemText="Lesson Planner" onClick={go('lessons')} />}
-                {!isSupportStaff && <OverflowMenuItem itemText="Digital Examiner" onClick={go('examiner')} />}
+                {canSeeStudents && <OverflowMenuItem itemText="Lesson Planner" onClick={go('lessons')} />}
+                {canSeeStudents && <OverflowMenuItem itemText="Digital Examiner" onClick={go('examiner')} />}
                 <OverflowMenuItem itemText="School Fees Status" onClick={go('fees')} />
-                {isAdmin && <OverflowMenuItem itemText="Fee Management" onClick={go('finance')} />}
-                {isAdmin && <OverflowMenuItem itemText="Staff Access" onClick={go('users')} />}
-                {isAdmin && <OverflowMenuItem itemText="Monitoring" onClick={go('monitoring')} />}
-                {isAdmin && <OverflowMenuItem itemText="Audit Log" onClick={go('audit')} />}
+                {canSeeFinance && <OverflowMenuItem itemText="Fee Management" onClick={go('finance')} />}
+                {isPrivileged && <OverflowMenuItem itemText="School Data" onClick={go('data')} hasDivider />}
+                {isPrivileged && <OverflowMenuItem itemText="Monitoring" onClick={go('monitoring')} />}
+                {isPrivileged && <OverflowMenuItem itemText="Audit Log" onClick={go('audit')} />}
+                {isAdmin && <OverflowMenuItem itemText="Staff Access" onClick={go('users')} hasDivider />}
                 {isAdmin && <OverflowMenuItem itemText="Settings" onClick={go('settings')} />}
                 <OverflowMenuItem itemText="Sign out" onClick={handleSignOut} isDelete hasDivider />
               </OverflowMenu>

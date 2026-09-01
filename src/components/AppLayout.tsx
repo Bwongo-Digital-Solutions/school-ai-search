@@ -11,6 +11,8 @@ import FeeManagementWorkspace from './chat/FeeManagementWorkspace';
 import LessonPlannerWorkspace from './chat/LessonPlannerWorkspace';
 import DigitalExaminerWorkspace from './chat/DigitalExaminerWorkspace';
 import SettingsPanel from './chat/SettingsPanel';
+import SchoolDataWorkspace from './chat/SchoolDataWorkspace';
+import EmbeddedSystem from './chat/EmbeddedSystem';
 import InboxPanel from './chat/InboxPanel';
 import MonitoringDashboard from './chat/MonitoringDashboard';
 import TeacherPerformance from './chat/TeacherPerformance';
@@ -19,6 +21,14 @@ import styles from './app-layout.module.scss';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { AccessDenied, PageHeader } from './common';
+import {
+  ACCOUNT_ADMIN_ROLES,
+  FINANCE_ROLES,
+  PRIVILEGED_ROLES,
+  TEACHING_ROLES,
+  getRoleLabel,
+} from '@/lib/roles';
+import type { ActiveView } from '@/contexts/ChatContext';
 import { Time, UserAdmin } from '@carbon/react/icons';
 import { Tag } from '@carbon/react';
 
@@ -48,14 +58,54 @@ const AuditView: React.FC = () => {
   );
 };
 
+/**
+ * Which roles may open each section.
+ *
+ * Stated here, next to the routing, rather than left to each screen. The rail hides what a role
+ * cannot use, but hiding a link is not a permission check — a saved view, a stale link or a role
+ * changed mid-session all arrive here directly. Every screen still guards itself server-side; this
+ * is the structural fence that stops the wrong screen rendering at all.
+ *
+ * A view absent from this map is open to any signed-in staff member.
+ */
+const VIEW_ROLES: Partial<Record<ActiveView, readonly string[]>> = {
+  chat: TEACHING_ROLES,
+  students: TEACHING_ROLES,
+  records: TEACHING_ROLES,
+  lessons: TEACHING_ROLES,
+  examiner: TEACHING_ROLES,
+  messages: [...TEACHING_ROLES, ...FINANCE_ROLES],
+  finance: FINANCE_ROLES,
+  monitoring: PRIVILEGED_ROLES,
+  teaching: PRIVILEGED_ROLES,
+  audit: PRIVILEGED_ROLES,
+  data: PRIVILEGED_ROLES,
+  elearning: [...TEACHING_ROLES, ...FINANCE_ROLES],
+  erp: PRIVILEGED_ROLES,
+  users: ACCOUNT_ADMIN_ROLES,
+  settings: ACCOUNT_ADMIN_ROLES,
+};
+
 const AppLayout: React.FC = () => {
   const { activeView } = useChatContext();
-  const { isAuthenticated, isSupportStaff } = useAuth();
+  const { user, isAuthenticated, isSupportStaff } = useAuth();
 
   const renderMainContent = () => {
     // Non-teaching support staff are limited to school fees payment status.
     if (isSupportStaff) {
       return <FeeStatusPanel />;
+    }
+
+    // Everyone else is checked against the map above before anything renders. Fees are the one
+    // screen every signed-in role can open, so an unlisted view falls through to the switch.
+    const allowed = VIEW_ROLES[activeView];
+    if (allowed && user && !allowed.includes(user.role)) {
+      return (
+        <AccessDenied
+          title="Not available to your role"
+          message={`This section is not part of what a ${getRoleLabel(user.role).toLowerCase()} does here. If you need it, ask an administrator.`}
+        />
+      );
     }
 
     switch (activeView) {
@@ -85,6 +135,12 @@ const AppLayout: React.FC = () => {
         return <MonitoringDashboard />;
       case 'messages':
         return <InboxPanel />;
+      case 'data':
+        return <SchoolDataWorkspace />;
+      case 'elearning':
+        return <EmbeddedSystem kind="elearning" />;
+      case 'erp':
+        return <EmbeddedSystem kind="erp" />;
       case 'settings':
         return <SettingsPanel />;
       default:

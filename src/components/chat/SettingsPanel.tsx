@@ -4,6 +4,7 @@ import { Education, Plug, Save, Search, Settings as SettingsIcon, Password } fro
 import McpServersPanel from './McpServersPanel';
 import AiKeysPanel from './AiKeysPanel';
 import LibreChatPanel from './LibreChatPanel';
+import IntegrationsPanel from './IntegrationsPanel';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useNotifications } from '@/contexts/NotificationContext';
@@ -27,16 +28,19 @@ import styles from './settings-panel.module.scss';
 const TABS = [
   { key: 'branding', label: 'Branding', icon: SettingsIcon },
   { key: 'mcp', label: 'MCP servers', icon: Plug },
-  { key: 'integrations', label: 'Search & LibreChat', icon: Search },
+  { key: 'search', label: 'Search & LibreChat', icon: Search },
   { key: 'ai-keys', label: 'AI providers', icon: Password },
+  { key: 'integrations', label: 'Integrations', icon: Plug },
 ] as const;
 
 const BLURB: Record<(typeof TABS)[number]['key'], string> = {
   branding:
     'The school identity used across report cards, receipts, statements, ID cards and the app header.',
   mcp: 'Connect external MCP servers so the assistant can use their tools.',
-  integrations: 'Global search across the school, and connecting LibreChat to this data.',
+  search: 'Global search across the school, and connecting LibreChat to this data.',
   'ai-keys': "Use your school's own AI accounts instead of the platform's.",
+  integrations:
+    "The systems your school already runs — its Moodle, and one business system — so they open from here.",
 };
 
 const SettingsPanel: React.FC = () => {
@@ -46,7 +50,8 @@ const SettingsPanel: React.FC = () => {
   const [form, setForm] = useState<SchoolSettings>(settings);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [tab, setTab] = useState<'branding' | 'mcp' | 'integrations' | 'ai-keys'>('branding');
+  // Derived from TABS rather than restated, so adding a tab is one edit.
+  const [tab, setTab] = useState<(typeof TABS)[number]['key']>('branding');
 
   // Keep the form in sync when the global settings load/refresh.
   useEffect(() => {
@@ -105,9 +110,10 @@ const SettingsPanel: React.FC = () => {
       </div>
 
       <div className={styles.body}>
-        {tab === 'integrations' && <LibreChatPanel />}
+        {tab === 'search' && <LibreChatPanel />}
         {tab === 'mcp' && <McpServersPanel />}
         {tab === 'ai-keys' && <AiKeysPanel />}
+        {tab === 'integrations' && <IntegrationsPanel />}
 
         {tab === 'branding' && (
           <div className={styles.branding}>

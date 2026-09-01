@@ -1,0 +1,158 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  block-size: 100%;
+  overflow: hidden;
+  background-color: $ui-01;
+}
+
+.controls {
+  padding: layout.$spacing-05 layout.$spacing-05 0;
+  flex-shrink: 0;
+}
+
+.tabs {
+  :global(.cds--tab--list) {
+    padding-inline-start: 0;
+  }
+
+  :global(.cds--tabs__nav-item--selected) {
+    box-shadow: inset 0 2px 0 0 var(--brand-01, #{$brand-01-fallback}) !important;
+  }
+}
+
+.body {
+  flex: 1;
+  min-block-size: 0;
+  overflow: auto;
+  padding: layout.$spacing-05;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+  max-inline-size: 56rem;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+  padding: layout.$spacing-05;
+}
+
+.blurb {
+  @include type.type-style('body-compact-01');
+  color: $text-02;
+  margin: 0;
+}
+
+.note {
+  @include type.type-style('label-01');
+  color: $text-03;
+  margin: 0;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: layout.$spacing-04;
+  padding: layout.$spacing-04 layout.$spacing-05;
+  border-block-start: 1px solid $ui-03;
+}
+
+.rowMain {
+  min-inline-size: 0;
+}
+
+.filename {
+  @include type.type-style('heading-compact-01');
+  color: $text-01;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.meta {
+  @include type.type-style('helper-text-01');
+  color: $text-03;
+  margin: layout.$spacing-01 0 0;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: layout.$spacing-03;
+}
+
+.tableGrid {
+  display: grid;
+  gap: layout.$spacing-03;
+  grid-template-columns: 1fr;
+
+  @media (min-width: 34rem) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  @media (min-width: 56rem) {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.dropZone {
+  padding: layout.$spacing-07 layout.$spacing-05;
+  border: 1px dashed $ui-04;
+  text-align: center;
+  background: $ui-01;
+}
+
+.problems {
+  @include type.type-style('label-01');
+  margin: 0;
+  padding-inline-start: layout.$spacing-06;
+  color: #8e6a00;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-02;
+}
+
+.loading {
+  display: flex;
+  justify-content: center;
+  padding: layout.$spacing-07;
+}
+
+:global([data-carbon-theme='g100']) {
+  .screen {
+    background-color: $ui-01-dark;
+  }
+
+  .blurb {
+    color: $text-02-dark;
+  }
+
+  .note,
+  .meta {
+    color: $text-03-dark;
+  }
+
+  .filename {
+    color: #f4f4f4;
+  }
+
+  .row {
+    border-block-start-color: $ui-03-dark;
+  }
+
+  .dropZone {
+    background: $ui-01-dark;
+  }
+
+  .problems {
+    color: $support-warning;
+  }
+}

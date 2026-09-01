@@ -10,6 +10,9 @@ import {
 } from '@carbon/react';
 import {
   Close,
+  Education,
+  Money,
+  Wallet,
   Edit as EditIcon,
   Renew,
   Time,
@@ -32,6 +35,9 @@ import type { UserProfile, UserRole } from '@/types/auth';
 // the name — read before the text is, and still there once the reader has stopped reading names.
 const ROLE_AVATARS: Record<UserRole, { icon: React.ElementType; tint: string }> = {
   admin: { icon: UserAdmin, tint: styles.avatarAdmin },
+  head_teacher: { icon: Education, tint: styles.avatarHead },
+  accountant: { icon: Money, tint: styles.avatarFinance },
+  bursar: { icon: Wallet, tint: styles.avatarFinance },
   teacher: { icon: UserIcon, tint: styles.avatarTeacher },
   support_staff: { icon: Tools, tint: styles.avatarSupport },
 };
