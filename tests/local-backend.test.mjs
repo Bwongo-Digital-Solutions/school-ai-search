@@ -7899,7 +7899,11 @@ test('a second replica sees the first replica\'s events, and never its own twice
     return client;
   };
 
-  const replicaA = await startEventBroker({ createClient: async () => makeFake(), onEvent: () => {} });
+  const seenOnA = [];
+  const replicaA = await startEventBroker({
+    createClient: async () => makeFake(),
+    onEvent: (tenant, event) => seenOnA.push([tenant, event.type]),
+  });
 
   const seenOnB = [];
   const replicaB = await startEventBroker({
@@ -7917,17 +7921,11 @@ test('a second replica sees the first replica\'s events, and never its own twice
     assert.deepEqual(seenOnB, [['kampala-high', 'message']]);
 
     // The publishing replica has already delivered locally, so its own event coming back over the
-    // channel must be dropped — otherwise every subscriber on A would receive it twice.
-    const seenOnA = [];
-    const detachA = bus.attachBroker({ publish: replicaA.publish });
-    const brokerA = await startEventBroker({
-      createClient: async () => makeFake(),
-      onEvent: (tenant, event) => seenOnA.push([tenant, event.type]),
-    });
-    brokerA.publish('kampala-high', { type: 'message', audienceKind: 'all' });
+    // channel must be dropped — otherwise every subscriber on it would receive the message twice.
+    // The two brokers must therefore have different identities, which is why the replica id belongs
+    // to the broker instance and not to the module.
+    assert.notEqual(replicaA.replicaId, replicaB.replicaId);
     assert.equal(seenOnA.length, 0, 'a replica never receives its own publication');
-    await brokerA.stop();
-    detachA();
   } finally {
     detach();
     await replicaA.stop();

@@ -16,5 +16,6 @@ export { default as Field, type FieldValue, type FieldChange } from './Field';
 export { default as PageHeader } from './PageHeader';
 export { default as StatTile, StatRow } from './StatTile';
 export { default as StudentPicker } from './StudentPicker';
+export { default as TablePager } from './TablePager';
 export { default as TableSkeleton } from './TableSkeleton';
 export { default as WidgetCard } from './WidgetCard';

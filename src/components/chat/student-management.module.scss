@@ -266,8 +266,15 @@
   fill: var(--brand-01, #{$brand-01-fallback});
 }
 
+// The count on the left, the pager on the right, wrapping to two lines on a phone rather than
+// squeezing either.
 .tableFoot {
   @include type.type-style('label-01');
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: layout.$spacing-03;
   color: $text-03;
   margin: layout.$spacing-03 0 0;
   padding-inline: layout.$spacing-02;

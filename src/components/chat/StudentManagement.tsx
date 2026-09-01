@@ -48,7 +48,9 @@ import {
   PageHeader,
   StatRow,
   StatTile,
+  TablePager,
 } from '@/components/common';
+import { usePagedRows } from '@/hooks/usePagedRows';
 import styles from './student-management.module.scss';
 import StudentIdScanner from './StudentIdScanner';
 import { buildApiUrl, supabase } from '@/lib/supabase';
@@ -154,6 +156,10 @@ const attendanceBand = (rate: number) =>
   rate >= 95 ? 'high' : rate >= 90 ? 'good' : rate >= 85 ? 'fair' : 'low';
 
 const getErrorMessage = (error: unknown) => (error instanceof Error ? error.message : 'Unknown error');
+
+// Twenty-five rows fills a laptop screen without scrolling the header away, and is small enough
+// that a phone renders a page instantly.
+const ROSTER_PAGE_SIZE = 25;
 
 /** Who a batch of ID cards is for. All four are optional; none of them means the whole school. */
 const emptyIdCardBatch = { grade: '', section: '', registeredFrom: '', registeredTo: '' };
@@ -568,6 +574,10 @@ const StudentManagement: React.FC = () => {
     }
   };
 
+  // A page at a time. A school of four hundred rendered four hundred rows, each with its subject
+  // tags and its row of buttons — the roster was by a wide margin the heaviest screen in the app.
+  const { page, setPage, pageCount, pageRows, firstOnPage, lastOnPage } = usePagedRows(filtered, ROSTER_PAGE_SIZE);
+
   // The school's own classes, plus any class a student is actually in that the level does not
   // list — so changing the level never makes a student unreachable through the filter.
   const grades = classFilterOptions(settings.school_level, students.map(s => s.grade_level));
@@ -763,7 +773,7 @@ const StudentManagement: React.FC = () => {
                 </TableCell>
               </TableRow>
             ) : (
-              filtered.map((s) => (
+              pageRows.map((s) => (
                 <TableRow key={s.id}>
                   <TableCell className={styles.mono}>{s.student_id}</TableCell>
 
@@ -851,11 +861,24 @@ const StudentManagement: React.FC = () => {
           </TableBody>
         </Table>
 
-        <p className={styles.tableFoot}>
-          Showing {filtered.length} of {students.length} students
-          {isViewOnly && ' (view-only mode)'}
-          {isAdmin && ' (admin mode)'}
-        </p>
+        <div className={styles.tableFoot}>
+          <span>
+            {filtered.length === students.length
+              ? `${students.length} student${students.length === 1 ? '' : 's'}`
+              : `${filtered.length} of ${students.length} students match`}
+            {isViewOnly && ' (view-only mode)'}
+            {isAdmin && ' (admin mode)'}
+          </span>
+          <TablePager
+            page={page}
+            pageCount={pageCount}
+            onPageChange={setPage}
+            firstOnPage={firstOnPage}
+            lastOnPage={lastOnPage}
+            total={filtered.length}
+            noun="student"
+          />
+        </div>
       </div>
 
       {/* The QR code on a student's plastic card, big enough to test with a phone before a batch

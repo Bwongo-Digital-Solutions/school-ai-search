@@ -61,6 +61,9 @@ services:
       # set here rather than defaulted on in code: exactly one long-running process should hold the
       # timer, and this is it.
       BACKUP_SCHEDULER: ${BACKUP_SCHEDULER:-false}
+      # Carries live events between app containers. Unset means the in-process bus, which is correct
+      # and complete for a single container — set it only when running more than one.
+      REDIS_URL: ${REDIS_URL:-}
       SCHOOL_NAME: ${SCHOOL_NAME:-eSchool}
       SCHOOL_TAGLINE: ${SCHOOL_TAGLINE:-Academic Excellence and Character}
       SCHOOL_ADDRESS: ${SCHOOL_ADDRESS:-}
@@ -170,6 +173,30 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  # Optional, and only needed when more than one app container runs. Live events — a new message,
+  # a gate pass granted, someone coming online — are fanned out in process, which is the whole story
+  # on a single container. With two, the replica that receives a scan and the replica holding the
+  # office's open tab are different processes, and this carries the event between them.
+  #
+  #   docker compose --profile broker up -d
+  #
+  # Then set REDIS_URL on the app. Unset, the app behaves exactly as it always has.
+  redis:
+    image: redis:7-alpine
+    container_name: school-ai-search-redis
+    profiles: ["broker"]
+    restart: unless-stopped
+    # Events are notifications that a durable row exists, never the record itself — a subscriber
+    # that misses one replays from Postgres. So there is nothing here worth persisting, and
+    # appendonly stays off rather than writing a log nobody would ever read back.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
   # Optional. Behind a profile so `docker compose up` is unchanged for anyone not using search:
   # start it with `docker compose --profile search up -d`.

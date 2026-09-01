@@ -29,9 +29,6 @@ import { randomUUID } from 'node:crypto';
 const CHANNEL_PREFIX = 'eschool:events:';
 const PATTERN = `${CHANNEL_PREFIX}*`;
 
-/** This replica, so it can recognise and drop its own events arriving back over the channel. */
-const REPLICA_ID = randomUUID();
-
 const brokerEnabled = () => Boolean(String(process.env.REDIS_URL || '').trim());
 
 /**
@@ -60,6 +57,11 @@ export const startEventBroker = async ({ createClient, onEvent, url = process.en
     });
   });
 
+  // Per broker instance, not per module. In production one process holds one broker and the
+  // distinction is invisible — but a module-level id would make two brokers in the same process
+  // indistinguishable from each other, which is both wrong in principle and untestable in practice.
+  const replicaId = randomUUID();
+
   const publisher = await factory('publisher');
   const subscriber = await factory('subscriber');
 
@@ -73,7 +75,7 @@ export const startEventBroker = async ({ createClient, onEvent, url = process.en
     }
 
     // Our own event, already delivered locally before it was ever published.
-    if (!parsed || parsed.replica === REPLICA_ID) return;
+    if (!parsed || parsed.replica === replicaId) return;
 
     const tenantId = channel.slice(CHANNEL_PREFIX.length);
     if (!tenantId || !parsed.event) return;
@@ -92,11 +94,12 @@ export const startEventBroker = async ({ createClient, onEvent, url = process.en
 
   return {
     enabled: true,
+    replicaId,
     /** Best-effort. A failure here never fails the action that produced the event. */
     publish: (tenantId, event) => {
       if (!tenantId || !event) return;
       publisher
-        .publish(`${CHANNEL_PREFIX}${tenantId}`, JSON.stringify({ replica: REPLICA_ID, event }))
+        .publish(`${CHANNEL_PREFIX}${tenantId}`, JSON.stringify({ replica: replicaId, event }))
         .catch((error) => console.warn('Event broker publish failed:', error?.message || error));
     },
     async stop() {
@@ -110,4 +113,4 @@ export const startEventBroker = async ({ createClient, onEvent, url = process.en
   };
 };
 
-export { REPLICA_ID, CHANNEL_PREFIX };
+export { CHANNEL_PREFIX };

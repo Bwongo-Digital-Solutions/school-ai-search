@@ -22,8 +22,6 @@ import {
 import {
   Book,
   Checkmark,
-  ChevronLeft,
-  ChevronRight,
   ListChecked,
   DocumentAdd,
   Education,
@@ -48,8 +46,10 @@ import {
   StatRow,
   StatTile,
   StudentPicker,
+  TablePager,
   WidgetCard,
 } from '@/components/common';
+import { usePagedRows } from '@/hooks/usePagedRows';
 import styles from './student-records.module.scss';
 import type { Student } from '@/types/chat';
 
@@ -865,31 +865,52 @@ const SaveButton = ({ disabled, onClick, label }: { disabled: boolean; onClick: 
  * Shown under every form because the question after saving is always "did that go in?", and the
  * honest answer is the record itself rather than a toast that disappears.
  */
-const RecordList = ({ rows, fields, empty }: { rows: SchoolRecord[]; fields: string[]; empty: string }) => (
-  <WidgetCard>
-    <CardHeader title="Recent records">
-      <Tag type="cool-gray" size="sm">{rows.length}</Tag>
-    </CardHeader>
-    {rows.length === 0 ? (
-      <p className={styles.empty}>{empty}</p>
-    ) : (
-      rows.slice(0, 8).map(row => (
-        <div key={row.id} className={styles.recordRow}>
-          {fields.map(field =>
-            row[field] !== undefined && row[field] !== null && row[field] !== '' ? (
-              <div key={field}>
-                <p className={styles.recordLabel}>{field.replace(/_/g, ' ')}</p>
-                <p className={styles.recordValue}>
-                  {typeof row[field] === 'boolean' ? (row[field] ? 'Yes' : 'No') : String(row[field])}
-                </p>
-              </div>
-            ) : null,
-          )}
-        </div>
-      ))
-    )}
-  </WidgetCard>
-);
+const RECORD_PAGE_SIZE = 8;
+
+const RecordList = ({ rows, fields, empty }: { rows: SchoolRecord[]; fields: string[]; empty: string }) => {
+  // This used to be `rows.slice(0, 8)` with no pager and no indication — so the ninth attendance
+  // entry, the ninth incident and the ninth promotion simply were not on the screen, while the tag
+  // beside the title stated the full count. A list that says "23" and shows eight is worse than one
+  // that shows eight and says so.
+  const { page, setPage, pageCount, pageRows, firstOnPage, lastOnPage, total } = usePagedRows(
+    rows,
+    RECORD_PAGE_SIZE,
+  );
+
+  return (
+    <WidgetCard>
+      <CardHeader title="Recent records">
+        <TablePager
+          page={page}
+          pageCount={pageCount}
+          onPageChange={setPage}
+          firstOnPage={firstOnPage}
+          lastOnPage={lastOnPage}
+          total={total}
+          noun="record"
+        />
+      </CardHeader>
+      {rows.length === 0 ? (
+        <p className={styles.empty}>{empty}</p>
+      ) : (
+        pageRows.map(row => (
+          <div key={row.id} className={styles.recordRow}>
+            {fields.map(field =>
+              row[field] !== undefined && row[field] !== null && row[field] !== '' ? (
+                <div key={field}>
+                  <p className={styles.recordLabel}>{field.replace(/_/g, ' ')}</p>
+                  <p className={styles.recordValue}>
+                    {typeof row[field] === 'boolean' ? (row[field] ? 'Yes' : 'No') : String(row[field])}
+                  </p>
+                </div>
+              ) : null,
+            )}
+          </div>
+        ))
+      )}
+    </WidgetCard>
+  );
+};
 
 const formatAdmissionDocuments = (documents: unknown) => {
   if (!Array.isArray(documents)) return '';
@@ -924,32 +945,15 @@ const AdmissionsZebraList = ({
   return (
     <WidgetCard>
       <CardHeader title="Admissions register">
-        <span className={styles.note}>{allRowsCount} applications</span>
-        <div className={styles.pager}>
-          <Button
-            hasIconOnly
-            kind="ghost"
-            size="sm"
-            renderIcon={ChevronLeft}
-            iconDescription="Previous page"
-            tooltipPosition="bottom"
-            onClick={() => onPageChange(Math.max(1, page - 1))}
-            disabled={page === 1}
-          />
-          <span className={styles.note}>
-            Page {page} of {pageCount}
-          </span>
-          <Button
-            hasIconOnly
-            kind="ghost"
-            size="sm"
-            renderIcon={ChevronRight}
-            iconDescription="Next page"
-            tooltipPosition="bottom"
-            onClick={() => onPageChange(Math.min(pageCount, page + 1))}
-            disabled={page === pageCount}
-          />
-        </div>
+        <TablePager
+          page={page}
+          pageCount={pageCount}
+          onPageChange={onPageChange}
+          firstOnPage={allRowsCount === 0 ? 0 : (page - 1) * ADMISSIONS_PAGE_SIZE + 1}
+          lastOnPage={Math.min(page * ADMISSIONS_PAGE_SIZE, allRowsCount)}
+          total={allRowsCount}
+          noun="application"
+        />
       </CardHeader>
 
       {rows.length === 0 ? (
