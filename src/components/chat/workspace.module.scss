@@ -144,7 +144,7 @@
   margin: 0;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .screen {
     background-color: $ui-01-dark;
   }
@@ -307,12 +307,12 @@
 
 // Direction and outcome, at the gate. Colour carries meaning here, so it is stated rather than
 // left to the reader to infer from an arrow.
-.iconOut { fill: #b28600; }
+.iconOut { fill: $caution-text; }
 .iconIn { fill: $support-success; }
 .iconDeclined { fill: $support-error; }
 .iconNeutral { fill: var(--brand-01, #{$brand-01-fallback}); }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .entry,
   .tally {
     border-color: $ui-03-dark;
@@ -376,7 +376,7 @@
   color: $text-02;
 }
 
-:global([data-carbon-theme='g100']) .busy {
+:global(.cds--g100) .busy {
   color: $text-02-dark;
 }
 

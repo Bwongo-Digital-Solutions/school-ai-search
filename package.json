@@ -27,6 +27,7 @@
     "@types/uuid": "^10.0.0",
     "date-fns": "^3.6.0",
     "highlight.js": "^11.9.0",
+    "ioredis": "^6.0.0",
     "marked": "^12.0.1",
     "pdf-lib": "^1.17.1",
     "pg": "^8.16.3",

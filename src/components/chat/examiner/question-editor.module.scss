@@ -66,7 +66,7 @@
   white-space: nowrap;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .toolbar {
     background: $ui-01-dark;
     border-color: $ui-03-dark;

@@ -9,8 +9,12 @@
    Component styling now lives in co-located *.module.scss files against src/styles/_vars.scss,
    and the design tokens come from Carbon itself. */
 
+/* `color-scheme` is set on <html> at runtime by ThemeProvider, to the theme actually in force —
+   not to `light dark`, which tells the browser to follow the device and so paints a white scrollbar
+   down the side of a dark app whenever the reader has overridden their system setting. This is only
+   the value before the provider's first effect runs. */
 html {
-  color-scheme: light dark;
+  color-scheme: light;
 }
 
 /* Carbon's reset does not assume a full-height app that scrolls inside its own panes. */

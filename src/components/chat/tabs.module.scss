@@ -107,7 +107,7 @@
 
 .warn {
   @include type.type-style('label-01');
-  color: #8e6a00;
+  color: $caution-text;
   margin: 0;
 }
 
@@ -171,7 +171,7 @@
   margin: 0;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .subheading,
   .primary,
   .strong,
@@ -348,7 +348,7 @@
 // Toned text, for the handful of places a figure's colour carries meaning.
 .positive { color: $support-success; }
 .negative { color: $support-error; }
-.caution { color: #8e6a00; }
+.caution { color: $caution-text; }
 
 // A boxed aside inside a panel: a warning, a running total, a note about what will happen.
 .callout {
@@ -414,7 +414,7 @@
   color: $text-02;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .thead {
     background: $ui-01-dark;
     color: $text-02-dark;
@@ -639,7 +639,7 @@
   justify-content: center;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .noteRow,
   .footNotes {
     color: $text-03-dark;
@@ -691,7 +691,7 @@
   border: 1px solid $support-warning;
 
   svg {
-    fill: #8e6a00;
+    fill: $caution-text;
     flex-shrink: 0;
   }
 
@@ -700,7 +700,7 @@
   }
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .receiptHead {
     background: rgb(36 161 72 / 16%);
     border-block-end-color: $support-success;
@@ -758,7 +758,7 @@
   }
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .calloutBrandRow {
     background: $ui-01-dark;
   }
@@ -783,8 +783,8 @@
 
 .gradeA { color: $support-success; }
 .gradeB { color: #009d9a; }
-.gradeC { color: #b28600; }
-.gradeD { color: #ba4e00; }
+.gradeC { color: $caution-text; }
+.gradeD { color: $caution-strong; }
 .gradeE { color: $support-error; }
 
 // A figure that is zero, or a value not yet set. Present, but not competing for attention.
@@ -792,7 +792,7 @@
   color: $text-03;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .gradeC { color: $support-warning; }
   .muted { color: $text-03-dark; }
 }

@@ -7767,6 +7767,194 @@ test('the deployment carries every setting a production tenant needs', async () 
   assert.match(caddyfile, /header_up -X-Tenant/);
 });
 
+test('the gate, the dining hall and the register are staff-only, by post as well as by role', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const post = (pathname, actor, body = {}) => runtime.dispatch({ method: 'POST', pathname, body, actor });
+
+  const admin = { id: 'a', role: 'admin', email: 'head@school.test', name: 'Head', designation: null };
+  const teacher = { id: 't', role: 'teacher', email: 't@school.test', name: 'Teacher', designation: null };
+  const askari = { id: 'g', role: 'support_staff', email: 'gate@school.test', name: 'Askari', designation: 'askari' };
+  const cook = { id: 'c', role: 'support_staff', email: 'cook@school.test', name: 'Cook', designation: 'cook' };
+  const plainSupport = { id: 'p', role: 'support_staff', email: 'p@school.test', name: 'P', designation: null };
+
+  try {
+    const ROUTES = [
+      '/api/functions/roll-call',
+      '/api/functions/exam-clearance',
+      '/api/functions/gate-permission',
+      '/api/functions/gate-log',
+      '/api/functions/gate-pass',
+      '/api/functions/meal-record',
+    ];
+
+    // None of these had a gate of any kind: no actor reached the handler and the handler checked
+    // nothing, so anyone who could reach the API could grant a gate pass or mark a register.
+    for (const pathname of ROUTES) {
+      assert.equal((await post(pathname, null)).status, 403, `${pathname} must refuse an anonymous request`);
+      assert.equal(
+        (await post(pathname, plainSupport)).status,
+        403,
+        `${pathname} must refuse support staff with no post`,
+      );
+    }
+
+    // A post is not a role, and the difference is the point: these people are all `support_staff`,
+    // and the gate has to let each of them do their own job and nothing else.
+    assert.equal((await post('/api/functions/gate-log', askari, {})).status, 200, 'the askari reads the gate log');
+    assert.equal((await post('/api/functions/gate-log', cook, {})).status, 403, 'the cook does not');
+    assert.equal(
+      (await post('/api/functions/meal-record', askari, { code: 'STU-2026-001', meal: 'lunch' })).status,
+      403,
+      'and the askari does not serve meals',
+    );
+
+    // Whoever checks a pass at the gate must not also be the person who wrote it.
+    assert.equal(
+      (await post('/api/functions/gate-permission', askari, { code: 'STU-2026-001' })).status,
+      403,
+      'the askari cannot issue the permission they check',
+    );
+    assert.equal((await post('/api/functions/roll-call', teacher, { action: 'classes' })).status, 200);
+    assert.equal((await post('/api/functions/roll-call', askari, { action: 'classes' })).status, 403);
+
+    // Nothing was written past any of those refusals.
+    for (const table of ['gate_passes', 'gate_permissions', 'meal_records']) {
+      assert.equal(await countRows(runtime, table), 0, `${table} must be untouched by a refused request`);
+    }
+
+    // An internal call — a test, or the server calling its own handler — is still unchecked, which
+    // is the three-state actor working as it does everywhere else.
+    assert.equal((await dispatch(runtime, 'POST', '/api/functions/roll-call', { action: 'classes' })).status, 200);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a gate alert reaches the school it belongs to, live', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const bus = await import('../server/events/bus.mjs');
+
+  try {
+    // The askari's own screen is subscribed. This is what used to receive nothing: notifyStaff
+    // never passed a tenantId, so postStaffMessage wrote the row and skipped the publish entirely.
+    const delivered = [];
+    const unsubscribe = bus.subscribe('default', {
+      user: { id: 'g', role: 'support_staff', designation: 'askari' },
+      deliver: (event) => delivered.push(event),
+    });
+
+    const granted = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/functions/gate-permission',
+      body: {
+        code: 'STU-2026-001',
+        grantedBy: 'Head Teacher',
+        destination: 'Home',
+        reason: 'Unwell',
+      },
+      actor: { id: 'a', role: 'admin', email: 'head@school.test', name: 'Head', designation: null },
+      headers: { host: 'localhost' },
+    });
+    assert.equal(granted.status, 200);
+
+    unsubscribe();
+
+    assert.equal(delivered.length, 1, 'the askari is told, rather than finding out on their next reload');
+    assert.match(delivered[0].message.subject, /Gate pass for/);
+    // And the id is a replay cursor, so a phone that reconnects can ask for what it missed.
+    assert.match(delivered[0].id, /^\d{4}-\d{2}-\d{2}T[\d:.]+Z\|/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a second replica sees the first replica\'s events, and never its own twice', async () => {
+  const { startEventBroker } = await import('../server/events/broker.mjs');
+  const bus = await import('../server/events/bus.mjs');
+
+  // A stand-in for Redis: one shared set of channels, so two "replicas" can talk without a socket.
+  const channels = new Map();
+  const makeFake = () => {
+    const handlers = [];
+    const client = {
+      patterns: [],
+      on: (event, handler) => {
+        if (event === 'pmessage') handlers.push(handler);
+      },
+      psubscribe: async (pattern) => {
+        client.patterns.push(pattern);
+        channels.set(client, { handlers, patterns: client.patterns });
+      },
+      punsubscribe: async () => channels.delete(client),
+      publish: async (channel, payload) => {
+        for (const [other, entry] of channels) {
+          if (other === client) continue;
+          for (const handler of entry.handlers) handler('eschool:events:*', channel, payload);
+        }
+        return 1;
+      },
+      quit: async () => channels.delete(client),
+    };
+    return client;
+  };
+
+  const replicaA = await startEventBroker({ createClient: async () => makeFake(), onEvent: () => {} });
+
+  const seenOnB = [];
+  const replicaB = await startEventBroker({
+    createClient: async () => makeFake(),
+    onEvent: (tenant, event) => seenOnB.push([tenant, event.type]),
+  });
+
+  const detach = bus.attachBroker(replicaA);
+  try {
+    // A is where the event happens; nobody is connected to A.
+    const deliveredLocally = bus.publish('kampala-high', { type: 'message', audienceKind: 'all' });
+    assert.equal(deliveredLocally, 0, 'nobody is subscribed on this replica');
+
+    // …and B, where the office tab actually is, hears about it anyway.
+    assert.deepEqual(seenOnB, [['kampala-high', 'message']]);
+
+    // The publishing replica has already delivered locally, so its own event coming back over the
+    // channel must be dropped — otherwise every subscriber on A would receive it twice.
+    const seenOnA = [];
+    const detachA = bus.attachBroker({ publish: replicaA.publish });
+    const brokerA = await startEventBroker({
+      createClient: async () => makeFake(),
+      onEvent: (tenant, event) => seenOnA.push([tenant, event.type]),
+    });
+    brokerA.publish('kampala-high', { type: 'message', audienceKind: 'all' });
+    assert.equal(seenOnA.length, 0, 'a replica never receives its own publication');
+    await brokerA.stop();
+    detachA();
+  } finally {
+    detach();
+    await replicaA.stop();
+    await replicaB.stop();
+    bus.reset();
+  }
+});
+
+test('with no REDIS_URL the bus is exactly what it always was', async () => {
+  const { startEventBroker } = await import('../server/events/broker.mjs');
+
+  const previous = process.env.REDIS_URL;
+  delete process.env.REDIS_URL;
+  try {
+    const broker = await startEventBroker({});
+    // Off, and returning a shape the caller does not have to branch on — the same contract
+    // startBackupScheduler uses for the same reason.
+    assert.equal(broker.enabled, false);
+    assert.equal(broker.publish, null);
+    assert.equal(typeof broker.stop, 'function');
+    await broker.stop();
+  } finally {
+    if (previous === undefined) delete process.env.REDIS_URL;
+    else process.env.REDIS_URL = previous;
+  }
+});
+
 test('student records are not readable without a session, whatever the URL says', async () => {
   const { runtime, cleanup } = await startTestRuntime();
 

@@ -75,8 +75,25 @@ export const needsLightText = (hex: string): boolean => {
   return luminance < 0.45;
 };
 
-/** Puts the school's colour on the document. Called whenever the settings load or change. */
-export const applyBrand = (themeColor: string) => {
+/**
+ * The lightness a brand colour must reach to be legible on a dark ground.
+ *
+ * A school that picks a deep navy gets a primary button that all but disappears against g100's
+ * #161616 — the colour is correct, the contrast is not. Rather than refusing the choice or
+ * substituting a different hue, the same colour is lifted until it separates from the background,
+ * which keeps it recognisably the school's own.
+ */
+const DARK_MODE_MIN_LIGHTNESS = 55;
+
+/**
+ * Puts the school's colour on the document. Called whenever the settings load or change.
+ *
+ * `dark` matters because the three shades are not theme-independent. On a light page the hover
+ * state is a *darker* step towards the background's opposite; on a dark page that same step moves
+ * the colour towards the background and reads as the button switching off. The direction inverts,
+ * and the base colour needs a floor under it.
+ */
+export const applyBrand = (themeColor: string, dark = false) => {
   if (typeof document === 'undefined') return;
 
   const base = hexToHsl(themeColor);
@@ -92,8 +109,18 @@ export const applyBrand = (themeColor: string) => {
     return;
   }
 
-  root.style.setProperty('--brand-01', hsl(base));
-  root.style.setProperty('--brand-02', hsl({ ...base, l: clamp(base.l - 10, 0, 100) }));
-  root.style.setProperty('--brand-03', hsl({ ...base, l: clamp(base.l + 12, 0, 100) }));
-  root.style.setProperty('--brand-contrast', needsLightText(themeColor) ? '#ffffff' : '#161616');
+  const primary = dark ? { ...base, l: clamp(Math.max(base.l, DARK_MODE_MIN_LIGHTNESS), 0, 100) } : base;
+
+  // Hover steps away from the page, not always downwards: lighter still on a dark ground, darker on
+  // a light one. And --brand-03, the accent under a section title, steps the other way from hover
+  // so the two never collapse into the same colour.
+  const hoverStep = dark ? 8 : -10;
+  const accentStep = dark ? -12 : 12;
+
+  root.style.setProperty('--brand-01', hsl(primary));
+  root.style.setProperty('--brand-02', hsl({ ...primary, l: clamp(primary.l + hoverStep, 0, 100) }));
+  root.style.setProperty('--brand-03', hsl({ ...primary, l: clamp(primary.l + accentStep, 0, 100) }));
+  // Contrast is measured against the shade actually painted, which after the floor above may not be
+  // the colour the school entered.
+  root.style.setProperty('--brand-contrast', primary.l < 55 ? '#ffffff' : '#161616');
 };

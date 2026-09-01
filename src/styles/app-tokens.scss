@@ -1,0 +1,31 @@
+// Colours this app needs that Carbon has no token for, defined once and flipped with the theme.
+//
+// Carbon covers surfaces, text and the four status colours thoroughly. What it does not give you is
+// the *tint* behind a warning row, or the amber that sits between "fine" and "bad" on a grading
+// band — and those were previously written as hex literals in a dozen stylesheets, which is why
+// they stayed light when everything around them went dark.
+//
+// Custom properties rather than Sass variables because that is what makes them theme-aware: the
+// `.cds--g100` block below re-points the same names, and every rule that reads them follows without
+// being touched. Carbon puts that class on the element its <Theme> renders, so this must be loaded
+// after Carbon's own stylesheet — see src/main.tsx for the import order, which is load-bearing.
+
+:root {
+  // The faint ground behind a row that needs attention but is not an error.
+  --app-warning-background: #fff8e1;
+
+  // Amber. Neither Carbon's yellow (too light to read as text) nor its red (too loud for a middle
+  // band), so it is ours. The light value is chosen for contrast on white, the dark for contrast
+  // on #161616 — the same hue would fail one or the other.
+  --app-caution-text: #8e6a00;
+  --app-caution-strong: #ba4e00;
+}
+
+:global(.cds--g100) {
+  // Not a tint of yellow on dark — a dark ground with a yellow cast, which is the same idea
+  // inverted. A pale wash would glare against #161616 rather than reading as a quiet highlight.
+  --app-warning-background: #332a00;
+
+  --app-caution-text: #f1c21b;
+  --app-caution-strong: #ff832b;
+}

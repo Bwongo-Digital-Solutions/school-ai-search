@@ -26,7 +26,7 @@
   font-weight: 600;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .footer {
     background: $ui-02-dark;
     border-block-start-color: $ui-03-dark;

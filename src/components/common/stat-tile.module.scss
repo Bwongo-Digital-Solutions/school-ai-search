@@ -47,7 +47,7 @@
 }
 
 .warning .label svg {
-  color: #b28600; // $support-warning is too pale to sit on white at icon weight
+  color: $caution-text; // $support-warning is too pale to sit on white at icon weight
 }
 
 .danger .label svg {
@@ -67,7 +67,7 @@
   }
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .tile {
     background-color: $ui-02-dark;
     border-color: $ui-03-dark;

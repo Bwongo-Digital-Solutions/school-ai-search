@@ -99,7 +99,7 @@
   min-inline-size: 0;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .label {
     color: $text-02-dark;
   }

@@ -11,6 +11,8 @@
  * the rule living twice in two languages and drifting the first time an audience kind is added.
  */
 
+import { encodeCursor } from './cursor.mjs';
+
 const same = (a, b) => String(a ?? '') === String(b ?? '');
 
 /**
@@ -57,10 +59,16 @@ export const reaches = (event, user) => {
  * Built from the row itself so the live payload and the inbox payload cannot disagree about what a
  * message is. The body is included: an inbox entry is small, and leaving it out would make every
  * arrival cost a round trip to render.
+ *
+ * `id` is the replay cursor, not the row id, and that distinction is the whole of a bug that made
+ * catch-up-after-a-reconnect silently do nothing. The browser echoes the last id it saw back as
+ * `Last-Event-ID`, and `decodeCursor` needs `<iso>|<id>` to turn that into a position — handed a
+ * bare UUID it returns null and `replayMessages` returns an empty list. Replay was written,
+ * correct and tested against `replayMessages` directly, and had never once fired over the wire.
  */
 export const messageEvent = (row) => ({
   type: 'message',
-  id: row.id,
+  id: encodeCursor(row.created_at, row.id),
   audienceKind: row.audience_kind,
   audienceValue: row.audience_value,
   recipientUserId: row.recipient_user_id,
@@ -89,7 +97,10 @@ export const messageEvent = (row) => ({
  */
 export const readEvent = ({ messageId, readerUserId, readerName, authorUserId, readAt }) => ({
   type: 'read',
-  id: `read-${messageId}-${readerUserId}`,
+  // No `id`, deliberately. Only replayable events carry one, because the browser echoes the last id
+  // it saw as `Last-Event-ID` and that value is a *position in the message stream*. A receipt is not
+  // in that stream — giving it an id of its own would move the cursor to somewhere replay cannot
+  // resolve, and every message between there and the reconnect would be lost.
   audienceKind: 'user',
   recipientUserId: authorUserId,
   senderUserId: null,
@@ -97,10 +108,15 @@ export const readEvent = ({ messageId, readerUserId, readerName, authorUserId, r
   read: { messageId, readerUserId, readerName, readAt },
 });
 
-/** Someone connected or disconnected. Everyone in the school sees it; nobody sees their own. */
+/**
+ * Someone connected or disconnected. Everyone in the school sees it; nobody sees their own.
+ *
+ * No `id`, for the reason given on `readEvent` — and this one was the more damaging of the two.
+ * Presence is the *last* thing written on every connect, so its id became the browser's
+ * `Last-Event-ID` on every single connection, overwriting whatever real position was there.
+ */
 export const presenceEvent = ({ user, online, people }) => ({
   type: 'presence',
-  id: `presence-${user.id}-${online ? 'on' : 'off'}-${Date.now()}`,
   audienceKind: 'all',
   senderUserId: null,
   createdAt: new Date().toISOString(),

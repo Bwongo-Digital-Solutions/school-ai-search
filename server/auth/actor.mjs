@@ -97,3 +97,22 @@ export const hasRole = (actor, roles) => Boolean(actor) && roles.includes(actor.
  * past a failed check the way an `if` around a boolean allows.
  */
 export const requireRole = (actor, roles) => (hasRole(actor, roles) ? null : { error: 'Unauthorized' });
+
+/**
+ * The same gate, for the work that is done by a *post* rather than by a rank.
+ *
+ * The gate, the dining hall and the dormitories are staffed by people whose role is `support_staff`
+ * and whose job is carried by their designation — the askari who checks a pass out of the gate, the
+ * cook who serves a meal, the matron who lets a boarder go home. A role list alone either locks
+ * them out of the only screens they use, or is widened to `support_staff` and thereby lets the cook
+ * issue gate permissions.
+ *
+ * So both are named, and either qualifies. `designations` is checked against the actor's own
+ * designation from their `users` row, never from anything the request supplied.
+ */
+export const requirePost = (actor, { roles = [], designations = [] }) => {
+  if (!actor) return { error: 'Unauthorized' };
+  if (roles.includes(actor.role)) return null;
+  if (actor.designation && designations.includes(actor.designation)) return null;
+  return { error: 'Unauthorized' };
+};

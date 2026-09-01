@@ -121,7 +121,7 @@
 
 .warn {
   @include type.type-style('label-01');
-  color: #8e6a00;
+  color: $caution-text;
   margin: 0;
 }
 
@@ -131,7 +131,7 @@
   padding: layout.$spacing-07;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .blurb {
     color: $text-02-dark;
   }
@@ -177,6 +177,6 @@
   margin: layout.$spacing-01 0 0;
 }
 
-:global([data-carbon-theme='g100']) .serverRow {
+:global(.cds--g100) .serverRow {
   border-block-start-color: $ui-03-dark;
 }

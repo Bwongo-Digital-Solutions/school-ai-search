@@ -42,7 +42,7 @@
   text-align: center;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .nav {
     border-inline-end-color: $ui-03-dark;
 

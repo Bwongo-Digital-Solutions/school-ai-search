@@ -138,7 +138,7 @@
   color: $text-03;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .composer {
     background: $ui-02-dark;
     border-top-color: $ui-03-dark;

@@ -7,6 +7,8 @@ import { createRoot } from 'react-dom/client';
 // won every override, and things like the header's brand colour silently did nothing.
 // Foundations first, then the app's own styles on top of them.
 import './styles/carbon.scss';
+// The app's own tokens, after Carbon so they can key off the `.cds--g100` class its <Theme> emits.
+import './styles/app-tokens.scss';
 import './index.css';
 
 import App from './App.tsx';

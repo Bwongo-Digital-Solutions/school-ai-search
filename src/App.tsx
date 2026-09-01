@@ -14,8 +14,10 @@ import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
 
+// `defaultTheme="system"` follows the device unless the reader says otherwise. It was pinned to
+// light, which meant a machine set to dark got a light app and no sign that a choice existed.
 const App = () => (
-  <ThemeProvider defaultTheme="light">
+  <ThemeProvider defaultTheme="system">
     <CarbonTheme>
       <QueryClientProvider client={queryClient}>
         <NotificationProvider>

@@ -114,7 +114,7 @@
 
 .avatarPending {
   background: #fcf4d6;
-  color: #8e6a00;
+  color: $caution-text;
 }
 
 .identity {
@@ -176,7 +176,7 @@
   margin: 0;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .screen {
     background-color: $ui-01-dark;
   }

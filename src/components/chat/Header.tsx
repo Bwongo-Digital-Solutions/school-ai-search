@@ -56,7 +56,7 @@ const Header: React.FC = () => {
   const { user, isAuthenticated, isAdmin, isSupportStaff, isPrivileged, canSeeStudents, canSeeFinance, signOut } =
     useAuth();
   const { unread } = useLive();
-  const { theme, setTheme } = useTheme();
+  const { theme, setTheme, isDark } = useTheme();
   const { notify } = useNotifications();
 
   const [buildingReport, setBuildingReport] = useState(false);
@@ -70,11 +70,6 @@ const Header: React.FC = () => {
   // screen's open state, which the header's menu button drives.
   const [navExpanded, setNavExpanded] = useState(false);
 
-  const isDark =
-    theme === 'dark' ||
-    (theme === 'system' &&
-      typeof window !== 'undefined' &&
-      window.matchMedia('(prefers-color-scheme: dark)').matches);
 
   // The dropdowns these closed are now OverflowMenus, which close themselves. Kept as no-ops so the
   // export and report handlers below are the same code they were, rather than a careful rewrite of
@@ -196,12 +191,9 @@ const Header: React.FC = () => {
     }
   };
 
-  /**
-   * Goes through the theme provider rather than toggling the `dark` class on <html> directly, which
-   * is what this did before. Carbon's <Theme> reads the provider, so writing the class behind its
-   * back left the design system in one theme and the rest of the app in the other.
-   */
-  const toggleTheme = () => setTheme(isDark ? 'light' : 'dark');
+  // What the theme control currently reads as. "System" is a real choice, not the absence of one,
+  // so it says so rather than showing whichever of light or dark it happens to resolve to.
+  const themeLabel = theme === 'system' ? 'System' : theme === 'dark' ? 'Dark' : 'Light';
 
   const handleSignOut = () => {
     signOut();
@@ -260,13 +252,28 @@ const Header: React.FC = () => {
               <OverflowMenuItem itemText="CSV (.csv)" onClick={() => handleExport('csv')} />
             </OverflowMenu>
 
-            <HeaderGlobalAction
-              aria-label={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
-              onClick={toggleTheme}
-              tooltipAlignment="end"
+            {/* Three choices, not a toggle. "System" is what most people want and what the app
+                defaults to, but a toggle can only express the two it resolves to — so someone who
+                wanted dark on a light laptop had no way to say so, and no way back afterwards. */}
+            <OverflowMenu
+              aria-label={`Appearance: ${themeLabel}`}
+              renderIcon={isDark ? Light : Asleep}
+              size="lg"
+              flipped
+              menuOptionsClass={styles.themeMenu}
             >
-              {isDark ? <Light size={20} /> : <Asleep size={20} />}
-            </HeaderGlobalAction>
+              {/* Carbon's OverflowMenuItem has no selected state, so the current choice is marked
+                  in the text. Without it the menu cannot say whether "System" is in force. */}
+              {(['system', 'light', 'dark'] as const).map((option) => (
+                <OverflowMenuItem
+                  key={option}
+                  itemText={`${option === 'system' ? 'System' : option === 'light' ? 'Light' : 'Dark'}${
+                    theme === option ? '  ✓' : ''
+                  }`}
+                  onClick={() => setTheme(option)}
+                />
+              ))}
+            </OverflowMenu>
 
             <HeaderGlobalAction
               aria-label="Help"

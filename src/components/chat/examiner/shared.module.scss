@@ -172,7 +172,7 @@
 
 .reviewNote {
   @include type.type-style('label-01');
-  color: #8e6a00;
+  color: $caution-text;
   margin: layout.$spacing-04 0 0;
 }
 
@@ -185,7 +185,7 @@
   border-block-start: 1px solid $ui-03;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .card {
     background: $ui-02-dark;
     border-color: $ui-03-dark;

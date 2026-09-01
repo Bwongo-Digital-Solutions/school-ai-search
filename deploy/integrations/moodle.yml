@@ -76,5 +76,5 @@ volumes:
 
 networks:
   default:
-    name: eschool_net
+    name: school-ai-search_default
     external: true

@@ -17,7 +17,7 @@
   padding: layout.$spacing-05;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .widgetCard {
     background-color: $ui-02-dark;
     border-color: $ui-03-dark;

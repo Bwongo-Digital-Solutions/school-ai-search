@@ -153,7 +153,7 @@
   margin: layout.$spacing-02 0 0;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .entry {
     border-block-start-color: $ui-03-dark;
 

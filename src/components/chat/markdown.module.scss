@@ -132,7 +132,7 @@
   block-size: layout.$spacing-03;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .markdown,
   .markdown h1,
   .markdown h2,

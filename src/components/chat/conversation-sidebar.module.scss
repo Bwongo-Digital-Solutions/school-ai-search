@@ -282,7 +282,7 @@
   }
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .sidebar {
     background: $ui-02-dark;
     border-inline-end-color: $ui-03-dark;

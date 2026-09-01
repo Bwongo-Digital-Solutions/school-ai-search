@@ -77,7 +77,7 @@
   max-width: 28rem;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .tile {
     background-color: $ui-02-dark;
     border-color: $ui-03-dark;

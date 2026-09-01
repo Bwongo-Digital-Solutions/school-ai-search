@@ -65,7 +65,7 @@
 
 .warn {
   @include type.type-style('label-01');
-  color: #8e6a00;
+  color: $caution-text;
   margin: 0;
 }
 
@@ -75,7 +75,7 @@
   margin: 0;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .hint {
     color: $text-02-dark;
   }

@@ -1055,11 +1055,17 @@ roughly triple the length of the main file for something most schools never star
 own database and named volumes; datastores publish no ports at all, and the application ports bind to
 loopback, following `librechat`/`librechat-mongo`.
 
-They meet the app on a shared network. `docker-compose.yml` names its default network `eschool_net`
-and each integration file joins it as `external: true` — a default network belongs to the file that
-created it, so without the explicit name a second file would silently get a second network and
-nothing would resolve. The app must be up first; `containers.sh` checks the network exists and says
-so rather than failing obscurely.
+They meet the app on a shared network. `docker-compose.yml` names its default network
+`school-ai-search_default` and each integration file joins it as `external: true` — a default
+network belongs to the file that created it, so without the explicit name a second file would
+silently get a second network and nothing would resolve. The app must be up first; `containers.sh`
+checks the network exists and says so rather than failing obscurely.
+
+The pinned value is the name Compose derives on its own from the project name, so existing
+deployments are already on it and nothing has to move. Do not rename it: Compose will not detach
+running containers to follow, so it creates the new network, fails to remove the old one, and stops
+with "network school-ai-search_default has active endpoints" — leaving the app on one network and
+the database on the other.
 
 ERPNext is the one that is not usable when it comes up: Frappe has no site until one is created,
 which is the `erpnext-create-site` one-shot behind a `setup` profile. It is deliberately not part of

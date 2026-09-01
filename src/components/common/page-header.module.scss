@@ -79,7 +79,7 @@
   justify-content: flex-end;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .pageHeader {
     background-color: $ui-02-dark;
     border-bottom-color: $ui-03-dark;

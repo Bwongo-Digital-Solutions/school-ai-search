@@ -97,7 +97,7 @@
   gap: layout.$spacing-03;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .screen {
     background-color: $ui-01-dark;
   }

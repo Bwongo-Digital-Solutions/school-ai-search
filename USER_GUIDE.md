@@ -736,8 +736,8 @@ docker compose -f deploy/integrations/moodle.yml -p school-ai-search-moodle up -
 ```
 
 Each is a complete stack in its own file under `deploy/integrations/`, with its own database and its
-own volumes. Start the app first — they join its network (`eschool_net`) rather than creating one,
-and the script will say so rather than failing obscurely if it is not there yet.
+own volumes. Start the app first — they join its network (`school-ai-search_default`) rather than
+creating one, and the script will say so rather than failing obscurely if it is not there yet.
 
 Sizes differ a great deal. Dolibarr is two containers; Moodle is two; Odoo is two; **ERPNext is
 seven** and wants a couple of gigabytes of memory. ERPNext also has no site until one is created,

@@ -235,7 +235,7 @@
   }
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .screen {
     background-color: $ui-01-dark;
   }
@@ -278,7 +278,7 @@
   margin: 0;
 }
 
-:global([data-carbon-theme='g100']) .empty {
+:global(.cds--g100) .empty {
   color: $text-02-dark;
 }
 
@@ -317,7 +317,7 @@
   white-space: nowrap;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .note {
     color: $text-03-dark;
   }

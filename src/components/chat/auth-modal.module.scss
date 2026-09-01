@@ -80,6 +80,6 @@
   margin: 0;
 }
 
-:global([data-carbon-theme='g100']) .note {
+:global(.cds--g100) .note {
   color: $text-02-dark;
 }

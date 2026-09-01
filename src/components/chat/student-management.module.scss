@@ -91,7 +91,7 @@
 
   &[data-band='high'] { color: $support-success; }
   &[data-band='good'] { color: $support-info; }
-  &[data-band='fair'] { color: #b28600; }
+  &[data-band='fair'] { color: $caution-text; }
   &[data-band='low']  { color: $support-error; }
 }
 
@@ -119,7 +119,7 @@
 
   &[data-band='high'] > span { background: $support-success; }
   &[data-band='good'] > span { background: $support-info; }
-  &[data-band='fair'] > span { background: #b28600; }
+  &[data-band='fair'] > span { background: $caution-text; }
   &[data-band='low']  > span { background: $support-error; }
 }
 
@@ -145,7 +145,7 @@
   margin: 0 0 layout.$spacing-05;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .screen {
     background-color: $ui-01-dark;
   }
@@ -229,7 +229,7 @@
   background: #ffffff;
 }
 
-:global([data-carbon-theme='g100']) .idCard {
+:global(.cds--g100) .idCard {
   background: $ui-01-dark;
   border-color: $ui-03-dark;
 }
@@ -273,7 +273,7 @@
   padding-inline: layout.$spacing-02;
 }
 
-:global([data-carbon-theme='g100']) .tableFoot {
+:global(.cds--g100) .tableFoot {
   color: $text-03-dark;
 }
 

@@ -104,3 +104,9 @@
   color: $text-02;
   margin: 0;
 }
+
+// The appearance menu. Narrow, because its three items are one word each and Carbon's default
+// overflow width leaves most of the panel empty.
+.themeMenu {
+  inline-size: 10rem;
+}

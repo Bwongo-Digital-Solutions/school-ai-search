@@ -63,7 +63,7 @@
   overflow: hidden;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .citation {
     color: $text-02-dark;
   }

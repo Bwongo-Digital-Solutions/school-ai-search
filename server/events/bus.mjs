@@ -1,14 +1,15 @@
 /**
- * Fan-out for live events, in process.
+ * Fan-out for live events.
  *
- * The whole of it is a Map of tenant to subscribers. There is no broker because there is nothing
- * for a broker to do: one container runs this app, so the code that publishes an event and the code
- * that delivers it share a heap. Redis between them would add a service to run and a failure mode to
- * handle, and carry the message about a metre.
+ * The core of it is a Map of tenant to subscribers, and on a single container that is the whole
+ * story: the code that publishes an event and the code that delivers it share a heap, so Redis
+ * between them would add a service to run and a failure mode to handle, and carry the message about
+ * a metre. That is still the default, and `publish` behaves exactly as it always did.
  *
- * This module is the seam where that changes. If a second app replica ever appears, `publish` grows
- * a Redis (or NATS) backend and nothing above this file knows — the subscriber side is already an
- * interface rather than a socket.
+ * This module said it was the seam where a second replica would change that, and it now is.
+ * `attachBroker` gives `publish` a second destination — see broker.mjs — and nothing above this file
+ * knows either way. The subscriber side was already an interface rather than a socket, which is what
+ * made the change small.
  *
  * **Keyed by tenant first, always.** One process serves every school. A bus keyed only by user id
  * would let a broadcast in one school reach a subscriber in another, which is exactly the failure
@@ -23,6 +24,29 @@ import { reaches } from './audience.mjs';
 
 /** tenantId -> Set<subscriber>. Empty tenants are dropped so a long-lived process does not grow. */
 const byTenant = new Map();
+
+/**
+ * Where an event goes after it has been delivered in this process, if anywhere.
+ *
+ * Null on a single-container deployment, which is most of them. Set once at startup by the runtime.
+ */
+let broker = null;
+
+/** Wire a cross-process backend into `publish`. Returns the function that removes it again. */
+export const attachBroker = (next) => {
+  broker = next || null;
+  return () => {
+    broker = null;
+  };
+};
+
+/**
+ * Deliver an event that arrived from another replica.
+ *
+ * Local fan-out only — it must not go back onto the broker, or two replicas would bounce the same
+ * event between them forever.
+ */
+export const deliverRemote = (tenantId, event) => deliverLocally(tenantId, event);
 
 /**
  * Registers a subscriber and returns the function that removes it.
@@ -50,14 +74,14 @@ export const subscribe = (tenantId, subscriber) => {
 };
 
 /**
- * Delivers an event to every subscriber in one school that it is addressed to.
+ * Delivers an event to every subscriber in one school that it is addressed to, in this process.
  *
  * Returns how many received it, which is what the tests assert on. A subscriber whose `deliver`
  * throws — a socket that died between the write and the callback — is counted as not delivered and
  * never allowed to interrupt the fan-out: one broken connection must not stop the other forty
  * people getting their message.
  */
-export const publish = (tenantId, event) => {
+const deliverLocally = (tenantId, event) => {
   const set = byTenant.get(tenantId);
   if (!set || set.size === 0) return 0;
 
@@ -72,6 +96,23 @@ export const publish = (tenantId, event) => {
       // The transport is gone; its own close handler will unsubscribe it.
     }
   }
+  return delivered;
+};
+
+/**
+ * Publishes an event to one school: everyone connected here, and — if a broker is attached — every
+ * other replica too.
+ *
+ * The return value counts *local* deliveries only, and deliberately so. It is what the tests assert
+ * on and what the caller can actually know; how many people another replica reached is not
+ * observable from here without waiting for a round trip, and no caller has ever needed it.
+ *
+ * Local delivery happens first and does not depend on the broker. A Redis outage should degrade a
+ * two-replica deployment to two independent ones, not silence both.
+ */
+export const publish = (tenantId, event) => {
+  const delivered = deliverLocally(tenantId, event);
+  broker?.publish?.(tenantId, event);
   return delivered;
 };
 

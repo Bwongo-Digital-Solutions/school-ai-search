@@ -296,7 +296,14 @@ volumes:
 # Named explicitly rather than left to Compose's implicit default, because those stacks live in
 # their own files: a default network belongs to the file that created it, and a second file gets a
 # second network. `name:` pins it so the integration files can join it as external.
+#
+# The value is the name Compose derives on its own for project `school-ai-search`, which is what
+# every existing deployment is already on. Pinning it rather than relying on that derivation is
+# still worth it: the implicit name follows the project name, so a renamed directory or a different
+# `-p` would silently move the app to a new network and strand the integration stacks on the old
+# one. Changing this value has the same effect, so it should not be changed — renaming it is what
+# produced "network school-ai-search_default has active endpoints" on an existing deployment.
 networks:
   default:
-    name: eschool_net
+    name: school-ai-search_default
   

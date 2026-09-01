@@ -162,10 +162,10 @@
 }
 
 .footWarning {
-  color: #8e6a00;
+  color: $caution-text;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .modal {
     :global(.cds--modal-container),
     :global(.cds--modal-header),

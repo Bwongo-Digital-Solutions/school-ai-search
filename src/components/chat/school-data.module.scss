@@ -128,7 +128,7 @@
   @include type.type-style('label-01');
   margin: 0;
   padding-inline-start: layout.$spacing-06;
-  color: #8e6a00;
+  color: $caution-text;
   display: flex;
   flex-direction: column;
   gap: layout.$spacing-02;
@@ -140,7 +140,7 @@
   padding: layout.$spacing-07;
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .screen {
     background-color: $ui-01-dark;
   }

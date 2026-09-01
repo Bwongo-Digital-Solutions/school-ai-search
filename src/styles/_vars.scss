@@ -8,27 +8,52 @@
 // The layering is the part that matters most and the part that was missing: a grey page carrying
 // white cards with a hairline border. Without it every surface is the same surface and nothing
 // reads as a distinct thing.
+//
+// ---------------------------------------------------------------------------------------------
+// These are `var(--cds-*)` references, not hex literals, and that is the whole point.
+//
+// They used to be Sass literals — `$ui-01: #f4f4f4` — which meant they were compiled into the
+// bundle and could not respond to a theme change by construction. Dark mode was then hand-written a
+// second time, as ~190 override rules across 38 stylesheets, every one of them behind a selector
+// that (see below) matched nothing.
+//
+// Pointing each role at the Carbon token that already means that role deletes both problems at
+// once: light stays pixel-identical, dark comes from Carbon's own g100 palette, and a stylesheet
+// that uses `$ui-02` is theme-aware without knowing that themes exist. The values below are chosen
+// so the light rendering is unchanged from the literals they replace — the two exceptions are
+// called out where they occur.
+// ---------------------------------------------------------------------------------------------
 
 // Surfaces, lightest content to darkest chrome.
-$ui-background: #ffffff; // inside a card
-$ui-01: #f4f4f4; // the page behind the cards
-$ui-02: #ffffff; // a card
-$ui-03: #e0e0e0; // hairline borders and dividers
-$ui-04: #8d8d8d; // icon strokes on grey
-$ui-05: #161616; // strongest text
-$field-01: #f4f4f4; // the fill behind a text input
+$ui-background: var(--cds-layer-01); //  light #ffffff  · inside a card
+$ui-01: var(--cds-background); //        light #f4f4f4  · the page behind the cards
+$ui-02: var(--cds-layer-01); //          light #ffffff  · a card
+$ui-03: var(--cds-border-subtle-01); //  light #e0e0e0  · hairline borders and dividers
+$ui-04: var(--cds-border-strong-01); //  light #8d8d8d  · icon strokes on grey
+$ui-05: var(--cds-text-primary); //      light #161616  · strongest text
+$field-01: var(--cds-field-02); //       light #f4f4f4  · the fill behind a text input
 
 // Text, in descending emphasis.
-$text-01: #161616;
-$text-02: #525252; // section titles, secondary copy — the workhorse
-$text-03: #a8a8a8; // captions, placeholders
+$text-01: var(--cds-text-primary); //    light #161616
+$text-02: var(--cds-text-secondary); //  light #525252  · section titles, secondary copy
+// Changed value, deliberately: this was #a8a8a8, which is 2.38:1 on white and fails WCAG AA for
+// small text — and captions and placeholders are exactly where small text lives. Carbon's helper
+// token is #6f6f6f in light (5.02:1) and #a8a8a8 in dark, where the old value was always headed.
+$text-03: var(--cds-text-helper); //     light #6f6f6f  · captions, placeholders
 
-// Status. Carbon's own values, so a Tag and a hand-written rule agree.
-$support-success: #24a148;
-$support-info: #0043ce;
-$support-warning: #f1c21b;
-$support-error: #da1e28;
-$warning-background: #fff8e1;
+// Status. Carbon's own tokens rather than its values copied out, so a Tag and a hand-written rule
+// agree in both themes — Carbon brightens success, info and error for a dark ground, which a copied
+// hex could not do. Warning is the same yellow in both; it reads on either.
+$support-success: var(--cds-support-success); // light #24a148 · dark #42be65
+$support-info: var(--cds-support-info); //       light #0043ce · dark #4589ff
+$support-warning: var(--cds-support-warning); // #f1c21b in both
+$support-error: var(--cds-support-error); //     light #da1e28 · dark #fa4d56
+
+// Tints Carbon has no token for: the faint background behind a warning row. Defined as an app-level
+// custom property in styles/app-tokens.scss so it can flip with the theme like everything above.
+$warning-background: var(--app-warning-background);
+$caution-text: var(--app-caution-text); //   the amber used for a "fair" band and similar
+$caution-strong: var(--app-caution-strong); // its louder sibling, for a value that must be noticed
 
 // The brand is a runtime value: each school sets its own colour under Settings, and it already
 // drives every report card and receipt. src/lib/brand.ts writes --brand-01/02/03 onto the document
@@ -40,8 +65,16 @@ $brand-01-fallback: #2952a3;
 $brand-02-fallback: #1d3a75;
 $brand-03-fallback: #3a6bc7;
 
-// Dark mode. Carbon's g100 tokens do the heavy lifting; these are the same roles inverted, applied
-// under [data-carbon-theme='g100'] wherever a rule needs a literal rather than a --cds- token.
+// Dark-mode literals, kept only for the handful of rules that genuinely need a value rather than a
+// role — a scrim, a gradient stop, something layered over an image. Everything else should use the
+// tokens above and get dark for free.
+//
+// A dark override belongs under `:global(.cds--g100)`. It has to be that CLASS, not
+// `[data-carbon-theme='g100']`: the attribute is Carbon v10's API and this app is on v11, whose
+// <Theme> emits a class instead. Every dark rule in this codebase once sat behind that attribute,
+// so dark mode appeared to work only for Carbon's own components while ~190 correct rules did
+// nothing. If a dark rule looks right and has no effect, check the built CSS for `.cds--g100`
+// before looking anywhere else.
 $ui-01-dark: #161616;
 $ui-02-dark: #262626;
 $ui-03-dark: #393939;

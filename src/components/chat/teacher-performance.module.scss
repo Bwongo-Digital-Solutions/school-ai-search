@@ -126,7 +126,7 @@
   min-inline-size: min(14rem, 100%);
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .subject,
   .classRow,
   .assign {

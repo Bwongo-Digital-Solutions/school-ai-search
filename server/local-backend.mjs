@@ -27,7 +27,7 @@ import {
   loadCredentialOverrides,
   saveProviderCredential,
 } from './services/provider-credentials.mjs';
-import { authenticateRequest, requireRole, resolveActor } from './auth/actor.mjs';
+import { authenticateRequest, requirePost, requireRole, resolveActor } from './auth/actor.mjs';
 import {
   ACCOUNT_ADMIN_ROLES,
   ALL_STAFF_ROLES,
@@ -36,7 +36,7 @@ import {
   TEACHING_ROLES,
   USER_ROLES,
 } from './auth/roles.mjs';
-import { publish, presence as busPresence } from './events/bus.mjs';
+import { attachBroker, deliverRemote, presence as busPresence, publish } from './events/bus.mjs';
 import { handleEventsRequest, isEventsRequest, useAudienceClause } from './events/sse.mjs';
 import { messageEvent, presenceEvent, readEvent } from './events/audience.mjs';
 import {
@@ -79,6 +79,7 @@ import { answerChatMessage } from './agent/chat.mjs';
 import { handleMcpServerRequest } from './mcp/server.mjs';
 import { BACKUP_ACTIONS, handleBackupFunction, readBackupFile } from './services/backup.mjs';
 import { startBackupScheduler } from './services/backup-scheduler.mjs';
+import { startEventBroker } from './events/broker.mjs';
 import { DATA_TRANSFER_ACTIONS, handleDataTransferFunction } from './services/data-transfer.mjs';
 import { INTEGRATION_ACTIONS, handleIntegrationsFunction } from './services/integrations.mjs';
 import { handleFeesFunction } from './services/fees.mjs';
@@ -1926,7 +1927,15 @@ const postStaffMessage = async (database, {
   return inserted.rows[0];
 };
 
-/** Fire-and-forget event notice; a failure here must never break the action that caused it. */
+/**
+ * Fire-and-forget event notice; a failure here must never break the action that caused it.
+ *
+ * The caller must pass `tenantId`, and every one of them now does. Without it postStaffMessage
+ * writes the row and silently skips the publish — which is precisely what used to happen here, so
+ * the three alerts most worth being live (a gate pass granted, a student turned back at the gate, a
+ * student turned away from an exam) reached the askari and the office only on their next inbox
+ * reload. The row was always durable; the notification simply never arrived.
+ */
 const notifyStaff = async (database, payload) => {
   try {
     await postStaffMessage(database, { ...payload, category: 'event' });
@@ -2086,7 +2095,19 @@ const handleMessagesFunction = async (database, body = {}, { actor, tenantId } =
  * thing, and a student scanned after being marked absent should end up present, not rejected by
  * the unique index.
  */
-const handleRollCallFunction = async (database, body = {}) => {
+const handleRollCallFunction = async (database, body = {}, { actor: authenticated, tenantId } = {}) => {
+  // Marking a register is teaching work — the person in front of the class, or the office.
+  //
+  // This route had no gate of any kind: no actor reached it and it checked nothing, so
+  // anyone who could reach the API could do this. The three-state actor applies as
+  // everywhere else — undefined is an internal call and is not checked, null is a real
+  // request with no session and is refused, an object is checked.
+  const actor = resolveActor(authenticated, body);
+  if (authenticated !== undefined) {
+    const refusal = requirePost(actor, { roles: TEACHING_ROLES, designations: [] });
+    if (refusal) return refusal;
+  }
+
   const action = body.action || 'register';
   const date = body.date || todayIso();
 
@@ -2194,7 +2215,20 @@ const handleRollCallFunction = async (database, body = {}) => {
 };
 
 /** The clearance an invigilator checks at the exam room door, and their verdict on it. */
-const handleExamClearanceFunction = async (database, body = {}) => {
+const handleExamClearanceFunction = async (database, body = {}, { actor: authenticated, tenantId } = {}) => {
+  // Two posts meet here: whoever keeps the books grants a clearance, and the invigilator at the
+  // exam room door reads it. Both need the endpoint.
+  //
+  // This route had no gate of any kind: no actor reached it and it checked nothing, so
+  // anyone who could reach the API could do this. The three-state actor applies as
+  // everywhere else — undefined is an internal call and is not checked, null is a real
+  // request with no session and is refused, an object is checked.
+  const actor = resolveActor(authenticated, body);
+  if (authenticated !== undefined) {
+    const refusal = requirePost(actor, { roles: [...TEACHING_ROLES, ...FINANCE_ROLES], designations: [] });
+    if (refusal) return refusal;
+  }
+
   const action = body.action || 'status';
 
   if (action === 'grant') {
@@ -2269,6 +2303,7 @@ const handleExamClearanceFunction = async (database, body = {}) => {
     );
     if (decision === 'rejected') {
       await notifyStaff(database, {
+        tenantId,
         audienceKind: 'role', audienceValue: 'admin', priority: 'high', studentId: student.id,
         subject: `${student.first_name} ${student.last_name} turned away from an exam`,
         body: `${student.first_name} ${student.last_name} (${student.student_id}) was not admitted`
@@ -2314,7 +2349,21 @@ const activeClearanceFor = async (database, studentId) => {
 };
 
 /** The permission slip a teacher, matron or admin issues before a student may leave. */
-const handleGatePermissionFunction = async (database, body = {}) => {
+const handleGatePermissionFunction = async (database, body = {}, { actor: authenticated, tenantId } = {}) => {
+  // Issuing a permission is an act of authority over a child leaving the premises. The matron
+  // holds it for the dormitories; the askari at the gate deliberately does not — whoever checks a
+  // pass must not also be the person who wrote it.
+  //
+  // This route had no gate of any kind: no actor reached it and it checked nothing, so
+  // anyone who could reach the API could do this. The three-state actor applies as
+  // everywhere else — undefined is an internal call and is not checked, null is a real
+  // request with no session and is refused, an object is checked.
+  const actor = resolveActor(authenticated, body);
+  if (authenticated !== undefined) {
+    const refusal = requirePost(actor, { roles: [...TEACHING_ROLES, ...FINANCE_ROLES], designations: ['matron'] });
+    if (refusal) return refusal;
+  }
+
   const action = body.action || 'grant';
 
   if (action === 'grant') {
@@ -2349,6 +2398,7 @@ const handleGatePermissionFunction = async (database, body = {}) => {
     );
 
     await notifyStaff(database, {
+      tenantId,
       audienceKind: 'designation', audienceValue: 'askari', studentId: student.id,
       subject: `Gate pass for ${student.first_name} ${student.last_name}`,
       body: `${grantedBy} allowed ${student.first_name} ${student.last_name} (${student.student_id}) `
@@ -2455,7 +2505,19 @@ const activePermissionFor = async (database, studentId) => {
  * back at the gate is precisely what a security log is for — and only approved movements move the
  * student in or out, so a declined exit leaves them on the premises.
  */
-const handleGatePassFunction = async (database, body = {}) => {
+const handleGatePassFunction = async (database, body = {}, { actor: authenticated, tenantId } = {}) => {
+  // Checking a student through the gate. The askari's screen, and the office's record of it.
+  //
+  // This route had no gate of any kind: no actor reached it and it checked nothing, so
+  // anyone who could reach the API could do this. The three-state actor applies as
+  // everywhere else — undefined is an internal call and is not checked, null is a real
+  // request with no session and is refused, an object is checked.
+  const actor = resolveActor(authenticated, body);
+  if (authenticated !== undefined) {
+    const refusal = requirePost(actor, { roles: PRIVILEGED_ROLES, designations: ['askari'] });
+    if (refusal) return refusal;
+  }
+
   const student = await findStudentByCode(database, body.code);
   if (!student) return { error: 'No student matches that ID' };
 
@@ -2549,6 +2611,7 @@ const handleGatePassFunction = async (database, body = {}) => {
   const studentName = `${student.first_name} ${student.last_name}`;
   if (decision === 'declined') {
     await notifyStaff(database, {
+      tenantId,
       audienceKind: 'role', audienceValue: 'admin', priority: 'high', studentId: student.id,
       subject: `${studentName} turned back at the gate`,
       body: `${studentName} (${student.student_id}) was refused exit${
@@ -3174,7 +3237,19 @@ const handleTeacherPerformanceFunction = async (database, body = {}, { actor: au
   };
 };
 
-const handleGateLogFunction = async (database, body = {}) => {
+const handleGateLogFunction = async (database, body = {}, { actor: authenticated, tenantId } = {}) => {
+  // The record of who came and went. The office reads it; so does the gate that wrote it.
+  //
+  // This route had no gate of any kind: no actor reached it and it checked nothing, so
+  // anyone who could reach the API could do this. The three-state actor applies as
+  // everywhere else — undefined is an internal call and is not checked, null is a real
+  // request with no session and is refused, an object is checked.
+  const actor = resolveActor(authenticated, body);
+  if (authenticated !== undefined) {
+    const refusal = requirePost(actor, { roles: PRIVILEGED_ROLES, designations: ['askari'] });
+    if (refusal) return refusal;
+  }
+
   const limit = Math.min(Number(body.limit) || 50, 200);
   const params = [];
   let where = '';
@@ -3230,7 +3305,19 @@ const handleGateLogFunction = async (database, body = {}) => {
  * Marks a meal as served. Serving the same meal twice in a day is a re-scan of a student who
  * already ate, not a second helping, so the existing row is returned instead of a new one.
  */
-const handleMealRecordFunction = async (database, body = {}) => {
+const handleMealRecordFunction = async (database, body = {}, { actor: authenticated, tenantId } = {}) => {
+  // Serving a meal against a student's card.
+  //
+  // This route had no gate of any kind: no actor reached it and it checked nothing, so
+  // anyone who could reach the API could do this. The three-state actor applies as
+  // everywhere else — undefined is an internal call and is not checked, null is a real
+  // request with no session and is refused, an object is checked.
+  const actor = resolveActor(authenticated, body);
+  if (authenticated !== undefined) {
+    const refusal = requirePost(actor, { roles: PRIVILEGED_ROLES, designations: ['cook'] });
+    if (refusal) return refusal;
+  }
+
   const student = await findStudentByCode(database, body.code);
   if (!student) return { error: 'No student matches that ID' };
 
@@ -4103,6 +4190,9 @@ export const createAppRuntime = async ({
   controlDatabase = null,
   useInMemoryControl = false,
   provisionOptions = {},
+  // Injected by the tests so the broker can be exercised without a Redis. Left undefined in
+  // production, where startEventBroker opens its own connections from REDIS_URL.
+  eventBrokerClient = undefined,
 } = {}) => {
   const defaultDatabase = createDatabaseConnection({
     connectionString,
@@ -4158,6 +4248,16 @@ export const createAppRuntime = async ({
   // script quietly starts dumping databases; startBackupScheduler returns a no-op stop when off.
   const stopBackupScheduler = startBackupScheduler({ database: defaultDatabase, control, tenants });
 
+  // Cross-replica live events. Off unless REDIS_URL is set, in which case the bus keeps its
+  // in-process Map and gains nothing else — a single container needs no broker to carry a message
+  // between two functions in the same heap. `deliverRemote` fans an arriving event out locally
+  // without re-publishing it, so two replicas cannot bounce one between them.
+  const eventBroker = await startEventBroker({
+    createClient: eventBrokerClient,
+    onEvent: (tenant, event) => deliverRemote(tenant, event),
+  });
+  const detachBroker = eventBroker.enabled ? attachBroker(eventBroker) : () => {};
+
   return {
     database: defaultDatabase,
     control,
@@ -4169,8 +4269,10 @@ export const createAppRuntime = async ({
     async close() {
       // First, before any pool is closed: a sweep that woke up mid-shutdown would otherwise be
       // querying a database that is on its way out. It is also what keeps `node --test` from
-      // hanging on a live interval.
+      // hanging on a live interval — or, for the broker, on a live socket.
       stopBackupScheduler();
+      detachBroker();
+      await eventBroker.stop();
       await defaultDatabase.close();
       await tenants.close();
       if (control) await control.close();
@@ -4353,23 +4455,23 @@ export const createAppRuntime = async ({
       }
 
       if (method === 'POST' && pathname === '/api/functions/roll-call') {
-        const data = await handleRollCallFunction(database, body);
+        const data = await handleRollCallFunction(database, body, { actor, tenantId });
         return data?.error
-          ? { type: 'json', status: 400, body: { error: data.error, data: null } }
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/exam-clearance') {
-        const data = await handleExamClearanceFunction(database, body);
+        const data = await handleExamClearanceFunction(database, body, { actor, tenantId });
         return data?.error
-          ? { type: 'json', status: 400, body: { error: data.error, data: null } }
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/gate-permission') {
-        const data = await handleGatePermissionFunction(database, body);
+        const data = await handleGatePermissionFunction(database, body, { actor, tenantId });
         return data?.error
-          ? { type: 'json', status: 400, body: { error: data.error, data: null } }
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
       }
 
@@ -4386,21 +4488,23 @@ export const createAppRuntime = async ({
       }
 
       if (method === 'POST' && pathname === '/api/functions/gate-log') {
-        const data = await handleGateLogFunction(database, body);
-        return { type: 'json', status: 200, body: { data } };
+        const data = await handleGateLogFunction(database, body, { actor, tenantId });
+        return data?.error
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/gate-pass') {
-        const data = await handleGatePassFunction(database, body);
+        const data = await handleGatePassFunction(database, body, { actor, tenantId });
         return data?.error
-          ? { type: 'json', status: 400, body: { error: data.error, data: null } }
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/meal-record') {
-        const data = await handleMealRecordFunction(database, body);
+        const data = await handleMealRecordFunction(database, body, { actor, tenantId });
         return data?.error
-          ? { type: 'json', status: 400, body: { error: data.error, data: null } }
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
       }
 

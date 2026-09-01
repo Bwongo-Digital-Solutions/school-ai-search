@@ -714,8 +714,9 @@ integration_up() {
   detect_compose
 
   # The shared network belongs to the main stack, which has to exist before anything can join it.
-  if ! docker network inspect eschool_net >/dev/null 2>&1; then
-    echo "The eschool_net network does not exist yet — start the app first (option 3)." >&2
+  # The name is pinned in docker-compose.yml; keep the two in step.
+  if ! docker network inspect "${APP_NAME}_default" >/dev/null 2>&1; then
+    echo "The ${APP_NAME}_default network does not exist yet — start the app first (option 3)." >&2
     return 1
   fi
 

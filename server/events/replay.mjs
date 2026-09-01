@@ -11,30 +11,15 @@
  * guarantees a client can never receive by replay something it could not have seen by asking.
  */
 import { messageEvent } from './audience.mjs';
+import { decodeCursor } from './cursor.mjs';
+
+// Re-exported so the existing importers (sse.mjs, the tests) keep one place to reach for a cursor.
+export { encodeCursor, decodeCursor } from './cursor.mjs';
 
 // A reconnecting client that has been away for a long time should catch up, not receive a thousand
 // events at once. Beyond this it is cheaper and more honest for the client to reload its inbox.
 const MAX_REPLAY = 200;
 
-/**
- * The cursor is the last event a client saw: its creation time and its id.
- *
- * Time alone is not enough — two messages written in the same microsecond would make one of them
- * unreachable — and an id alone has no order, since ids are UUIDs. Serialised as `<iso>|<id>` so it
- * survives an SSE `Last-Event-ID` header, which is a single string.
- */
-export const encodeCursor = (createdAt, id) => {
-  const iso = createdAt instanceof Date ? createdAt.toISOString() : String(createdAt || '');
-  return iso && id ? `${iso}|${id}` : '';
-};
-
-export const decodeCursor = (cursor) => {
-  const [iso, id] = String(cursor || '').split('|');
-  if (!iso || !id) return null;
-
-  const at = new Date(iso);
-  return Number.isNaN(at.getTime()) ? null : { at: at.toISOString(), id };
-};
 
 /**
  * Every message addressed to this user that was created after the cursor.

@@ -53,6 +53,6 @@
   padding: layout.$spacing-05;
 }
 
-:global([data-carbon-theme='g100']) .audit {
+:global(.cds--g100) .audit {
   background-color: #161616;
 }

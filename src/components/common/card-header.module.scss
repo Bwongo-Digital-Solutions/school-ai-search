@@ -45,7 +45,7 @@
   }
 }
 
-:global([data-carbon-theme='g100']) {
+:global(.cds--g100) {
   .desktopHeader,
   .tabletHeader {
     background-color: $ui-02-dark;
