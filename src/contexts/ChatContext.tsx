@@ -33,6 +33,10 @@ export type ActiveView =
   | 'data'
   | 'elearning'
   | 'erp'
+  // Clubs and school requirements, which are one screen because they are one question at
+  // registration: what is this child joining, and what are they bringing.
+  | 'school-life'
+  | 'matron'
   | 'settings';
 
 

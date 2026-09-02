@@ -16,6 +16,8 @@ import SchoolDataWorkspace from './chat/SchoolDataWorkspace';
 import EmbeddedSystem from './chat/EmbeddedSystem';
 import InboxPanel from './chat/InboxPanel';
 import MonitoringDashboard from './chat/MonitoringDashboard';
+import SchoolLifeWorkspace from './chat/SchoolLifeWorkspace';
+import MatronDashboard from './chat/MatronDashboard';
 import TeacherPerformance from './chat/TeacherPerformance';
 import AppFooter from './common/AppFooter';
 import styles from './app-layout.module.scss';
@@ -85,15 +87,34 @@ const VIEW_ROLES: Partial<Record<ActiveView, readonly string[]>> = {
   data: PRIVILEGED_ROLES,
   elearning: [...TEACHING_ROLES, ...FINANCE_ROLES],
   erp: PRIVILEGED_ROLES,
+  // Clubs and requirements are part of a student's record, so they follow the roster.
+  'school-life': TEACHING_ROLES,
+  /* 'matron' is deliberately absent. This map keys on role, and a matron's role is support_staff —
+     the same as the cook's. Her screen is gated on the designation instead, in the branch below and
+     again on the server through requirePost. Listing her role here would open it to the cook. */
   users: ACCOUNT_ADMIN_ROLES,
   settings: ACCOUNT_ADMIN_ROLES,
 };
 
 const AppLayout: React.FC = () => {
   const { activeView } = useChatContext();
-  const { user, isAuthenticated, isSupportStaff } = useAuth();
+  const { user, isAuthenticated, isSupportStaff, isMatron } = useAuth();
 
   const renderMainContent = () => {
+    /* The matron is support staff, but she runs the dormitories: the head count at night, the sick
+       bay, the beds. Those are her whole job, and until now this screen handed her the fees panel
+       and nothing else. She gets her own small set; the askari and the cook are unchanged. */
+    if (isMatron) {
+      switch (activeView) {
+        case 'fees':
+          return <FeeStatusPanel />;
+        case 'messages':
+          return <InboxPanel />;
+        default:
+          return <MatronDashboard />;
+      }
+    }
+
     // Non-teaching support staff are limited to school fees payment status.
     if (isSupportStaff) {
       return <FeeStatusPanel />;
@@ -146,6 +167,12 @@ const AppLayout: React.FC = () => {
         return <EmbeddedSystem kind="elearning" />;
       case 'erp':
         return <EmbeddedSystem kind="erp" />;
+      case 'school-life':
+        return <SchoolLifeWorkspace />;
+      // An administrator or head teacher may open the dormitory screens too — somebody has to when
+      // the matron is off. The component checks the post again for itself.
+      case 'matron':
+        return <MatronDashboard />;
       case 'settings':
         return <SettingsPanel />;
       default:
