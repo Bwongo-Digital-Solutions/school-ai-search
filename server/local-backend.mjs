@@ -86,6 +86,7 @@ import { DATA_TRANSFER_ACTIONS, handleDataTransferFunction } from './services/da
 import { INTEGRATION_ACTIONS, handleIntegrationsFunction } from './services/integrations.mjs';
 import { handleFeesFunction } from './services/fees.mjs';
 import { handleStudentReportFunction, renderReport } from './services/student-report.mjs';
+import { startOfSchoolDay } from './services/school-day.mjs';
 import { handleStudentSummaryFunction } from './services/student-summary.mjs';
 import { handleCurriculumFunction } from './services/curriculum.mjs';
 import { handleDigitalExaminerFunction, loadPaper } from './services/digital-examiner.mjs';
@@ -1881,6 +1882,9 @@ const listInbox = async (database, user, { limit = 50 } = {}) => {
     audience_kind: row.audience_kind,
     audience_value: row.audience_value,
     student_id: row.student_id,
+    // What kind of event this is, when it is one. The gate keeper's app offers Approve and
+    // Reject on a gate permission without having to read the subject line.
+    event_type: row.event_type || '',
     created_at: row.created_at,
     read: Boolean(row.reader_read_at),
   }));
@@ -1895,7 +1899,7 @@ const listInbox = async (database, user, { limit = 50 } = {}) => {
 const postStaffMessage = async (database, {
   senderUserId = null, senderName = '', recipientUserId = null,
   audienceKind = 'all', audienceValue = '', subject, body,
-  priority = 'normal', category = 'message', studentId = null,
+  priority = 'normal', category = 'message', studentId = null, eventType = '',
   // Which school this belongs to, so the live event reaches that school's subscribers and no
   // other's. Absent for an internal caller with no request behind it, which simply publishes
   // nothing — the row is still written, and the inbox still shows it.
@@ -1905,13 +1909,13 @@ const postStaffMessage = async (database, {
     `
       INSERT INTO internal_messages
         (id, sender_user_id, sender_name, recipient_user_id, student_id, subject, body,
-         audience_kind, audience_value, priority, category)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         audience_kind, audience_value, priority, category, event_type)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       RETURNING *
     `,
     [
       randomUUID(), senderUserId, senderName, recipientUserId, studentId,
-      subject, body, audienceKind, audienceValue, priority, category,
+      subject, body, audienceKind, audienceValue, priority, category, eventType,
     ],
   );
 
@@ -2362,6 +2366,9 @@ const handleExamClearanceFunction = async (database, body = {}, { actor: authent
     return { admission: inserted.rows[0], clearance };
   }
 
+  /* Everyone cleared to leave today and not yet seen at the gate. This is the gate keeper's
+     working list: he opens it to answer "is anybody expected out?", which scanning one
+     student's card cannot tell him. */
   if (action === 'list') {
     const student = await findStudentByCode(database, body.code);
     if (!student) return { error: 'No student matches that ID' };
@@ -2448,6 +2455,7 @@ const handleGatePermissionFunction = async (database, body = {}, { actor: authen
     await notifyStaff(database, {
       tenantId,
       audienceKind: 'designation', audienceValue: 'askari', studentId: student.id,
+      eventType: 'gate_permission',
       subject: `Gate pass for ${student.first_name} ${student.last_name}`,
       body: `${grantedBy} allowed ${student.first_name} ${student.last_name} (${student.student_id}) `
         + `to travel to ${destination}. Reason: ${reason}.`,
@@ -2487,6 +2495,42 @@ const handleGatePermissionFunction = async (database, body = {}, { actor: authen
     });
 
     return { permission: updated.rows[0] };
+  }
+
+  if (action === 'pending') {
+    await expireStalePermissions(database);
+    const rows = await database.query(
+      `
+        SELECT p.id, p.reason, p.destination, p.granted_by, p.granted_at, p.valid_until,
+               p.expected_return,
+               s.id AS student_row_id, s.student_id AS student_number,
+               s.first_name, s.last_name, s.grade_level, s.class_section
+        FROM gate_permissions p
+        JOIN students s ON s.id = p.student_id
+        WHERE p.status = 'active' AND p.granted_at >= $1
+        ORDER BY p.granted_at DESC
+      `,
+      [startOfSchoolDay()],
+    );
+
+    return {
+      pending: rows.rows.map((row) => ({
+        id: row.id,
+        // The gate acts through the ordinary gate-pass endpoint, which accepts either the
+        // student number or this id as its code.
+        student_id: row.student_row_id,
+        student_number: row.student_number,
+        full_name: `${row.first_name} ${row.last_name}`,
+        grade_level: row.grade_level,
+        class_section: row.class_section,
+        reason: row.reason,
+        destination: row.destination,
+        granted_by: row.granted_by,
+        granted_at: row.granted_at,
+        valid_until: row.valid_until,
+        expected_return: row.expected_return,
+      })),
+    };
   }
 
   if (action === 'list') {
@@ -2533,6 +2577,27 @@ const handleGatePermissionFunction = async (database, body = {}, { actor: authen
 };
 
 /**
+ * Retires permissions that the day has overtaken: granted before the school day now running,
+ * or past an explicit valid_until.
+ *
+ * Applied when a permission is next read rather than by a timer at midnight. A gate runs on a
+ * server that gets switched off, and a sweep that was supposed to fire at midnight while the
+ * machine was down would leave yesterday's slips admitting students today. Reading is the one
+ * moment the answer has to be right, so that is where it is computed.
+ */
+const expireStalePermissions = async (database) => {
+  await database.query(
+    `
+      UPDATE gate_permissions
+      SET status = 'expired', closed_at = NOW()
+      WHERE status = 'active'
+        AND (granted_at < $1 OR (valid_until IS NOT NULL AND valid_until < NOW()))
+    `,
+    [startOfSchoolDay()],
+  );
+};
+
+/**
  * One named permission, but only if it is still open and really belongs to the student being
  * scanned — so a stale id from a list the gate loaded minutes ago cannot close somebody else's
  * slip, or reopen a decision already made.
@@ -2552,6 +2617,8 @@ const permissionByIdFor = async (database, permissionId, studentId) => {
 
 /** The most recent permission still good for a trip out, or null. */
 const activePermissionFor = async (database, studentId) => {
+  // A slip from yesterday must be refused at the gate, not merely hidden from the list.
+  await expireStalePermissions(database);
   const rows = await database.query(
     `
       SELECT * FROM gate_permissions
@@ -4214,6 +4281,38 @@ const handleReportCardRequest = async (database, pathname, searchParams, { metho
 
 const notFound = (message) => ({ type: 'json', status: 404, body: { error: message } });
 
+/**
+ * The parent-facing report: one PDF covering whichever of performance, attendance, fees,
+ * payment history and student details were asked for. `sections` is a comma-separated
+ * list; omitting it returns all of them.
+ *
+ * Restricted to staff who already hold the roster. It carries a family's marks and their
+ * payment history, which is more than a gate keeper or a cook has any reason to see.
+ *
+ * Distinct from `handleStudentReportRequest` above, which prints a single student's whole record
+ * from the summary screen. This one is what a guardian receives, so it takes a section list and
+ * lives on its own path; the two arrived on separate branches with the same name.
+ */
+const handleParentReportRequest = async (database, pathname, searchParams, { actor } = {}) => {
+  const match = pathname.match(/^\/api\/students\/([^/]+)\/report\.pdf$/);
+  if (!match) return null;
+
+  const refusal = requireRole(
+    resolveActor(actor, { requesterRole: searchParams.get('requesterRole') }),
+    ['admin', 'teacher'],
+  );
+  if (refusal) return { type: 'json', status: 403, body: refusal };
+
+  const rendered = await renderReport(database, {
+    code: decodeURIComponent(match[1]),
+    sections: searchParams.get('sections'),
+    generatedBy: searchParams.get('actorName') || '',
+  });
+  if (rendered.error) return notFound(rendered.error);
+
+  return pdfResponse(rendered.pdf, rendered.filename);
+};
+
 const handleIdCardRequest = async (database, pathname, searchParams, { actor } = {}) => {
   const qrMatch = pathname.match(/^\/api\/id-cards\/([^/]+)\.png$/);
   const singleCard = pathname.match(/^\/api\/id-cards\/([^/]+)\.pdf$/);
@@ -4850,6 +4949,11 @@ export const createAppRuntime = async ({
       const studentReportResponse = await handleStudentReportRequest(database, pathname, searchParams, { actor });
       if (studentReportResponse) {
         return studentReportResponse;
+      }
+
+      const parentReportResponse = await handleParentReportRequest(database, pathname, searchParams, { actor });
+      if (parentReportResponse) {
+        return parentReportResponse;
       }
 
       const idCardResponse = await handleIdCardRequest(database, pathname, searchParams, { actor });

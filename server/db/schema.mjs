@@ -785,6 +785,9 @@ ALTER TABLE internal_messages ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DE
 -- 'message' is staff writing to each other; 'event' is the system reporting something that
 -- happened. They share a feed because the bell is one bell.
 ALTER TABLE internal_messages ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'message';
+-- What kind of event a category='event' message reports. The gate keeper's app offers Approve and
+-- Reject on a gate permission alert, and needs to recognise one without matching on its wording.
+ALTER TABLE internal_messages ADD COLUMN IF NOT EXISTS event_type TEXT NOT NULL DEFAULT '';
 
 -- Read state per person, because one message now reaches many. The row on
 -- internal_messages could only ever describe a single reader.
@@ -880,7 +883,7 @@ CREATE TABLE IF NOT EXISTS gate_permissions (
   valid_until TIMESTAMPTZ,
   expected_return DATE,
   status TEXT NOT NULL DEFAULT 'active'
-    CHECK (status IN ('active', 'used', 'declined', 'cancelled')),
+    CHECK (status IN ('active', 'used', 'declined', 'cancelled', 'expired')),
   closed_at TIMESTAMPTZ,
   closed_by TEXT NOT NULL DEFAULT '',
   decline_reason TEXT NOT NULL DEFAULT ''
@@ -898,6 +901,19 @@ ALTER TABLE gate_passes ADD COLUMN IF NOT EXISTS permission_id TEXT
   REFERENCES gate_permissions(id) ON DELETE SET NULL;
 ALTER TABLE gate_passes ADD COLUMN IF NOT EXISTS destination TEXT NOT NULL DEFAULT '';
 ALTER TABLE gate_passes ADD COLUMN IF NOT EXISTS note TEXT NOT NULL DEFAULT '';
+
+-- A permission is good for the day it was granted and no longer. 'expired' is what an unused
+-- slip becomes once that day is over: distinct from 'cancelled', which someone decided, and from
+-- 'declined', which the gate decided. Nothing writes it directly — it is applied when a stale
+-- permission is next read, so a server that was switched off at midnight still gets it right.
+--
+-- The value is in the CREATE TABLE above for databases created from here on, and re-stated below
+-- for those that already exist. Both are needed: the inline constraint is auto-named by the
+-- engine, and the name differs between Postgres and the pg-mem database used in development, so
+-- dropping it by name cannot be relied on to be what widens the check.
+ALTER TABLE gate_permissions DROP CONSTRAINT IF EXISTS gate_permissions_status_check;
+ALTER TABLE gate_permissions ADD CONSTRAINT gate_permissions_status_check
+  CHECK (status IN ('active', 'used', 'declined', 'cancelled', 'expired'));
 
 -- Permission to sit an examination, granted by the bursar or an administrator once the
 -- student's obligations are settled. The invigilator does not grant clearance, they check
