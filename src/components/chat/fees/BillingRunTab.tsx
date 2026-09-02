@@ -7,11 +7,16 @@ import { classAndSection } from '@/lib/classLevels';
 import Field from '@/components/common/Field';
 import ModalShell from '@/components/common/ModalShell';
 import StatTile from '@/components/common/StatTile';
+import { TablePager } from '@/components/common';
+import { usePagedRows } from '@/hooks/usePagedRows';
 import type { BillingPreview, FeeStructure } from '@/types/feeAdmin';
 import { EmptyState, Panel, PrimaryButton, SecondaryButton, zebra } from './shared';
 import styles from '../tabs.module.scss';
 import { CheckmarkFilled, DocumentMultiple_01, Receipt, Search } from '@carbon/react/icons';
 import { InlineNotification, Tag } from '@carbon/react';
+
+/** Stable identity for "no preview yet", so the pager's memo does not churn on every render. */
+const NO_ROWS: BillingPreview['rows'] = [];
 
 const BillingRunTab = ({ runAction, onChanged }: { runAction: (label: string, handler: () => Promise<void>) => Promise<void>; onChanged: () => void }) => {
   const { settings } = useSettings();
@@ -59,6 +64,14 @@ const BillingRunTab = ({ runAction, onChanged }: { runAction: (label: string, ha
       await loadPreview();
       onChanged();
     });
+
+  // One row per student the run matched, so an unfiltered structure previews the whole school. The
+  // tiles above and the Bill button below stay whole-preview — they are the totals being committed,
+  // and a page's worth of them would be a number nobody wants.
+  const { page, setPage, pageCount, pageRows, firstOnPage, lastOnPage } = usePagedRows(
+    preview?.rows ?? NO_ROWS,
+    25,
+  );
 
   const selected = structures.find(structure => structure.id === feeStructureId);
 
@@ -138,7 +151,7 @@ const BillingRunTab = ({ runAction, onChanged }: { runAction: (label: string, ha
                   </tr>
                 </thead>
                 <tbody className={styles.rows}>
-                  {preview.rows.map(row => (
+                  {pageRows.map(row => (
                     <tr key={row.student_id} className={zebra}>
                       <td>
                         <p className={styles.strong}>{row.full_name}</p>
@@ -172,6 +185,20 @@ const BillingRunTab = ({ runAction, onChanged }: { runAction: (label: string, ha
                 </tbody>
               </table>
             </div>
+
+            {preview.rows.length > 0 && (
+              <div className={styles.tableFoot}>
+                <TablePager
+                  page={page}
+                  pageCount={pageCount}
+                  onPageChange={setPage}
+                  firstOnPage={firstOnPage}
+                  lastOnPage={lastOnPage}
+                  total={preview.rows.length}
+                  noun="student"
+                />
+              </div>
+            )}
           </Panel>
 
           <div className={styles.actionsEnd}>

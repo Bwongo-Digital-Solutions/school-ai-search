@@ -6,10 +6,15 @@ import { formatAmount, formatDate, todayIso } from '@/lib/format';
 import { classAndSection, classOptionsFor } from '@/lib/classLevels';
 import Field from '@/components/common/Field';
 import type { ArrearsReport } from '@/types/feeAdmin';
+import { TablePager } from '@/components/common';
+import { usePagedRows } from '@/hooks/usePagedRows';
 import { AGING_COLUMNS, EmptyState, Panel, SecondaryButton, StandingBadge, zebra } from './shared';
 import styles from '../tabs.module.scss';
 import { Download, Renew, Warning } from '@carbon/react/icons';
 import { InlineNotification } from '@carbon/react';
+
+/** Stable identity for "no report yet", so the pager's memo does not churn on every render. */
+const NO_ROWS: ArrearsReport['rows'] = [];
 
 const ArrearsReportTab = ({ runAction }: { runAction: (label: string, handler: () => Promise<void>) => Promise<void> }) => {
   const { user } = useAuth();
@@ -36,6 +41,13 @@ const ArrearsReportTab = ({ runAction }: { runAction: (label: string, handler: (
   }, [asOf, gradeLevel, minBalance, user]);
 
   useEffect(() => { load(); }, [load]);
+
+  // One row per student in arrears. The totals in the footer stay whole-report — they come from the
+  // server, and a page's worth of subtotals would be a different and much less useful number.
+  const { page, setPage, pageCount, pageRows, firstOnPage, lastOnPage } = usePagedRows(
+    report?.rows ?? NO_ROWS,
+    25,
+  );
 
   const exportCsv = () =>
     runAction('Exporting arrears report', async () => {
@@ -115,7 +127,7 @@ const ArrearsReportTab = ({ runAction }: { runAction: (label: string, handler: (
                 </tr>
               </thead>
               <tbody className={styles.rows}>
-                {report.rows.map(row => (
+                {pageRows.map(row => (
                   <tr key={row.student_id} className={zebra}>
                     <td>
                       <p className={styles.strong}>{row.full_name}</p>
@@ -168,6 +180,20 @@ const ArrearsReportTab = ({ runAction }: { runAction: (label: string, handler: (
                 </tr>
               </tfoot>
             </table>
+          </div>
+        )}
+
+        {report && report.rows.length > 0 && (
+          <div className={styles.tableFoot}>
+            <TablePager
+              page={page}
+              pageCount={pageCount}
+              onPageChange={setPage}
+              firstOnPage={firstOnPage}
+              lastOnPage={lastOnPage}
+              total={report.rows.length}
+              noun="student"
+            />
           </div>
         )}
       </Panel>

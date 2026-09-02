@@ -3,6 +3,8 @@ import Field from '@/components/common/Field';
 import { useAuth } from '@/contexts/AuthContext';
 import { useNotifications } from '@/contexts/NotificationContext';
 import { callDigitalExaminer } from '@/lib/teaching';
+import { TablePager } from '@/components/common';
+import { usePagedRows } from '@/hooks/usePagedRows';
 import { DangerButton, EmptyState, GhostButton, Panel, PrimaryButton, SecondaryButton } from '../fees/shared';
 import { QuestionCard } from './shared';
 import type { ExamQuestion } from '@/types/teaching';
@@ -69,6 +71,14 @@ const QuestionBankTab: React.FC<Props> = ({
     return needle ? questions.filter(question => question.subject_name.toLowerCase().includes(needle)) : questions;
   }, [filters.subjectName, questions]);
 
+  // Ten a page, not the twenty-five the tables use: these are full question cards with a stem, the
+  // options and a row of actions, so twenty-five is a scroll long enough to lose the filters at the
+  // top of the screen.
+  const { page, setPage, pageCount, pageRows, firstOnPage, lastOnPage } = usePagedRows(visible, 10);
+
+  // Counted over the whole bank rather than the page. A selection survives paging — picking six
+  // questions across three pages is the ordinary way to build a paper — so the marks total has to
+  // count all six or it contradicts the number of questions beside it.
   const selectedMarks = useMemo(
     () => visible.filter(question => selectedIds.includes(question.id)).reduce((total, q) => total + q.marks, 0),
     [selectedIds, visible],
@@ -126,7 +136,7 @@ const QuestionBankTab: React.FC<Props> = ({
         </Panel>
       ) : (
         <div className={styles.stackTight}>
-          {visible.map(question => (
+          {pageRows.map(question => (
             <div key={question.id} className={styles.actions}>
               <Checkbox
                 id={`select-${question.id}`}
@@ -188,6 +198,20 @@ const QuestionBankTab: React.FC<Props> = ({
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {visible.length > 0 && (
+        <div className={styles.tableFoot}>
+          <TablePager
+            page={page}
+            pageCount={pageCount}
+            onPageChange={setPage}
+            firstOnPage={firstOnPage}
+            lastOnPage={lastOnPage}
+            total={visible.length}
+            noun="question"
+          />
         </div>
       )}
     </div>

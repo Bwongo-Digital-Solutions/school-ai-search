@@ -40,10 +40,12 @@ import {
   PageHeader,
   StatRow,
   StatTile,
+  TablePager,
   TableSkeleton,
   WidgetCard,
 } from '@/components/common';
 import StudentIdScanner from './StudentIdScanner';
+import { usePagedRows } from '@/hooks/usePagedRows';
 import styles from './workspace.module.scss';
 import type { FeeStatus, StudentFeeStatus } from '@/types/fees';
 
@@ -132,6 +134,9 @@ const FeeStatusPanel: React.FC = () => {
       return `${row.full_name} ${row.student_number}`.toLowerCase().includes(query);
     });
   }, [rows, search, statusFilter]);
+
+  // One row per student, so this grows with the school exactly as the roster does.
+  const { page, setPage, pageCount, pageRows, firstOnPage, lastOnPage } = usePagedRows(filtered, 25);
 
   const totals = useMemo(() => {
     const currency = rows[0]?.currency || 'UGX';
@@ -270,9 +275,15 @@ const FeeStatusPanel: React.FC = () => {
 
         <WidgetCard>
           <CardHeader title="Students">
-            <span className={styles.note}>
-              Showing {filtered.length} of {rows.length}
-            </span>
+            <TablePager
+              page={page}
+              pageCount={pageCount}
+              onPageChange={setPage}
+              firstOnPage={firstOnPage}
+              lastOnPage={lastOnPage}
+              total={filtered.length}
+              noun="student"
+            />
           </CardHeader>
 
           {loading ? (
@@ -303,7 +314,7 @@ const FeeStatusPanel: React.FC = () => {
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {filtered.map((row) => {
+                  {pageRows.map((row) => {
                     const style = STATUS_STYLES[row.status] ?? STATUS_STYLES.no_invoices;
                     return (
                       <TableRow key={row.student_id}>

@@ -4,6 +4,8 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useNotifications } from '@/contexts/NotificationContext';
 import { callLessonPlanner, teachingDocumentUrl } from '@/lib/teaching';
 import { downloadFromUrl } from '@/lib/download';
+import { TablePager } from '@/components/common';
+import { usePagedRows } from '@/hooks/usePagedRows';
 import { DangerButton, EmptyState, Panel, SecondaryButton, zebra } from '../fees/shared';
 import { CitationList, StatusBadge, LESSON_STATUS_STYLES, TERM_OPTIONS } from './shared';
 import type { LessonPlan } from '@/types/teaching';
@@ -61,6 +63,10 @@ const MyPlansTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey })
     [load, onChanged, runAction, user],
   );
 
+  // A teacher plans every lesson of every week, and nothing here is ever archived — a year in, this
+  // is hundreds of rows even with the filters above applied.
+  const { page, setPage, pageCount, pageRows, firstOnPage, lastOnPage } = usePagedRows(plans, 25);
+
   return (
     <div className={styles.stack}>
       <Panel className={styles.padTight}>
@@ -91,7 +97,7 @@ const MyPlansTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey })
           <EmptyState message="No lesson plans yet. Draft one from the Plan Builder." />
         ) : (
           <div className={styles.rows}>
-            {plans.map(plan => (
+            {pageRows.map(plan => (
               <div key={plan.id} className={zebra}>
                 <button
                   type="button"
@@ -190,6 +196,20 @@ const MyPlansTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey })
                 )}
               </div>
             ))}
+          </div>
+        )}
+
+        {plans.length > 0 && (
+          <div className={styles.tableFoot}>
+            <TablePager
+              page={page}
+              pageCount={pageCount}
+              onPageChange={setPage}
+              firstOnPage={firstOnPage}
+              lastOnPage={lastOnPage}
+              total={plans.length}
+              noun="plan"
+            />
           </div>
         )}
       </Panel>

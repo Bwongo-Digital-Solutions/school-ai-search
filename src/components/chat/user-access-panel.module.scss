@@ -158,6 +158,15 @@
   justify-content: center;
 }
 
+// Under the staff list. Takes the same rule and gutters as a row, so the pager reads as the end of
+// the list rather than as something sitting under the card.
+.listFoot {
+  display: flex;
+  justify-content: flex-end;
+  padding: layout.$spacing-03 layout.$spacing-05;
+  border-top: 1px solid $ui-03;
+}
+
 .fields {
   display: flex;
   flex-direction: column;
@@ -181,7 +190,8 @@
     background-color: $ui-01-dark;
   }
 
-  .row {
+  .row,
+  .listFoot {
     border-top-color: $ui-03-dark;
   }
 

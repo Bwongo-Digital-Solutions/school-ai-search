@@ -5,6 +5,8 @@ import { callFees } from '@/lib/fees';
 import { formatDate, todayIso } from '@/lib/format';
 import { classAndSection, classOptionsFor } from '@/lib/classLevels';
 import Field from '@/components/common/Field';
+import { TablePager } from '@/components/common';
+import { usePagedRows } from '@/hooks/usePagedRows';
 import type { StandingRow } from '@/types/feeAdmin';
 import RatingCard from './RatingCard';
 import { EmptyState, Panel, SecondaryButton, StandingBadge, STANDING_OPTIONS, zebra } from './shared';
@@ -58,6 +60,11 @@ const FeeRatingsTab = ({
   }, [gradeLevel, reviewDueOnly, standing, user]);
 
   useEffect(() => { load(); }, [load]);
+
+  // One row per student, and the filters above are the server's, so an unfiltered school arrives
+  // whole. The review-due banner counts the whole list, not the page — it is a prompt to act on
+  // everything outstanding, and a per-page count would understate it.
+  const { page, setPage, pageCount, pageRows, firstOnPage, lastOnPage } = usePagedRows(rows, 25);
 
   const reviewsDue = rows.filter(row => row.override?.review_due).length;
 
@@ -129,7 +136,7 @@ const FeeRatingsTab = ({
                 </tr>
               </thead>
               <tbody className={styles.rows}>
-                {rows.map(row => (
+                {pageRows.map(row => (
                   <React.Fragment key={row.student_id}>
                     <tr className={zebra}>
                       <td>
@@ -200,6 +207,20 @@ const FeeRatingsTab = ({
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {!loading && rows.length > 0 && (
+          <div className={styles.tableFoot}>
+            <TablePager
+              page={page}
+              pageCount={pageCount}
+              onPageChange={setPage}
+              firstOnPage={firstOnPage}
+              lastOnPage={lastOnPage}
+              total={rows.length}
+              noun="student"
+            />
           </div>
         )}
       </Panel>

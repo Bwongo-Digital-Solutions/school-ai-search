@@ -128,6 +128,22 @@
   white-space: nowrap;
 }
 
+// Under a paged table or list: the pager at the trailing edge, where the eye ends up after reading
+// the last row, wrapping rather than squeezing on a phone. Sits outside `.tableWrap` so it stays
+// put when a wide table scrolls sideways, and takes the cells' inline gutters so it lines up with
+// the column above it.
+.tableFoot {
+  @include type.type-style('label-01');
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: layout.$spacing-03;
+  color: $text-03;
+  margin: layout.$spacing-03 0 0;
+  padding: 0 layout.$spacing-05 layout.$spacing-04;
+}
+
 // Hand-built rows, where a table would be too rigid.
 .rows {
   margin: 0;
@@ -182,7 +198,8 @@
   .label,
   .secondary,
   .note,
-  .empty {
+  .empty,
+  .tableFoot {
     color: $text-03-dark;
   }
 

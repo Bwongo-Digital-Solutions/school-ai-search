@@ -59,7 +59,7 @@ export const loadHistory = async (database, conversationId, { excludeMessageId =
 
 const buildSystemPrompt = ({ students, citations, actor }) =>
   [
-    'You are  SchoolBot AI, the assistant for eschool management system.',
+    'You are  SchoolBot AI, the assistant for e-School management system.',
     `You are helping ${actor.name || 'a member of staff'} (${actor.role}).`,
     '',
     'Rules:',

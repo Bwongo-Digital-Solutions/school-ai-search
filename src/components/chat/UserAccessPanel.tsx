@@ -23,7 +23,8 @@ import {
   UserFollow,
   UserRole as UserRoleIcon,
 } from '@carbon/react/icons';
-import { AccessDenied, CardHeader, EmptyState, PageHeader, WidgetCard } from '@/components/common';
+import { AccessDenied, CardHeader, EmptyState, PageHeader, TablePager, WidgetCard } from '@/components/common';
+import { usePagedRows } from '@/hooks/usePagedRows';
 import styles from './user-access-panel.module.scss';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
@@ -66,6 +67,10 @@ const UserAccessPanel: React.FC = () => {
   // Accounts predating the approval feature have no approval_status; treat them as approved.
   const pending = useMemo(() => users.filter(u => u.approval_status === 'pending'), [users]);
   const active = useMemo(() => users.filter(u => u.approval_status !== 'pending'), [users]);
+
+  // Only the staff list pages. The approval queue above is something an administrator drains rather
+  // than browses, and burying half of it behind a pager would be hiding work that is waiting.
+  const { page, setPage, pageCount, pageRows, firstOnPage, lastOnPage } = usePagedRows(active, 25);
 
   const handleRoleChange = async (userId: string, role: UserRole) => {
     setSavingUserId(userId);
@@ -253,7 +258,7 @@ const UserAccessPanel: React.FC = () => {
             ) : active.length === 0 ? (
               <EmptyState headerTitle="Staff" displayText="approved accounts" />
             ) : (
-              active.map((person) => {
+              pageRows.map((person) => {
                 // You cannot delete the account you are signed in with — the server refuses it, and
                 // hiding the button avoids offering an action that can only fail.
                 const isSelf = currentUser?.id === person.id;
@@ -309,6 +314,20 @@ const UserAccessPanel: React.FC = () => {
                   </div>
                 );
               })
+            )}
+
+            {!loading && active.length > 0 && (
+              <div className={styles.listFoot}>
+                <TablePager
+                  page={page}
+                  pageCount={pageCount}
+                  onPageChange={setPage}
+                  firstOnPage={firstOnPage}
+                  lastOnPage={lastOnPage}
+                  total={active.length}
+                  noun="account"
+                />
+              </div>
             )}
           </WidgetCard>
         </div>

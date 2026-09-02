@@ -4,8 +4,9 @@ import { useChatContext } from '@/contexts/ChatContext';
 import { callFees } from '@/lib/fees';
 import { formatAmount, formatDate } from '@/lib/format';
 import Field from '@/components/common/Field';
-import { StudentPicker } from '@/components/common';
+import { StudentPicker, TablePager } from '@/components/common';
 import ModalShell from '@/components/common/ModalShell';
+import { usePagedRows } from '@/hooks/usePagedRows';
 import type { Bursary, FeeStructure } from '@/types/feeAdmin';
 import { EmptyState, Panel, PrimaryButton, SecondaryButton, zebra } from './shared';
 import styles from '../tabs.module.scss';
@@ -56,6 +57,10 @@ const BursariesTab = ({ runAction, onChanged }: { runAction: (label: string, han
   }, [user]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Awards accumulate — one row each, never retired, and a school running sibling discounts has one
+  // for a good share of the roster.
+  const { page, setPage, pageCount, pageRows, firstOnPage, lastOnPage } = usePagedRows(bursaries, 25);
 
   const set = (key: keyof FormState) => (value: unknown) =>
     setForm(current => (current ? { ...current, [key]: value } as FormState : current));
@@ -113,7 +118,7 @@ const BursariesTab = ({ runAction, onChanged }: { runAction: (label: string, han
                 </tr>
               </thead>
               <tbody className={styles.rows}>
-                {bursaries.map(bursary => (
+                {pageRows.map(bursary => (
                   <tr key={bursary.id} className={zebra}>
                     <td>
                       <p className={styles.strong}>{bursary.full_name}</p>
@@ -188,6 +193,21 @@ const BursariesTab = ({ runAction, onChanged }: { runAction: (label: string, han
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {!loading && bursaries.length > 0 && (
+          <div className={styles.tableFoot}>
+            <TablePager
+              page={page}
+              pageCount={pageCount}
+              onPageChange={setPage}
+              firstOnPage={firstOnPage}
+              lastOnPage={lastOnPage}
+              total={bursaries.length}
+              noun="bursary"
+              nounPlural="bursaries"
+            />
           </div>
         )}
       </Panel>

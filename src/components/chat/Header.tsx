@@ -206,7 +206,7 @@ const Header: React.FC = () => {
   return (
     <>
       <Theme theme="g100">
-        <CarbonHeader aria-label="eSchool" className={styles.header}>
+        <CarbonHeader aria-label="e-School" className={styles.header}>
           <SkipToContent />
           <HeaderMenuButton
             aria-label={navExpanded ? 'Close navigation' : 'Open navigation'}

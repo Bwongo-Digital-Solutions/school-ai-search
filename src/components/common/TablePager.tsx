@@ -13,6 +13,8 @@ interface TablePagerProps {
   total?: number;
   /** What is being counted, for the range text. Singular; pluralised by adding an s. */
   noun?: string;
+  /** Override when adding an s is wrong — "bursaries", not "bursarys". */
+  nounPlural?: string;
 }
 
 /**
@@ -35,16 +37,18 @@ export const TablePager: React.FC<TablePagerProps> = ({
   lastOnPage,
   total,
   noun,
+  nounPlural,
 }) => {
   const hasRange = typeof firstOnPage === 'number' && typeof lastOnPage === 'number' && typeof total === 'number';
+  const plural = nounPlural || (noun ? `${noun}s` : '');
 
   return (
     <div className={styles.pager}>
       {hasRange && (
         <span className={styles.range}>
           {total === 0
-            ? `No ${noun ? `${noun}s` : 'items'}`
-            : `${firstOnPage}–${lastOnPage} of ${total}${noun ? ` ${total === 1 ? noun : `${noun}s`}` : ''}`}
+            ? `No ${plural || 'items'}`
+            : `${firstOnPage}–${lastOnPage} of ${total}${noun ? ` ${total === 1 ? noun : plural}` : ''}`}
         </span>
       )}
 

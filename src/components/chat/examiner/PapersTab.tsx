@@ -4,6 +4,8 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useNotifications } from '@/contexts/NotificationContext';
 import { callDigitalExaminer, teachingDocumentUrl } from '@/lib/teaching';
 import { downloadFromUrl } from '@/lib/download';
+import { TablePager } from '@/components/common';
+import { usePagedRows } from '@/hooks/usePagedRows';
 import { DangerButton, EmptyState, Panel, PrimaryButton, SecondaryButton, zebra } from '../fees/shared';
 import { currentAcademicYear } from '../lessons/shared';
 import type { ExamQuestion, GeneratedPaper } from '@/types/teaching';
@@ -103,6 +105,10 @@ const PapersTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey, pe
     [load, onChanged, publishForm, runAction, user],
   );
 
+  // Papers are never retired — every test and exam a teacher has ever assembled stays here — so this
+  // is the list in the examiner that grows without end.
+  const { page, setPage, pageCount, pageRows, firstOnPage, lastOnPage } = usePagedRows(papers, 25);
+
   return (
     <div className={styles.stack}>
       {pendingQuestionIds.length > 0 && (
@@ -159,7 +165,7 @@ const PapersTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey, pe
           <EmptyState message="No papers yet. Select approved questions in the Question Bank and assemble them into a paper." />
         ) : (
           <div className={styles.rows}>
-            {papers.map(paper => (
+            {pageRows.map(paper => (
               <div key={paper.id} className={zebra}>
                 <div className={styles.rowPadBetween}>
                   <button type="button" onClick={() => open(paper)} className={styles.grow}>
@@ -301,6 +307,20 @@ const PapersTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey, pe
                 )}
               </div>
             ))}
+          </div>
+        )}
+
+        {papers.length > 0 && (
+          <div className={styles.tableFoot}>
+            <TablePager
+              page={page}
+              pageCount={pageCount}
+              onPageChange={setPage}
+              firstOnPage={firstOnPage}
+              lastOnPage={lastOnPage}
+              total={papers.length}
+              noun="paper"
+            />
           </div>
         )}
       </Panel>
