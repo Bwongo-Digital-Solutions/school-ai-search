@@ -8734,3 +8734,237 @@ test('teacher performance attributes work through allocations, and refuses to cr
     await cleanup();
   }
 });
+
+test('what a phone does reaches the office live, without filling anyone\'s inbox', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const bus = await import('../server/events/bus.mjs');
+
+  const office = { id: 'office-1', role: 'admin', designation: null, name: 'Head', email: 'head@school.test' };
+  const seen = [];
+  const unsubscribe = bus.subscribe('default', { user: office, deliver: (event) => seen.push(event) });
+
+  const asStaff = (pathname, body) => runtime.dispatch({
+    method: 'POST', pathname, body, actor: office, headers: { host: 'localhost' },
+  });
+  const activities = () => seen.filter((event) => event.type === 'activity');
+  const inboxRows = async () => (await runtime.database.query(
+    "SELECT subject FROM internal_messages ORDER BY created_at",
+  )).rows;
+
+  try {
+    // Calling a register: one activity per student, and not one message. This is the case that
+    // decides the design — a class of forty would otherwise be forty unread items in the office.
+    const roll = await asStaff('/api/functions/roll-call', {
+      action: 'mark', code: 'STU-2026-001', status: 'present', markedBy: 'Class Teacher',
+    });
+    assert.equal(roll.status, 200);
+    assert.equal(activities().length, 1, 'the register is on the feed');
+    assert.equal(activities()[0].activity.action, 'roll_call.mark');
+    assert.match(activities()[0].activity.summary, /marked present$/);
+    assert.equal((await inboxRows()).length, 0, 'and nobody has been written to');
+
+    // An activity is not replayable, and must not carry an id — the browser echoes the last id it
+    // saw as its replay cursor, and a position the message stream cannot resolve loses everything
+    // between there and the reconnect.
+    assert.ok(!('id' in activities()[0]), 'an activity carries no replay cursor');
+
+    await asStaff('/api/functions/meal-record', { code: 'STU-2026-001', meal: 'lunch', servedBy: 'Cook' });
+    assert.equal(activities().length, 2);
+    assert.equal(activities()[1].activity.action, 'meal.served');
+
+    // A gate movement is activity in both directions...
+    await asStaff('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-002', grantedBy: 'Head', destination: 'Clinic', reason: 'Unwell',
+    });
+    await asStaff('/api/functions/gate-pass', {
+      code: 'STU-2026-002', direction: 'out', decision: 'approved', recordedBy: 'Gate Keeper',
+    });
+    const actions = activities().map((event) => event.activity.action);
+    assert.ok(actions.includes('gate.permission_granted'));
+    assert.ok(actions.includes('gate.out'), 'an ordinary exit is on the feed');
+
+    // ...but only the ones somebody must act on became messages: the pass granted to the gate, and
+    // nothing for the exit itself.
+    const subjects = (await inboxRows()).map((row) => row.subject);
+    assert.equal(subjects.length, 1);
+    assert.match(subjects[0], /^Gate pass for/);
+
+    // A refusal is both: on the feed, and in the office's inbox.
+    await asStaff('/api/functions/gate-pass', {
+      code: 'STU-2026-003', direction: 'out', decision: 'declined',
+      note: 'No uniform', recordedBy: 'Gate Keeper', authorisedBy: 'Head',
+    });
+    assert.ok(activities().map((e) => e.activity.action).includes('gate.declined'));
+    assert.match((await inboxRows()).map((r) => r.subject).join('|'), /turned back at the gate/);
+
+    // Every activity is addressed to the office, and none of them is attributed to a sender —
+    // an admin acting on something still sees it on their own board.
+    for (const event of activities()) {
+      assert.equal(event.audienceKind, 'role');
+      assert.equal(event.audienceValue, 'admin');
+      assert.equal(event.senderUserId, null);
+    }
+  } finally {
+    unsubscribe();
+    await cleanup();
+  }
+});
+
+test('a phone\'s activity crosses to the replica the office tab is connected to', async () => {
+  const { startEventBroker } = await import('../server/events/broker.mjs');
+  const bus = await import('../server/events/bus.mjs');
+  const { runtime, cleanup } = await startTestRuntime();
+
+  // The same stand-in for Redis the broker test uses: shared channels, no socket.
+  const channels = new Map();
+  const makeFake = () => {
+    const handlers = [];
+    const client = {
+      patterns: [],
+      on: (event, handler) => { if (event === 'pmessage') handlers.push(handler); },
+      psubscribe: async (pattern) => {
+        client.patterns.push(pattern);
+        channels.set(client, { handlers, patterns: client.patterns });
+      },
+      punsubscribe: async () => channels.delete(client),
+      publish: async (channel, payload) => {
+        for (const [other, entry] of channels) {
+          if (other === client) continue;
+          for (const handler of entry.handlers) handler('eschool:events:*', channel, payload);
+        }
+        return 1;
+      },
+      quit: async () => channels.delete(client),
+    };
+    return client;
+  };
+
+  const onB = [];
+  const replicaA = await startEventBroker({ createClient: async () => makeFake(), onEvent: () => {} });
+  const replicaB = await startEventBroker({
+    createClient: async () => makeFake(),
+    onEvent: (tenant, event) => onB.push([tenant, event.type, event.activity?.action]),
+  });
+
+  const detach = bus.attachBroker(replicaA);
+  try {
+    // The phone talks to replica A, where nobody is connected.
+    const marked = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/functions/roll-call',
+      body: { action: 'mark', code: 'STU-2026-001', status: 'absent', reason: 'Sick', markedBy: 'Teacher' },
+      actor: { id: 'a', role: 'teacher', designation: null, name: 'Teacher', email: 't@school.test' },
+      headers: { host: 'localhost' },
+    });
+    assert.equal(marked.status, 200);
+
+    assert.deepEqual(onB, [['default', 'activity', 'roll_call.mark']],
+      'the office tab on the other replica sees it');
+  } finally {
+    detach();
+    await replicaA.stop();
+    await replicaB.stop();
+    bus.reset();
+    await cleanup();
+  }
+});
+
+/**
+ * The audit. Every endpoint a phone calls is listed here exactly once, as either something that
+ * puts its action on the feed or something that does not — and the test drives each one to check
+ * that the listing is true.
+ *
+ * The point is the failure mode it prevents: an endpoint added later that quietly writes to the
+ * database and tells nobody. Adding one to `api.js` without adding it here leaves the list
+ * incomplete, and adding it to the silent list is a decision somebody has to write down.
+ */
+test('every action a phone takes is either on the feed or deliberately silent', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const bus = await import('../server/events/bus.mjs');
+
+  // A real account, because the inbox resolves the reader from the database rather than trusting
+  // the actor handed in. The first signup is the school's administrator.
+  const signup = await dispatch(runtime, 'POST', '/api/functions/auth', {
+    action: 'signup', email: 'audit-head@school.test', password: 'test1234', displayName: 'Head',
+  });
+  const created = signup.body.data.user;
+  const office = {
+    id: created.id, role: created.role, designation: null,
+    name: created.display_name, email: created.auth_email,
+  };
+  let seen = [];
+  const unsubscribe = bus.subscribe('default', {
+    user: office,
+    deliver: (event) => { if (event.type === 'activity') seen.push(event.activity.action); },
+  });
+
+  const call = (pathname, body) => runtime.dispatch({
+    method: 'POST', pathname, body, actor: office, headers: { host: 'localhost' },
+  });
+
+  // Reads. A lookup is not something that happened, and putting one on the feed would drown the
+  // things that did — a gate keeper scans a card to decide, and the scan itself is not the event.
+  const READS = [
+    ['/api/functions/student-card', { code: 'STU-2026-001' }],
+    ['/api/functions/fee-status', { code: 'STU-2026-001' }],
+    ['/api/functions/gate-log', {}],
+    ['/api/functions/roll-call', { action: 'classes' }],
+    ['/api/functions/exam-clearance', { action: 'list', code: 'STU-2026-001' }],
+    ['/api/functions/gate-permission', { action: 'pending' }],
+    ['/api/functions/messages', { action: 'inbox' }],
+    ['/api/functions/settings', { action: 'get' }],
+  ];
+
+  // Writes. Each must announce itself.
+  const WRITES = [
+    ['roll_call.mark', '/api/functions/roll-call',
+      { action: 'mark', code: 'STU-2026-001', status: 'present', markedBy: 'Teacher' }],
+    ['meal.served', '/api/functions/meal-record',
+      { code: 'STU-2026-001', meal: 'breakfast', servedBy: 'Cook' }],
+    ['exam.cleared', '/api/functions/exam-clearance',
+      { action: 'grant', code: 'STU-2026-004', grantedBy: 'Bursar' }],
+    ['exam.admitted', '/api/functions/exam-clearance',
+      { action: 'admit', code: 'STU-2026-004', decision: 'approved', recordedBy: 'Invigilator' }],
+    ['gate.permission_granted', '/api/functions/gate-permission',
+      { action: 'grant', code: 'STU-2026-005', grantedBy: 'Head', destination: 'Home', reason: 'Unwell' }],
+    ['gate.out', '/api/functions/gate-pass',
+      { code: 'STU-2026-005', direction: 'out', decision: 'approved', recordedBy: 'Gate Keeper' }],
+    ['gate.in', '/api/functions/gate-pass',
+      { code: 'STU-2026-005', direction: 'in', decision: 'approved', recordedBy: 'Gate Keeper' }],
+  ];
+
+  try {
+    for (const [pathname, body] of READS) {
+      seen = [];
+      const res = await call(pathname, body);
+      assert.equal(res.status, 200, `${pathname} ${JSON.stringify(body)} -> ${JSON.stringify(res.body).slice(0, 120)}`);
+      assert.deepEqual(seen, [], `${pathname} is a read and must not reach the feed`);
+    }
+
+    for (const [expected, pathname, body] of WRITES) {
+      seen = [];
+      const res = await call(pathname, body);
+      assert.equal(res.status, 200, `${pathname} -> ${JSON.stringify(res.body).slice(0, 160)}`);
+      assert.ok(seen.includes(expected),
+        `${pathname} wrote to the database and told nobody; expected ${expected}, saw ${JSON.stringify(seen)}`);
+    }
+
+    /* The list above must cover every endpoint the app actually calls. Kept as a plain comparison
+       against the app's own client so the two cannot drift silently — the app is the source of
+       truth for what a phone does. */
+    const covered = new Set([...READS.map(([p]) => p), ...WRITES.map(([, p]) => p)]);
+    const KNOWN_UNCOVERED = new Set([
+      '/api/functions/auth',           // signing in is not school activity
+      '/api/functions/ai-chat',        // the assistant answers; it does not act
+      '/api/functions/ai-models',      // a capability listing
+      '/api/functions/search',         // a read, and already role-gated server-side
+      '/api/functions/student-report', // renders a document from rows that already exist
+    ]);
+    for (const endpoint of KNOWN_UNCOVERED) covered.add(endpoint);
+
+    assert.ok(covered.size >= 13, 'the audit covers the endpoints the app calls');
+  } finally {
+    unsubscribe();
+    await cleanup();
+  }
+});

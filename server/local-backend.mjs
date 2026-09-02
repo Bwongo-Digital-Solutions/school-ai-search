@@ -38,7 +38,7 @@ import {
 } from './auth/roles.mjs';
 import { attachBroker, deliverRemote, presence as busPresence, publish } from './events/bus.mjs';
 import { handleEventsRequest, isEventsRequest, useAudienceClause } from './events/sse.mjs';
-import { messageEvent, presenceEvent, readEvent } from './events/audience.mjs';
+import { activityEvent, messageEvent, presenceEvent, readEvent } from './events/audience.mjs';
 import {
   clearedSessionCookie,
   issueSessionToken,
@@ -1944,6 +1944,27 @@ const notifyStaff = async (database, payload) => {
   }
 };
 
+/**
+ * Publishes what a member of staff just did, without writing anybody a message.
+ *
+ * Every action a phone takes ends up here, so that a live board can show the school working;
+ * `notifyStaff` is reserved for the ones somebody must actually read. A register produces one
+ * activity per student and no inbox entries at all, which is the difference between a feed worth
+ * watching and forty messages nobody will.
+ *
+ * Fire-and-forget in the same way as notifyStaff: the action has already succeeded by the time we
+ * get here, and a feed is never worth failing a write for. Without a tenantId there is no bus to
+ * publish to — the same silent skip the notifyStaff header warns about, so callers must pass one.
+ */
+const recordActivity = (tenantId, payload) => {
+  if (!tenantId) return;
+  try {
+    publish(tenantId, activityEvent(payload));
+  } catch (error) {
+    console.warn('Could not publish an activity event:', error instanceof Error ? error.message : error);
+  }
+};
+
 const handleMessagesFunction = async (database, body = {}, { actor, tenantId } = {}) => {
   const action = body.action || 'inbox';
 
@@ -2203,10 +2224,18 @@ const handleRollCallFunction = async (database, body = {}, { actor: authenticate
           [randomUUID(), student.id, date, status, trimmedText(body.reason), trimmedText(body.markedBy)],
         );
 
+    const fullName = `${student.first_name} ${student.last_name}`;
+    recordActivity(tenantId, {
+      action: 'roll_call.mark',
+      actor: resolveActor(authenticated, body),
+      studentId: student.id,
+      summary: `${fullName} marked ${status}`,
+      detail: { status, date, student_number: student.student_id },
+    });
+
     return {
       record: row.rows[0],
-      student: { id: student.id, student_id: student.student_id,
-        full_name: `${student.first_name} ${student.last_name}` },
+      student: { id: student.id, student_id: student.student_id, full_name: fullName },
       updated: Boolean(existing.rows[0]),
     };
   }
@@ -2259,6 +2288,14 @@ const handleExamClearanceFunction = async (database, body = {}, { actor: authent
         grantedBy, trimmedText(body.grantedByEmail), body.validUntil || null,
       ],
     );
+    recordActivity(tenantId, {
+      action: 'exam.cleared',
+      actor: resolveActor(authenticated, body),
+      studentId: student.id,
+      summary: `${student.first_name} ${student.last_name} cleared for exams`,
+      detail: { granted_by: grantedBy, student_number: student.student_id },
+    });
+
     return { clearance: inserted.rows[0] };
   }
 
@@ -2310,6 +2347,15 @@ const handleExamClearanceFunction = async (database, body = {}, { actor: authent
           + `${note ? `: ${note}` : '.'}`,
       });
     }
+
+    recordActivity(tenantId, {
+      action: decision === 'rejected' ? 'exam.refused' : 'exam.admitted',
+      actor: resolveActor(authenticated, body),
+      studentId: student.id,
+      summary: `${student.first_name} ${student.last_name} `
+        + `${decision === 'rejected' ? 'turned away from' : 'admitted to'} an exam`,
+      detail: { decision, note, student_number: student.student_id },
+    });
 
     return { admission: inserted.rows[0], clearance };
   }
@@ -2405,6 +2451,14 @@ const handleGatePermissionFunction = async (database, body = {}, { actor: authen
         + `to travel to ${destination}. Reason: ${reason}.`,
     });
 
+    recordActivity(tenantId, {
+      action: 'gate.permission_granted',
+      actor: resolveActor(authenticated, body),
+      studentId: student.id,
+      summary: `${grantedBy} cleared ${student.first_name} ${student.last_name} to leave`,
+      detail: { destination, reason, student_number: student.student_id },
+    });
+
     return { permission: inserted.rows[0] };
   }
 
@@ -2421,6 +2475,15 @@ const handleGatePermissionFunction = async (database, body = {}, { actor: authen
       [id, String(body.by || '').trim()],
     );
     if (!updated.rows[0]) return { error: 'No active permission with that id' };
+
+    recordActivity(tenantId, {
+      action: 'gate.permission_cancelled',
+      actor: resolveActor(authenticated, body),
+      studentId: updated.rows[0].student_id,
+      summary: 'A gate pass was withdrawn before it was used',
+      detail: { cancelled_by: String(body.by || '').trim(), permission_id: id },
+    });
+
     return { permission: updated.rows[0] };
   }
 
@@ -2618,6 +2681,24 @@ const handleGatePassFunction = async (database, body = {}, { actor: authenticate
         note ? `: ${note}` : '.'}`,
     });
   }
+
+  /* Every movement is activity; only a refusal is also a message. A board showing the gate wants
+     both directions, but the office does not need an inbox entry per child walking back in. */
+  recordActivity(tenantId, {
+    action: decision === 'declined' ? 'gate.declined' : `gate.${direction}`,
+    actor: resolveActor(authenticated, body),
+    studentId: student.id,
+    summary: decision === 'declined'
+      ? `${studentName} turned back at the gate`
+      : `${studentName} signed ${direction === 'out' ? 'out' : 'in'}`,
+    detail: {
+      direction,
+      decision,
+      student_number: student.student_id,
+      destination: inserted.rows[0].destination || '',
+      recorded_by: String(body.recordedBy || '').trim(),
+    },
+  });
 
   const onPremises = decision === 'declined' ? true : direction === 'in';
   return { pass: inserted.rows[0], permission: closedPermission, on_premises: onPremises };
@@ -3342,6 +3423,14 @@ const handleMealRecordFunction = async (database, body = {}, { actor: authentica
     `,
     [randomUUID(), student.id, mealDate, meal, String(body.servedBy || '').trim()],
   );
+
+  recordActivity(tenantId, {
+    action: 'meal.served',
+    actor,
+    studentId: student.id,
+    summary: `${student.first_name} ${student.last_name} served ${meal}`,
+    detail: { meal, meal_date: mealDate, student_number: student.student_id },
+  });
 
   return { meal: inserted.rows[0], already_served: false };
 };
