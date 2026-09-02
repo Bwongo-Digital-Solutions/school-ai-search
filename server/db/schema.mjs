@@ -785,6 +785,9 @@ ALTER TABLE internal_messages ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DE
 -- 'message' is staff writing to each other; 'event' is the system reporting something that
 -- happened. They share a feed because the bell is one bell.
 ALTER TABLE internal_messages ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'message';
+-- What kind of event a category='event' message reports. The gate keeper's app offers Approve and
+-- Reject on a gate permission alert, and needs to recognise one without matching on its wording.
+ALTER TABLE internal_messages ADD COLUMN IF NOT EXISTS event_type TEXT NOT NULL DEFAULT '';
 
 -- Read state per person, because one message now reaches many. The row on
 -- internal_messages could only ever describe a single reader.
@@ -880,7 +883,7 @@ CREATE TABLE IF NOT EXISTS gate_permissions (
   valid_until TIMESTAMPTZ,
   expected_return DATE,
   status TEXT NOT NULL DEFAULT 'active'
-    CHECK (status IN ('active', 'used', 'declined', 'cancelled')),
+    CHECK (status IN ('active', 'used', 'declined', 'cancelled', 'expired')),
   closed_at TIMESTAMPTZ,
   closed_by TEXT NOT NULL DEFAULT '',
   decline_reason TEXT NOT NULL DEFAULT ''
@@ -898,6 +901,19 @@ ALTER TABLE gate_passes ADD COLUMN IF NOT EXISTS permission_id TEXT
   REFERENCES gate_permissions(id) ON DELETE SET NULL;
 ALTER TABLE gate_passes ADD COLUMN IF NOT EXISTS destination TEXT NOT NULL DEFAULT '';
 ALTER TABLE gate_passes ADD COLUMN IF NOT EXISTS note TEXT NOT NULL DEFAULT '';
+
+-- A permission is good for the day it was granted and no longer. 'expired' is what an unused
+-- slip becomes once that day is over: distinct from 'cancelled', which someone decided, and from
+-- 'declined', which the gate decided. Nothing writes it directly — it is applied when a stale
+-- permission is next read, so a server that was switched off at midnight still gets it right.
+--
+-- The value is in the CREATE TABLE above for databases created from here on, and re-stated below
+-- for those that already exist. Both are needed: the inline constraint is auto-named by the
+-- engine, and the name differs between Postgres and the pg-mem database used in development, so
+-- dropping it by name cannot be relied on to be what widens the check.
+ALTER TABLE gate_permissions DROP CONSTRAINT IF EXISTS gate_permissions_status_check;
+ALTER TABLE gate_permissions ADD CONSTRAINT gate_permissions_status_check
+  CHECK (status IN ('active', 'used', 'declined', 'cancelled', 'expired'));
 
 -- Permission to sit an examination, granted by the bursar or an administrator once the
 -- student's obligations are settled. The invigilator does not grant clearance, they check
@@ -983,6 +999,122 @@ CREATE TABLE IF NOT EXISTS analytics_snapshots (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- A club, society or team the school runs, kept as a catalogue so that "who is in Debate?" is a
+-- question with an answer. The patron is the member of staff who runs it: named as free text
+-- because that is often a teacher who has no account, and linked to a user when they do have one.
+--
+-- capacity NULL means no limit, which is the common case; a number is enforced when somebody joins
+-- rather than by a constraint, so an oversubscribed club refuses the join with a sentence instead
+-- of raising a database error at the desk.
+CREATE TABLE IF NOT EXISTS clubs (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'general',
+  patron_name TEXT NOT NULL DEFAULT '',
+  patron_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  meeting_day TEXT NOT NULL DEFAULT '',
+  meeting_time TEXT NOT NULL DEFAULT '',
+  venue TEXT NOT NULL DEFAULT '',
+  capacity INTEGER,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Membership. A student may belong to several clubs, so this is a plain join table; leaving is
+-- recorded rather than deleted, because a club roster for last term is a real question and a row
+-- that has been removed cannot answer it.
+CREATE TABLE IF NOT EXISTS club_members (
+  id TEXT PRIMARY KEY,
+  club_id TEXT NOT NULL REFERENCES clubs(id) ON DELETE CASCADE,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  joined_on DATE NOT NULL,
+  left_on DATE,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'left')),
+  recorded_by TEXT NOT NULL DEFAULT ''
+);
+
+-- What a student is asked to bring to school: brooms and toilet paper as much as reams of paper.
+--
+-- Scoped by level first and class second, because the lists differ far more between a nursery and
+-- a secondary school than between two classes in one of them. grade_level NULL means the whole
+-- level, which is how most items are set; a value narrows it to one class, so Primary 7 can be
+-- asked for exam pads that Primary 1 is not. A school running both a primary and a secondary
+-- section keeps two separate lists without either leaking into the other.
+CREATE TABLE IF NOT EXISTS requirement_items (
+  id TEXT PRIMARY KEY,
+  item_name TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT 'scholastic'
+    CHECK (category IN ('cleaning', 'scholastic', 'personal', 'bedding', 'other')),
+  unit TEXT NOT NULL DEFAULT '',
+  quantity INTEGER NOT NULL DEFAULT 1,
+  school_level TEXT NOT NULL,
+  grade_level INTEGER,
+  mandatory BOOLEAN NOT NULL DEFAULT TRUE,
+  boarding_only BOOLEAN NOT NULL DEFAULT FALSE,
+  notes TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- One row per student per item per term: what was expected, what actually arrived, and who said
+-- so. 'waived' is deliberately distinct from 'brought' — a bursary student excused the reams did
+-- not bring them, and recording that as brought would lose the reason.
+CREATE TABLE IF NOT EXISTS student_requirements (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  requirement_id TEXT NOT NULL REFERENCES requirement_items(id) ON DELETE CASCADE,
+  term TEXT NOT NULL DEFAULT '',
+  academic_year TEXT NOT NULL DEFAULT '',
+  quantity_expected INTEGER NOT NULL DEFAULT 1,
+  quantity_brought INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'brought', 'waived')),
+  note TEXT NOT NULL DEFAULT '',
+  recorded_by TEXT NOT NULL DEFAULT '',
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- The sick bay book. A boarding school's matron keeps one on paper; this is the same book, so a
+-- parent asking "was my child seen last Tuesday?" has an answer, and an outbreak is visible as a
+-- pattern rather than as a stack of loose notes.
+--
+-- discharged_at NULL is what "still in the sick bay" means, which is the whole of the matron's
+-- current list; the outcome says how the episode ended.
+CREATE TABLE IF NOT EXISTS sick_bay_records (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  complaint TEXT NOT NULL,
+  treatment TEXT NOT NULL DEFAULT '',
+  temperature NUMERIC(4, 1),
+  admitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  discharged_at TIMESTAMPTZ,
+  outcome TEXT NOT NULL DEFAULT ''
+    CHECK (outcome IN ('', 'resting', 'discharged', 'referred', 'sent_home')),
+  referred_to TEXT NOT NULL DEFAULT '',
+  parent_informed BOOLEAN NOT NULL DEFAULT FALSE,
+  note TEXT NOT NULL DEFAULT '',
+  recorded_by TEXT NOT NULL DEFAULT ''
+);
+
+-- The dormitory head count, which is a different question from the class register: it is asked at
+-- night, by the matron, about beds rather than desks. 'sick_bay' and 'away' are separate from
+-- 'absent' because a matron who knows where a child is has not lost one.
+CREATE TABLE IF NOT EXISTS dorm_checks (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  room_id TEXT REFERENCES hostel_rooms(id) ON DELETE SET NULL,
+  -- Always written as a YYYY-MM-DD string from Node, never as SQL CURRENT_DATE. pg-mem stores
+  -- CURRENT_DATE as a full timestamp rather than truncating it to a day, so two checks minutes
+  -- apart land on different values, the uniqueness key below stops matching, and the upsert
+  -- quietly becomes a second row. meal_records passes todayIso() for the same reason.
+  check_date DATE NOT NULL,
+  check_name TEXT NOT NULL DEFAULT 'night' CHECK (check_name IN ('morning', 'night')),
+  status TEXT NOT NULL CHECK (status IN ('present', 'absent', 'sick_bay', 'away')),
+  note TEXT NOT NULL DEFAULT '',
+  recorded_by TEXT NOT NULL DEFAULT '',
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_students_last_name ON students(last_name);
 CREATE INDEX IF NOT EXISTS idx_students_grade_level ON students(grade_level);
 CREATE INDEX IF NOT EXISTS idx_conversations_updated_at ON conversations(updated_at DESC);
@@ -1028,6 +1160,32 @@ CREATE INDEX IF NOT EXISTS idx_exam_blueprints_subject ON exam_blueprints(subjec
 -- Backs a teacher's "my plans" listing and the scheme-of-work sequence for a term.
 CREATE INDEX IF NOT EXISTS idx_lesson_plans_owner ON lesson_plans(created_by, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_lesson_plans_scope ON lesson_plans(subject_id, grade_level, academic_year, term);
+-- One live membership per student per club. A student who left and rejoined reuses the row, so
+-- the pair stays unique while the history lives in joined_on / left_on and the status.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_club_members_unique ON club_members(club_id, student_id);
+CREATE INDEX IF NOT EXISTS idx_club_members_student ON club_members(student_id, status);
+-- Backs "the list for this student's level and class", which is read on every registration.
+CREATE INDEX IF NOT EXISTS idx_requirement_items_scope
+  ON requirement_items(school_level, grade_level, status);
+-- One row per student per item per term; the term is part of the key because the same broom is
+-- asked for again next term and both answers must survive.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_student_requirements_unique
+  ON student_requirements(student_id, requirement_id, term, academic_year);
+CREATE INDEX IF NOT EXISTS idx_student_requirements_student
+  ON student_requirements(student_id, status);
+-- The matron's current list is "admitted and not yet discharged", ordered by when they came in.
+CREATE INDEX IF NOT EXISTS idx_sick_bay_open ON sick_bay_records(discharged_at, admitted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sick_bay_student ON sick_bay_records(student_id, admitted_at DESC);
+-- One verdict per student per check per day, so marking twice corrects rather than duplicates.
+--
+-- Led by the date because the query that matters is "the whole dorm, tonight" — which this index
+-- then serves on its own. That is not merely tidy: a second, non-unique index over a subset of
+-- these columns is matched by pg-mem ahead of the unique one when resolving ON CONFLICT, and the
+-- upsert silently becomes an insert. The attendance table hit exactly this and works around it by
+-- dropping the redundant index (see ensureAttendanceUniqueness); here there is no need to create
+-- one at all.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dorm_checks_unique
+  ON dorm_checks(check_date, check_name, student_id);
 `;
 
 const STUDENT_COLUMNS = [
@@ -1060,7 +1218,26 @@ export const initializeDatabase = async (database, { httpClient = fetch } = {}) 
   await ensureAttendanceUniqueness(database);
   await ensureMessageReadUniqueness(database);
   await ensureMessageIndexes(database);
+  await seedRequirementCatalogue(database);
   await seedCurriculumCorpus(database, httpClient);
+};
+
+/**
+ * The starting requirements list, so a school opening the screen sees the shape of the thing rather
+ * than an empty table it has to imagine. Installed only into an empty catalogue — a school that
+ * deleted an item does not find it back on the next restart — and guarded, because a list of
+ * brooms is never worth failing a boot for.
+ */
+const seedRequirementCatalogue = async (database) => {
+  try {
+    const { seedDefaultRequirements } = await import('../services/requirements.mjs');
+    await seedDefaultRequirements(database);
+  } catch (error) {
+    console.warn(
+      'Skipped seeding the requirements catalogue; it will start empty:',
+      error instanceof Error ? error.message : error,
+    );
+  }
 };
 
 // The bundled curriculum outlines. Guarded rather than awaited bare, because seeding may reach an

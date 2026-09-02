@@ -1,0 +1,496 @@
+/**
+ * The matron's own screen: the dormitories, the sick bay, and the children in them.
+ *
+ * The matron already existed in this system as a designation — she can scan a card and see a
+ * student's dormitory, parents and gate permission (services/scan-profiles.mjs). What she had no
+ * way to do was work from her own list rather than from whoever happened to walk past. The four
+ * things a matron actually does across an evening are here:
+ *
+ *   - the dormitory head count, which is not the class register: it is asked at night, about beds
+ *   - the sick bay book, so "was my child seen on Tuesday?" has an answer
+ *   - beds: who sleeps where, and which are free
+ *   - welfare: the boarders who still owe their requirements, and who is signed out of the gate
+ *
+ * ## Who may open it
+ *
+ * A matron's role is `support_staff`, which is the same role as the cook and the askari. Gating on
+ * the role alone would either lock her out or hand the cook the dormitory roll, so this gates on
+ * the post — role *or* designation — through `requirePost`. The designation is read from her own
+ * users row, never from the request.
+ *
+ * 'sick_bay' and 'away' are first-class answers at roll call, distinct from 'absent'. A matron who
+ * knows where a child is has not lost one, and collapsing the three would turn every sick child
+ * into a missing person at ten o'clock at night.
+ */
+import { randomUUID } from 'node:crypto';
+
+import { requirePost, resolveActor } from '../auth/actor.mjs';
+import { outstandingForStudents } from './requirements.mjs';
+
+const trimmed = (value) => String(value ?? '').trim();
+const todayIso = () => new Date().toISOString().slice(0, 10);
+
+/** Runs the school, or runs the dormitories. Nobody else. */
+const MATRON_GATE = { roles: ['admin', 'head_teacher'], designations: ['matron'] };
+
+const CHECK_NAMES = ['morning', 'night'];
+const ROLL_STATUSES = ['present', 'absent', 'sick_bay', 'away'];
+const OUTCOMES = ['resting', 'discharged', 'referred', 'sent_home'];
+
+/** The date a request is about, as YYYY-MM-DD. Never SQL CURRENT_DATE — see the schema comment. */
+const dateOf = (body) => trimmed(body.date) || todayIso();
+const checkOf = (body) => (CHECK_NAMES.includes(trimmed(body.check)) ? trimmed(body.check) : 'night');
+
+const resolveStudent = async (database, code) => {
+  const { rows } = await database.query(
+    'SELECT * FROM students WHERE id = $1 OR UPPER(student_id) = UPPER($1) LIMIT 1',
+    [trimmed(code)],
+  );
+  return rows[0] || null;
+};
+
+/**
+ * Everything the matron's home screen counts, for one date.
+ *
+ * Deliberately one query set rather than several round trips from the phone: this is opened on a
+ * handset in a dormitory corridor, and the difference between one request and six is the difference
+ * between a screen that loads and one that does not.
+ */
+const dashboard = async (database, body) => {
+  const date = dateOf(body);
+  const check = checkOf(body);
+
+  const [boarders, sickBay, roll, gate, owing, rooms] = await Promise.all([
+    database.query(
+      `SELECT COUNT(*)::int AS n FROM hostel_assignments WHERE status = 'active'`,
+    ),
+    database.query(
+      `SELECT COUNT(*)::int AS n FROM sick_bay_records WHERE discharged_at IS NULL`,
+    ),
+    database.query(
+      `
+        SELECT status, COUNT(*)::int AS n FROM dorm_checks
+        WHERE check_date = $1 AND check_name = $2
+        GROUP BY status
+      `,
+      [date, check],
+    ),
+    database.query(
+      `
+        SELECT COUNT(*)::int AS n FROM gate_permissions
+        WHERE status = 'active'
+      `,
+    ),
+    /* The boarders themselves, so the count below can be derived the same way the welfare list is.
+       Counting pending rows directly would report zero for a student nobody has assigned a list to
+       — and then the tile would disagree with the list it opens. */
+    database.query(
+      `
+        SELECT s.id, s.first_name, s.last_name, s.grade_level
+        FROM hostel_assignments a
+        JOIN students s ON s.id = a.student_id
+        WHERE a.status = 'active'
+      `,
+    ),
+    database.query(
+      `
+        SELECT COUNT(*)::int AS rooms,
+               COALESCE(SUM(capacity), 0)::int AS beds
+        FROM hostel_rooms
+      `,
+    ),
+  ]);
+
+  const byStatus = Object.fromEntries(roll.rows.map((row) => [row.status, row.n]));
+  const counted = ROLL_STATUSES.reduce((total, name) => total + (byStatus[name] || 0), 0);
+
+  const owingBoarders = await outstandingForStudents(database, {
+    term: trimmed(body.term) || 'Term 1',
+    academicYear: trimmed(body.academicYear) || String(new Date().getFullYear()),
+    students: owing.rows,
+  });
+
+  return {
+    date,
+    check,
+    boarders: boarders.rows[0].n,
+    in_sick_bay: sickBay.rows[0].n,
+    signed_out: gate.rows[0].n,
+    owing_requirements: owingBoarders.length,
+    rooms: rooms.rows[0].rooms,
+    beds: rooms.rows[0].beds,
+    beds_free: Math.max(0, rooms.rows[0].beds - boarders.rows[0].n),
+    roll: {
+      present: byStatus.present || 0,
+      absent: byStatus.absent || 0,
+      sick_bay: byStatus.sick_bay || 0,
+      away: byStatus.away || 0,
+      // What is left of the boarders once everybody counted so far is taken off.
+      unmarked: Math.max(0, boarders.rows[0].n - counted),
+    },
+  };
+};
+
+/**
+ * The roll for one check on one day: every boarder, with tonight's answer against them.
+ *
+ * A LEFT JOIN, so a student nobody has marked yet appears with no status rather than dropping off
+ * the list — the unmarked are the entire reason for taking a roll.
+ */
+const dormRoll = async (database, body) => {
+  const date = dateOf(body);
+  const check = checkOf(body);
+  const hostel = trimmed(body.hostel);
+
+  /* The two "where else might this child be?" lookups are fetched as sets rather than as
+     correlated subqueries in the SELECT: pg-mem cannot correlate a subquery to an outer alias at
+     all, and it backs the test suite and the hosted demo. Two small queries, merged below. */
+  const [{ rows }, sick, out] = await Promise.all([
+    database.query(
+      `
+        SELECT s.id, s.student_id, s.first_name, s.last_name, s.grade_level, s.class_section,
+               r.hostel_name, r.room_number, r.id AS room_id, a.bed_number,
+               d.status, d.note, d.recorded_by, d.recorded_at
+        FROM hostel_assignments a
+        JOIN students s ON s.id = a.student_id
+        JOIN hostel_rooms r ON r.id = a.room_id
+        LEFT JOIN dorm_checks d
+          ON d.student_id = s.id AND d.check_date = $1 AND d.check_name = $2
+        WHERE a.status = 'active'
+          AND ($3 = '' OR r.hostel_name = $3)
+        ORDER BY r.hostel_name ASC, r.room_number ASC, s.last_name ASC, s.first_name ASC
+      `,
+      [date, check, hostel],
+    ),
+    database.query('SELECT student_id FROM sick_bay_records WHERE discharged_at IS NULL'),
+    database.query(`SELECT student_id FROM gate_permissions WHERE status = 'active'`),
+  ]);
+
+  const inSickBay = new Set(sick.rows.map((row) => row.student_id));
+  const signedOut = new Set(out.rows.map((row) => row.student_id));
+
+  return {
+    date,
+    check,
+    students: rows.map((row) => ({
+      id: row.id,
+      student_number: row.student_id,
+      full_name: `${row.first_name} ${row.last_name}`.trim(),
+      grade_level: row.grade_level,
+      class_section: row.class_section,
+      hostel_name: row.hostel_name,
+      room_number: row.room_number,
+      room_id: row.room_id,
+      bed_number: row.bed_number,
+      status: row.status || '',
+      note: row.note || '',
+      recorded_by: row.recorded_by || '',
+      recorded_at: row.recorded_at || null,
+      // Shown beside an unmarked name so the matron is not hunting a child the office signed out.
+      in_sick_bay: inSickBay.has(row.id),
+      signed_out: signedOut.has(row.id),
+    })),
+  };
+};
+
+/** Marking one student. An upsert, so correcting a mistake overwrites rather than duplicates. */
+const mark = async (database, body, actor) => {
+  const student = await resolveStudent(database, body.studentId);
+  if (!student) return { error: 'No student matches that number' };
+
+  const status = trimmed(body.status);
+  if (!ROLL_STATUSES.includes(status)) {
+    return { error: `A roll call answer must be one of: ${ROLL_STATUSES.join(', ')}` };
+  }
+
+  const room = await database.query(
+    `SELECT room_id FROM hostel_assignments WHERE student_id = $1 AND status = 'active' LIMIT 1`,
+    [student.id],
+  );
+
+  const { rows } = await database.query(
+    `
+      INSERT INTO dorm_checks
+        (id, student_id, room_id, check_date, check_name, status, note, recorded_by, recorded_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+      ON CONFLICT (check_date, check_name, student_id)
+      DO UPDATE SET status = EXCLUDED.status, note = EXCLUDED.note,
+                    room_id = EXCLUDED.room_id,
+                    recorded_by = EXCLUDED.recorded_by, recorded_at = NOW()
+      RETURNING *
+    `,
+    [
+      randomUUID(), student.id, room.rows[0]?.room_id || null, dateOf(body), checkOf(body),
+      status, trimmed(body.note), actor?.name || actor?.email || '',
+    ],
+  );
+  return { check: rows[0] };
+};
+
+/** Who is in the sick bay now, and — when asked for — who has been through it recently. */
+const sickBay = async (database, body) => {
+  const openOnly = body.includeDischarged !== true;
+
+  const { rows } = await database.query(
+    `
+      SELECT k.*, s.student_id AS student_number, s.first_name, s.last_name,
+             s.grade_level, s.class_section, s.parent_name, s.parent_phone,
+             s.blood_group, s.medical_record
+      FROM sick_bay_records k
+      JOIN students s ON s.id = k.student_id
+      WHERE ($1 = false OR k.discharged_at IS NULL)
+      ORDER BY k.admitted_at DESC
+      LIMIT $2
+    `,
+    [openOnly, Number(body.limit) > 0 ? Math.min(Number(body.limit), 200) : 50],
+  );
+
+  return {
+    records: rows.map((row) => ({
+      ...row,
+      full_name: `${row.first_name} ${row.last_name}`.trim(),
+      open: !row.discharged_at,
+    })),
+  };
+};
+
+/**
+ * Admitting a student to the sick bay.
+ *
+ * A student already admitted and not discharged is returned as-is rather than admitted twice: two
+ * open episodes for one child would make "who is in the sick bay?" ambiguous, and the honest answer
+ * to a second admission is that the first one never ended.
+ */
+const admit = async (database, body, actor) => {
+  const student = await resolveStudent(database, body.studentId);
+  if (!student) return { error: 'No student matches that number' };
+
+  const complaint = trimmed(body.complaint);
+  if (!complaint) return { error: 'Say what the student is complaining of' };
+
+  const open = await database.query(
+    'SELECT * FROM sick_bay_records WHERE student_id = $1 AND discharged_at IS NULL LIMIT 1',
+    [student.id],
+  );
+  if (open.rows[0]) return { record: open.rows[0], already: true };
+
+  const temperature = Number(body.temperature);
+
+  const { rows } = await database.query(
+    `
+      INSERT INTO sick_bay_records
+        (id, student_id, complaint, treatment, temperature, outcome, referred_to,
+         parent_informed, note, recorded_by)
+      VALUES ($1, $2, $3, $4, $5, 'resting', $6, $7, $8, $9)
+      RETURNING *
+    `,
+    [
+      randomUUID(), student.id, complaint, trimmed(body.treatment),
+      Number.isFinite(temperature) && temperature > 0 ? temperature : null,
+      trimmed(body.referredTo), body.parentInformed === true, trimmed(body.note),
+      actor?.name || actor?.email || '',
+    ],
+  );
+
+  /* The night's roll should agree with the sick bay without the matron marking the same child
+     twice. Marking is best-effort: a failure here must not lose the admission itself. */
+  try {
+    await mark(database, {
+      studentId: student.id, status: 'sick_bay', date: dateOf(body), check: checkOf(body),
+      note: complaint,
+    }, actor);
+  } catch (error) {
+    console.warn('Could not mark the roll for a sick bay admission:', error instanceof Error ? error.message : error);
+  }
+
+  return { record: rows[0], student: { id: student.id, full_name: `${student.first_name} ${student.last_name}`.trim() } };
+};
+
+/** Closing an episode. The outcome says how it ended; 'resting' is not an ending. */
+const discharge = async (database, body, actor) => {
+  const id = trimmed(body.recordId);
+  if (!id) return { error: 'Which sick bay record?' };
+
+  const outcome = OUTCOMES.includes(trimmed(body.outcome)) ? trimmed(body.outcome) : 'discharged';
+  if (outcome === 'resting') return { error: 'Resting is not a discharge' };
+
+  const { rows } = await database.query(
+    `
+      UPDATE sick_bay_records
+      SET discharged_at = NOW(), outcome = $2, treatment = $3, referred_to = $4,
+          parent_informed = $5, note = $6, recorded_by = $7
+      WHERE id = $1 AND discharged_at IS NULL
+      RETURNING *
+    `,
+    [
+      id, outcome, trimmed(body.treatment), trimmed(body.referredTo),
+      body.parentInformed === true, trimmed(body.note),
+      actor?.name || actor?.email || '',
+    ],
+  );
+  if (!rows[0]) return { error: 'That student has already been discharged' };
+  return { record: rows[0] };
+};
+
+/**
+ * How many students each room currently holds.
+ *
+ * A grouped query merged in Node rather than a correlated subquery beside `r.*` — pg-mem cannot
+ * resolve the outer alias inside one, and it backs the tests and the hosted demo.
+ */
+const occupancy = async (database) => {
+  const { rows } = await database.query(
+    `SELECT room_id, COUNT(*)::int AS n FROM hostel_assignments WHERE status = 'active' GROUP BY room_id`,
+  );
+  return new Map(rows.map((row) => [row.room_id, row.n]));
+};
+
+/** One room with its live occupancy, or null. */
+const roomWithOccupancy = async (database, roomId) => {
+  const { rows } = await database.query('SELECT * FROM hostel_rooms WHERE id = $1 LIMIT 1', [roomId]);
+  if (!rows[0]) return null;
+
+  const counted = await database.query(
+    `SELECT COUNT(*)::int AS n FROM hostel_assignments WHERE room_id = $1 AND status = 'active'`,
+    [roomId],
+  );
+  return { ...rows[0], occupied: counted.rows[0].n };
+};
+
+/** The dormitories and how full they are. */
+const rooms = async (database) => {
+  const { rows } = await database.query(
+    'SELECT * FROM hostel_rooms ORDER BY hostel_name ASC, room_number ASC',
+  );
+  const counts = await occupancy(database);
+
+  return {
+    rooms: rows.map((row) => {
+      const occupied = counts.get(row.id) || 0;
+      return {
+        ...row,
+        occupied,
+        free: Math.max(0, Number(row.capacity) - occupied),
+        full: occupied >= Number(row.capacity),
+      };
+    }),
+  };
+};
+
+/**
+ * Giving a student a bed.
+ *
+ * A full room is refused with a sentence rather than overfilled, and an existing live assignment is
+ * ended rather than left beside the new one — a student sleeping in two rooms at once is not a
+ * state the roll call can make sense of.
+ */
+const assignBed = async (database, body, actor) => {
+  const student = await resolveStudent(database, body.studentId);
+  if (!student) return { error: 'No student matches that number' };
+
+  const roomId = trimmed(body.roomId);
+  if (!roomId) return { error: 'Which room?' };
+
+  const room = await roomWithOccupancy(database, roomId);
+  if (!room) return { error: 'That room no longer exists' };
+
+  const alreadyHere = await database.query(
+    `SELECT id FROM hostel_assignments WHERE student_id = $1 AND room_id = $2 AND status = 'active' LIMIT 1`,
+    [student.id, roomId],
+  );
+
+  if (!alreadyHere.rows[0] && Number(room.occupied) >= Number(room.capacity)) {
+    return { error: `${room.hostel_name} room ${room.room_number} is full (${room.occupied} of ${room.capacity})` };
+  }
+  if (alreadyHere.rows[0]) return { assignment: alreadyHere.rows[0], already: true };
+
+  await database.query(
+    `UPDATE hostel_assignments SET status = 'ended', end_date = $2
+      WHERE student_id = $1 AND status = 'active'`,
+    [student.id, todayIso()],
+  );
+
+  const { rows } = await database.query(
+    `
+      INSERT INTO hostel_assignments (id, student_id, room_id, bed_number, start_date, status)
+      VALUES ($1, $2, $3, $4, $5, 'active')
+      RETURNING *
+    `,
+    [randomUUID(), student.id, roomId, trimmed(body.bedNumber), todayIso()],
+  );
+  return { assignment: rows[0] };
+};
+
+const releaseBed = async (database, body) => {
+  const student = await resolveStudent(database, body.studentId);
+  if (!student) return { error: 'No student matches that number' };
+
+  const { rows } = await database.query(
+    `UPDATE hostel_assignments SET status = 'ended', end_date = $2
+      WHERE student_id = $1 AND status = 'active' RETURNING *`,
+    [student.id, todayIso()],
+  );
+  if (!rows[0]) return { error: 'That student does not have a bed' };
+  return { assignment: rows[0] };
+};
+
+/**
+ * The boarders who still owe a mandatory requirement.
+ *
+ * The matron is usually the person who notices — she is the one in the dormitory looking at whether
+ * a child has a mosquito net — so the same list the bursar reads is on her screen too, narrowed to
+ * the students who actually sleep here.
+ */
+const welfare = async (database, body) => {
+  /* The same derivation the bursar's list uses, narrowed to the students who actually sleep here —
+     shared rather than re-queried, so the matron and the office cannot report different answers to
+     the same question. */
+  const { rows } = await database.query(
+    `
+      SELECT s.id, s.student_id, s.first_name, s.last_name, s.grade_level, s.class_section,
+             r.hostel_name, r.room_number
+      FROM hostel_assignments a
+      JOIN students s ON s.id = a.student_id
+      JOIN hostel_rooms r ON r.id = a.room_id
+      WHERE a.status = 'active'
+        AND ($1 = '' OR r.hostel_name = $1)
+      ORDER BY r.hostel_name ASC, r.room_number ASC, s.last_name ASC
+    `,
+    [trimmed(body.hostel)],
+  );
+
+  const owing = await outstandingForStudents(database, {
+    term: trimmed(body.term) || 'Term 1',
+    academicYear: trimmed(body.academicYear) || String(new Date().getFullYear()),
+    students: rows,
+  });
+
+  return {
+    students: owing.map((entry) => ({ ...entry, student_number: entry.student_id })),
+  };
+};
+
+const ACTIONS = {
+  dashboard,
+  dorm_roll: dormRoll,
+  mark,
+  sick_bay: sickBay,
+  admit,
+  discharge,
+  rooms,
+  assign_bed: assignBed,
+  release_bed: releaseBed,
+  welfare,
+};
+
+export const handleMatronFunction = async (database, body = {}, { actor: authenticated } = {}) => {
+  const actor = resolveActor(authenticated, body);
+  const refusal = requirePost(actor, MATRON_GATE);
+  if (refusal) return refusal;
+
+  const action = trimmed(body.action) || 'dashboard';
+  const handler = ACTIONS[action];
+  if (!handler) return { error: `Unsupported action: ${action}` };
+
+  return handler(database, body, actor);
+};

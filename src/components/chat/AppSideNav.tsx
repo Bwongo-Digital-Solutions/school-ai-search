@@ -14,7 +14,9 @@ import {
   Education,
   Chat,
   Email,
+  Events,
   Group,
+  Home,
   ListChecked,
   Money,
   Notebook,
@@ -50,8 +52,9 @@ interface AppSideNavProps {
 
 const AppSideNav: React.FC<AppSideNavProps> = ({ expanded, onOverlayClick }) => {
   const { activeView, setActiveView } = useChatContext();
-  const { isAuthenticated, isAdmin, isSupportStaff, isPrivileged, canSeeStudents, canSeeFinance } =
-    useAuth();
+  const {
+    isAuthenticated, isAdmin, isSupportStaff, isMatron, isPrivileged, canSeeStudents, canSeeFinance,
+  } = useAuth();
   const [systems, setSystems] = useState<Integration[]>([]);
 
   // Which external systems this school has connected decides whether those entries exist at all —
@@ -75,6 +78,36 @@ const AppSideNav: React.FC<AppSideNavProps> = ({ expanded, onOverlayClick }) => 
   };
 
   const isCurrent = (view: string) => activeView === view;
+
+  /* The matron has three screens rather than one, so she gets a rail — a short one. Her role is
+     support_staff, which is why this is asked before the blanket check below: that check would
+     otherwise hand the person who runs the dormitories the same single fees screen as the cook. */
+  if (isMatron) {
+    return (
+      <SideNav
+        aria-label="Sections"
+        expanded={expanded}
+        onOverlayClick={onOverlayClick}
+        isPersistent
+        className={styles.nav}
+      >
+        <SideNavItems>
+          <SideNavLink renderIcon={Home} isActive={isCurrent('matron')} href="#" onClick={go('matron')}>
+            Dormitories
+          </SideNavLink>
+          <SideNavLink renderIcon={Email} isActive={isCurrent('messages')} href="#" onClick={go('messages')}>
+            <span className={styles.itemRow}>
+              Messages
+              {unread > 0 && <span className={styles.count}>{unread > 99 ? '99+' : unread}</span>}
+            </span>
+          </SideNavLink>
+          <SideNavLink renderIcon={Wallet} isActive={isCurrent('fees')} href="#" onClick={go('fees')}>
+            Fees
+          </SideNavLink>
+        </SideNavItems>
+      </SideNav>
+    );
+  }
 
   // Support staff have one screen. Showing them a rail with a single entry is worse than showing
   // them none, so the whole rail is theirs only if there is something to choose between.
@@ -103,6 +136,19 @@ const AppSideNav: React.FC<AppSideNavProps> = ({ expanded, onOverlayClick }) => 
         {canSeeStudents && (
           <SideNavLink renderIcon={ListChecked} isActive={isCurrent('records')} href="#" onClick={go('records')}>
             Records
+          </SideNavLink>
+        )}
+        {/* Clubs and what a student was asked to bring — one entry, because at the desk it is one
+            conversation: what is this child joining, and what have they brought. */}
+        {canSeeStudents && (
+          <SideNavLink renderIcon={Events} isActive={isCurrent('school-life')} href="#" onClick={go('school-life')}>
+            School Life
+          </SideNavLink>
+        )}
+        {/* Somebody has to cover the dormitories when the matron is off. */}
+        {isPrivileged && (
+          <SideNavLink renderIcon={Home} isActive={isCurrent('matron')} href="#" onClick={go('matron')}>
+            Dormitories
           </SideNavLink>
         )}
 

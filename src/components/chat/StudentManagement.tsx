@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActionableNotification,
   Button,
+  Checkbox,
   Dropdown,
   Modal,
   NumberInput,
@@ -10,6 +11,7 @@ import {
   Search,
   Select,
   SelectItem,
+  SelectableTag,
   Table,
   TableBody,
   TableCell,
@@ -39,6 +41,10 @@ import {
   Wallet,
 } from '@carbon/react/icons';
 import { classAndSection, classFilterOptions, classLabel, classOptionsFor } from '@/lib/classLevels';
+import {
+  clubsApi, levelForGrade, requirementsApi,
+  type Club, type RequirementLevel, type StudentRequirement,
+} from '@/lib/schoolLife';
 import { useSettings } from '@/contexts/SettingsContext';
 import {
   AccessDenied,
@@ -284,6 +290,15 @@ const StudentManagement: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [subjectInput, setSubjectInput] = useState('');
+
+  /* Clubs and requirements are recorded against a student, not columns on the students row, so they
+     are held apart from `form` and written after the save. See handleSave. */
+  const [clubCatalogue, setClubCatalogue] = useState<Club[]>([]);
+  const [chosenClubs, setChosenClubs] = useState<string[]>([]);
+  const [requirementList, setRequirementList] = useState<StudentRequirement[]>([]);
+  const [broughtItems, setBroughtItems] = useState<string[]>([]);
+  const [requirementLevel, setRequirementLevel] = useState<RequirementLevel | null>(null);
+
   const [reportCardStudent, setReportCardStudent] = useState<Student | null>(null);
   const [reportCardTerm, setReportCardTerm] = useState('Term 1');
   const [reportCardYear, setReportCardYear] = useState(getDefaultAcademicYear());
@@ -363,12 +378,84 @@ const StudentManagement: React.FC = () => {
     return Object.keys(e).length === 0;
   };
 
+  /**
+   * The clubs on offer, and what this student's class is asked to bring.
+   *
+   * Fetched when the form opens and again whenever the class changes, because the class is what
+   * decides the list — moving a child from P4 to P7 changes what they are expected to bring, and a
+   * stale list would have the desk ticking off the wrong items.
+   */
+  const loadSchoolLife = useCallback(async (studentId: string | null, gradeLevel: number) => {
+    try {
+      setClubCatalogue((await clubsApi.list()).clubs);
+    } catch (err) {
+      console.error('Could not load the clubs:', err);
+      setClubCatalogue([]);
+    }
+
+    try {
+      if (studentId) {
+        // An existing student has answers already recorded; show those rather than a blank list.
+        const [mine, list] = await Promise.all([
+          clubsApi.forStudent(studentId),
+          requirementsApi.forStudent(studentId),
+        ]);
+        setChosenClubs(mine.clubs.map(club => club.club_id));
+        setRequirementList(list.items);
+        setRequirementLevel(list.level);
+        setBroughtItems(list.items.filter(item => item.status === 'brought').map(item => item.requirement_id));
+        return;
+      }
+
+      /* A student who does not exist yet has no list of their own, so the catalogue is filtered to
+         the class being typed. `levelForGrade` mirrors the server's own banding; the server still
+         decides what is actually written once the student has an id. */
+      const level = levelForGrade(gradeLevel);
+      setRequirementLevel(level);
+      setBroughtItems([]);
+      if (!level) {
+        setRequirementList([]);
+        return;
+      }
+      const catalogue = await requirementsApi.catalogue(level);
+      setRequirementList(
+        catalogue.items
+          // Boarding items are not offered before there is a bed to attach them to.
+          .filter(item => !item.boarding_only)
+          .filter(item => item.grade_level === null || Number(item.grade_level) === Number(gradeLevel))
+          .map(item => ({
+            requirement_id: item.id,
+            item_name: item.item_name,
+            category: item.category,
+            unit: item.unit,
+            quantity: item.quantity,
+            mandatory: item.mandatory,
+            boarding_only: item.boarding_only,
+            notes: item.notes,
+            status: 'pending' as const,
+            quantity_expected: item.quantity,
+            quantity_brought: 0,
+            note: '',
+            recorded_by: '',
+            recorded_at: null,
+          })),
+      );
+    } catch (err) {
+      console.error('Could not load the requirements:', err);
+      setRequirementList([]);
+      setRequirementLevel(null);
+    }
+  }, []);
+
   const openAdd = () => {
     if (!canEdit) return;
-    setForm({ ...EMPTY_STUDENT, student_id: `STU-${new Date().getFullYear()}-${String(students.length + 1).padStart(3, '0')}` });
+    const fresh = { ...EMPTY_STUDENT, student_id: `STU-${new Date().getFullYear()}-${String(students.length + 1).padStart(3, '0')}` };
+    setForm(fresh);
     setEditingId(null);
     setErrors({});
     setSubjectInput('');
+    setChosenClubs([]);
+    loadSchoolLife(null, fresh.grade_level);
     setShowForm(true);
   };
 
@@ -388,14 +475,59 @@ const StudentManagement: React.FC = () => {
     setEditingId(s.id);
     setErrors({});
     setSubjectInput('');
+    loadSchoolLife(s.id, s.grade_level);
     setShowForm(true);
   };
+
+  /**
+   * Clubs and requirements, written once the student row exists.
+   *
+   * They are separate calls rather than fields on the insert because they are separate tables, and
+   * this form writes to `students` directly through the data shim. Neither may undo a save: the
+   * child is enrolled by the time we get here, so a club that filled up while the form was open is
+   * a notification for the desk, not a failure. That mirrors what the server does when a phone
+   * registers a student through /api/functions/student-registry.
+   */
+  const saveSchoolLife = async (studentId: string) => {
+    const problems: string[] = [];
+
+    for (const clubId of chosenClubs) {
+      try {
+        await clubsApi.join(clubId, studentId);
+      } catch (err) {
+        const name = clubCatalogue.find(club => club.id === clubId)?.name || 'A club';
+        problems.push(err instanceof Error ? err.message : `${name} could not be joined`);
+      }
+    }
+
+    try {
+      // Writes the whole applicable list, so a student who brought nothing still reads as owing it
+      // rather than as having no requirements at all.
+      await requirementsApi.assign(studentId, broughtItems);
+    } catch (err) {
+      console.error('Could not record requirements:', err);
+      problems.push('The requirements list could not be recorded.');
+    }
+
+    if (problems.length) {
+      notify.warning('The student was saved, with exceptions', problems.join(' '));
+    }
+  };
+
+  /* The class decides the list, so changing it in the form has to change the list under it. Only
+     for a new student: an existing one already has recorded answers, and silently rebuilding their
+     list from the catalogue would throw away what somebody already ticked. */
+  useEffect(() => {
+    if (!showForm || editingId) return;
+    loadSchoolLife(null, form.grade_level);
+  }, [showForm, editingId, form.grade_level, loadSchoolLife]);
 
   const handleSave = async () => {
     if (!canEdit || !validate()) return;
     setSaving(true);
     try {
       const payload = { ...form, subjects: form.subjects };
+      let studentId = editingId;
       if (editingId) {
         const { error } = await supabase.from('students').update(payload).eq('id', editingId);
         if (error) throw error;
@@ -409,8 +541,10 @@ const StudentManagement: React.FC = () => {
           .select('id')
           .single();
         if (error) throw error;
+        studentId = newStudent?.id ?? null;
         await logAudit('create', newStudent?.id, `${form.first_name} ${form.last_name}`, payload);
       }
+      if (studentId) await saveSchoolLife(studentId);
       await refreshStudents();
       setShowForm(false);
     } catch (err: unknown) {
@@ -1249,6 +1383,94 @@ const StudentManagement: React.FC = () => {
                     <span className={styles.modalNote}>No subjects yet.</span>
                   )}
                 </div>
+              </div>
+
+              {/* Clubs. A student may join any number; a full one cannot be picked at all, which
+                  is a kinder way to say no than a refusal on save. */}
+              <div>
+                <h4 className={styles.formSection}>Clubs and societies</h4>
+                {clubCatalogue.length === 0 ? (
+                  <span className={styles.modalNote}>
+                    No clubs have been set up yet. An administrator adds them under School Life.
+                  </span>
+                ) : (
+                  <div className={styles.subjects}>
+                    {clubCatalogue.map(club => {
+                      const chosen = chosenClubs.includes(club.id);
+                      // A full club cannot be picked at all, which is a kinder way to say no than
+                      // letting somebody choose it and refusing on save.
+                      const blocked = club.full && !chosen;
+                      return (
+                        <SelectableTag
+                          key={club.id}
+                          id={`club-${club.id}`}
+                          size="md"
+                          disabled={blocked}
+                          selected={chosen}
+                          onChange={() =>
+                            setChosenClubs(prev =>
+                              chosen ? prev.filter(id => id !== club.id) : [...prev, club.id])
+                          }
+                          title={
+                            blocked
+                              ? `${club.name} is full (${club.member_count} of ${club.capacity})`
+                              : club.patron_name
+                                ? `${club.name} — ${club.patron_name}`
+                                : club.name
+                          }
+                          text={club.capacity ? `${club.name} · ${club.member_count}/${club.capacity}` : club.name}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* School requirements. The list is the one for this student's class, so it changes
+                  when the class above changes. */}
+              <div>
+                <h4 className={styles.formSection}>
+                  School requirements
+                  {requirementLevel && (
+                    <>
+                      {' '}
+                      <Tag type="blue" size="sm">{requirementLevel}</Tag>
+                    </>
+                  )}
+                </h4>
+                {requirementList.length === 0 ? (
+                  <span className={styles.modalNote}>
+                    Nothing is set for this class yet. An administrator publishes the list under
+                    School Life.
+                  </span>
+                ) : (
+                  <>
+                    <div className={styles.grid2}>
+                      {requirementList.map(item => (
+                        <Checkbox
+                          key={item.requirement_id}
+                          id={`req-${item.requirement_id}`}
+                          labelText={
+                            `${item.item_name}`
+                            + `${item.quantity_expected > 1 || item.unit ? ` — ${item.quantity_expected} ${item.unit}`.trimEnd() : ''}`
+                            + `${item.mandatory ? '' : ' (optional)'}`
+                          }
+                          checked={broughtItems.includes(item.requirement_id)}
+                          onChange={(_event, { checked }) =>
+                            setBroughtItems(prev =>
+                              checked
+                                ? [...prev, item.requirement_id]
+                                : prev.filter(id => id !== item.requirement_id))
+                          }
+                        />
+                      ))}
+                    </div>
+                    <p className={styles.modalNote}>
+                      Tick what has actually arrived. Everything else is recorded as still owed, so
+                      it shows up under Still owing rather than being forgotten.
+                    </p>
+                  </>
+                )}
               </div>
 
               {/* Parent Info */}

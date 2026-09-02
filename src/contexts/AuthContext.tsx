@@ -26,6 +26,13 @@ interface AuthContextType {
   isAdmin: boolean;
   isTeacher: boolean;
   isSupportStaff: boolean;
+  /**
+   * Runs the dormitories. A *designation*, not a role — a matron's role is `support_staff`, the
+   * same as the cook's and the askari's, so the two must be asked separately. This mirrors
+   * `requirePost` in server/auth/actor.mjs, which is what actually gates her screens; this flag
+   * only decides what the browser renders.
+   */
+  isMatron: boolean;
   /** Runs the school: sees everything an administrator does, bar staff and system settings. */
   isHeadTeacher: boolean;
   /** Keeps the books — accountant or bursar. */
@@ -288,6 +295,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const isAdmin = user?.role === 'admin';
   const isTeacher = user?.role === 'teacher';
   const isSupportStaff = user?.role === 'support_staff';
+  const isMatron = isSupportStaff && user?.designation === 'matron';
   const isHeadTeacher = user?.role === 'head_teacher';
   const isFinanceStaff = user?.role === 'accountant' || user?.role === 'bursar';
 
@@ -308,6 +316,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isAdmin,
         isTeacher,
         isSupportStaff,
+        isMatron,
         isHeadTeacher,
         isFinanceStaff,
         isPrivileged,
