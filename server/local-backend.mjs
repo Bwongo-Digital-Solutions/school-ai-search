@@ -88,6 +88,11 @@ import { handleFeesFunction } from './services/fees.mjs';
 import { handleStudentReportFunction, renderReport } from './services/student-report.mjs';
 import { startOfSchoolDay } from './services/school-day.mjs';
 import { handleStudentSummaryFunction } from './services/student-summary.mjs';
+import { clubsForStudent, handleClubsFunction, joinClub } from './services/clubs.mjs';
+import {
+  assignRequirements, handleRequirementsFunction, requirementsForStudent,
+} from './services/requirements.mjs';
+import { handleMatronFunction } from './services/matron.mjs';
 import { handleCurriculumFunction } from './services/curriculum.mjs';
 import { handleDigitalExaminerFunction, loadPaper } from './services/digital-examiner.mjs';
 import { handleLessonPlannerFunction } from './services/lesson-planner.mjs';
@@ -1731,6 +1736,25 @@ const handleStudentCardFunction = async (database, body = {}, { actor } = {}) =>
       date: today,
       marked: mark.rows[0] || null,
       class: { grade_level: student.grade_level, class_section: student.class_section },
+    };
+  }
+
+  if (wants('clubs')) {
+    card.clubs = await clubsForStudent(database, student.id);
+  }
+
+  if (wants('requirements')) {
+    /* Scoped to the current term, which is what "has this child brought their broom?" means when
+       somebody asks it at the dormitory door in week two. */
+    const list = await requirementsForStudent(database, student, {
+      term: trimmedText(body.term) || 'Term 1',
+      academicYear: trimmedText(body.academicYear) || String(new Date().getFullYear()),
+    });
+    card.requirements = {
+      level: list.level,
+      boarder: list.boarder,
+      outstanding: list.items.filter((item) => item.mandatory && item.status === 'pending').length,
+      items: list.items,
     };
   }
 
@@ -3545,6 +3569,39 @@ const handleStudentRegistryFunction = async (database, body = {}, { actor: authe
   const student = inserted.rows[0];
   const fullName = `${student.first_name} ${student.last_name}`;
 
+  /* Clubs and requirements are recorded after the student exists, and neither is allowed to undo
+     the enrolment. A club that filled up between the form being opened and submitted, or a
+     requirements list nobody has configured yet, is a note to hand back to the desk — not a reason
+     to refuse a child a place. The student row is the thing that had to be right. */
+  const clubResults = [];
+  for (const clubId of Array.isArray(body.clubs) ? body.clubs : []) {
+    const id = trimmedText(clubId);
+    if (!id) continue;
+    try {
+      const result = await joinClub(database, {
+        clubId: id,
+        studentId: student.id,
+        recordedBy: actor?.name || actor?.email || '',
+      });
+      clubResults.push(result.error ? { club_id: id, error: result.error } : { club_id: id, joined: true });
+    } catch (error) {
+      clubResults.push({ club_id: id, error: error instanceof Error ? error.message : 'Could not join that club' });
+    }
+  }
+
+  let requirements = null;
+  try {
+    requirements = await assignRequirements(database, student, {
+      term: trimmedText(body.term) || 'Term 1',
+      academicYear: trimmedText(body.academicYear) || year,
+      brought: Array.isArray(body.requirementsBrought) ? body.requirementsBrought : [],
+      waived: Array.isArray(body.requirementsWaived) ? body.requirementsWaived : [],
+      recordedBy: actor?.name || actor?.email || '',
+    });
+  } catch (error) {
+    console.warn('Could not record requirements at registration:', error instanceof Error ? error.message : error);
+  }
+
   recordActivity(tenantId, {
     action: 'student.registered',
     actor,
@@ -3566,7 +3623,14 @@ const handleStudentRegistryFunction = async (database, body = {}, { actor: authe
       + `${actor?.name ? ` by ${actor.name}` : ''}.`,
   });
 
-  return { student };
+  /* The clubs that could not be joined are reported rather than swallowed: the desk needs to tell
+     the parent that Football was full while the child is still standing there. */
+  return {
+    student,
+    clubs: clubResults,
+    club_errors: clubResults.filter((entry) => entry.error).map((entry) => entry.error),
+    requirements,
+  };
 };
 
 /**
@@ -5095,6 +5159,27 @@ export const createAppRuntime = async ({
 
       if (method === 'POST' && pathname === '/api/functions/student-registry') {
         const data = await handleStudentRegistryFunction(database, body, { actor, tenantId });
+        return data?.error
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/clubs') {
+        const data = await handleClubsFunction(database, body, { actor });
+        return data?.error
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/requirements') {
+        const data = await handleRequirementsFunction(database, body, { actor });
+        return data?.error
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/matron') {
+        const data = await handleMatronFunction(database, body, { actor });
         return data?.error
           ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };

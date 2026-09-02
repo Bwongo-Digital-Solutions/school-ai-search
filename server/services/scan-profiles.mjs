@@ -29,6 +29,8 @@ export const SCAN_SECTIONS = [
   'gate_pass',
   'gate_permission',
   'meal_card',
+  'clubs',
+  'requirements',
 ];
 
 /* 'payments' is the ledger behind the 'fees' balance — who paid what, and when. It is the
@@ -36,7 +38,7 @@ export const SCAN_SECTIONS = [
    teacher sees whether fees are cleared, not the family's payment history. */
 const ADMIN_SECTIONS = [
   'fees', 'payments', 'bio', 'class', 'dormitory', 'parents', 'gate_permission',
-  'exam_clearance_grant',
+  'exam_clearance_grant', 'clubs', 'requirements',
 ];
 
 /* Designations are only meaningful inside their own role; a cook is support staff. An
@@ -69,6 +71,8 @@ const PROFILES = {
       'dormitory',
       'parents',
       'gate_permission',
+      'clubs',
+      'requirements',
     ],
   },
   support_staff: {
@@ -77,7 +81,9 @@ const PROFILES = {
     // The gate checks a permission, it never issues one — whoever mans the gate must not also
     // be the person who authorised the exit.
     askari: ['class', 'gate_pass'],
-    matron: ['bio', 'class', 'dormitory', 'parents', 'gate_permission'],
+    /* The matron checks whether a boarder actually arrived with their bedding and their broom, so
+       the requirements list is on the card she already scans rather than on a screen of its own. */
+    matron: ['bio', 'class', 'dormitory', 'parents', 'gate_permission', 'clubs', 'requirements'],
     cook: ['class', 'meal_card'],
   },
 };

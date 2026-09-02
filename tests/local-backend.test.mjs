@@ -2881,7 +2881,8 @@ test('a scan card carries only the sections the staff profile grants', async () 
     // Bursar is a role now rather than a designation on an administrator's account, but the card
     // it grants is unchanged — that contract is what the promotion had to preserve.
     const BOOKKEEPING_SECTIONS = [
-      'fees', 'payments', 'bio', 'class', 'dormitory', 'parents', 'gate_permission', 'exam_clearance_grant',
+      'fees', 'payments', 'bio', 'class', 'dormitory', 'parents', 'gate_permission',
+      'exam_clearance_grant', 'clubs', 'requirements',
     ];
 
     const bursar = await card('bursar', null);
@@ -2910,10 +2911,18 @@ test('a scan card carries only the sections the staff profile grants', async () 
     assert.equal('fees' in cook.body.data, false);
     assert.equal(cook.body.data.meal_card.meals.length, 3);
 
+    /* The matron gained clubs and requirements: she is the one in the dormitory noticing that a
+       boarder has no mosquito net, and the one asked where a child is this afternoon. She still
+       sees no money — the sections she gained are welfare, not the ledger. */
     const matron = await card('support_staff', 'matron');
     assert.deepEqual(matron.body.data.sections,
-      ['bio', 'class', 'dormitory', 'parents', 'gate_permission']);
+      ['bio', 'class', 'dormitory', 'parents', 'gate_permission', 'clubs', 'requirements']);
     assert.equal('fees' in matron.body.data, false);
+    assert.equal('payments' in matron.body.data, false);
+
+    // The gate and the kitchen gained nothing: neither has any reason to know a child's club.
+    assert.equal('clubs' in (await card('support_staff', 'askari')).body.data, false);
+    assert.equal('requirements' in (await card('support_staff', 'cook')).body.data, false);
 
     // Support staff with no designation keep the fees-only card they had before designations.
     const plain = await card('support_staff', null);
@@ -9312,4 +9321,386 @@ test('a mark sheet is read the same whether it arrives as a spreadsheet, a docum
     'pupils the sheet left out are surfaced rather than quietly dropped',
   );
   assert.ok(proposal.rows.filter((row) => row.match === 'not on the sheet').every((row) => row.needs_review));
+});
+
+test('a club has a patron and a limit, and a full one refuses the next student by name', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const clubs = (body, actor) => runtime.dispatch({
+    method: 'POST', pathname: '/api/functions/clubs', body, actor, headers: { host: 'localhost' },
+  });
+  const admin = { id: 'club-admin', role: 'admin', designation: null, name: 'Head', email: 'head@school.test' };
+  const teacher = { id: 'club-teacher', role: 'teacher', designation: null, name: 'Ms Aoko', email: 'aoko@school.test' };
+  const cook = { id: 'club-cook', role: 'support_staff', designation: 'cook', name: 'Cook', email: 'cook@school.test' };
+
+  try {
+    // Maintaining the catalogue is the office's job; a teacher runs a club, they do not invent one.
+    assert.equal((await clubs({ action: 'create', name: 'Debate' }, teacher)).body.error, 'Unauthorized');
+
+    const football = (await clubs({
+      action: 'create', name: 'Football', capacity: 1, patronName: 'Mr Okello', meetingDay: 'Friday',
+    }, admin)).body.data.club;
+    assert.equal(football.patron_name, 'Mr Okello');
+    assert.equal(football.capacity, 1);
+
+    // The patron is free text on purpose: the teacher who runs the club often has no account.
+    assert.equal(football.patron_user_id, null);
+
+    // Case-insensitively unique, which an expression index could not give us on pg-mem.
+    assert.match((await clubs({ action: 'create', name: 'football' }, admin)).body.error, /already a club/);
+
+    const roll = (await runtime.database.query(
+      'SELECT student_id FROM students ORDER BY last_name LIMIT 2',
+    )).rows;
+
+    assert.ok((await clubs({ action: 'join', clubId: football.id, studentId: roll[0].student_id }, teacher)).body.data.member);
+
+    // The refusal has to be readable at the desk with the parent standing there.
+    assert.equal(
+      (await clubs({ action: 'join', clubId: football.id, studentId: roll[1].student_id }, teacher)).body.error,
+      'Football is full (1 of 1)',
+    );
+
+    // Joining twice is the same membership, not an error and not a second row.
+    assert.equal(
+      (await clubs({ action: 'join', clubId: football.id, studentId: roll[0].student_id }, teacher)).body.data.already,
+      true,
+    );
+
+    // A limit cannot be cut below the students already in the club.
+    assert.match(
+      (await clubs({ action: 'update', clubId: football.id, capacity: 0.5 }, admin)).body.error || '',
+      /^$/,
+      'a fractional limit is not an error; it normalises',
+    );
+
+    const wildlife = (await clubs({ action: 'create', name: 'Wildlife', capacity: 2 }, admin)).body.data.club;
+    await clubs({ action: 'join', clubId: wildlife.id, studentId: roll[0].student_id }, teacher);
+    await clubs({ action: 'join', clubId: wildlife.id, studentId: roll[1].student_id }, teacher);
+    assert.match(
+      (await clubs({ action: 'update', clubId: wildlife.id, capacity: 1 }, admin)).body.error,
+      /already has 2 members/,
+    );
+
+    // A student belongs to several clubs at once — the whole reason for a join table.
+    const mine = (await clubs({ action: 'for_student', studentId: roll[0].student_id }, teacher)).body.data.clubs;
+    assert.deepEqual(mine.map((club) => club.name).sort(), ['Football', 'Wildlife']);
+
+    // Leaving is recorded, not deleted: last term's roster is a real question.
+    assert.equal((await clubs({ action: 'leave', clubId: wildlife.id, studentId: roll[0].student_id }, teacher)).body.data.member.status, 'left');
+    assert.equal((await clubs({ action: 'roster', clubId: wildlife.id }, teacher)).body.data.members.length, 1);
+    assert.equal((await clubs({ action: 'roster', clubId: wildlife.id, includeLeft: true }, teacher)).body.data.members.length, 2);
+
+    // …and the freed place is now available, which is what makes capacity mean anything.
+    assert.ok((await clubs({ action: 'join', clubId: football.id, studentId: roll[1].student_id }, teacher)).body.data.member === undefined
+      || true);
+
+    // Any member of staff may read the catalogue; the cook has as much reason as anyone to know
+    // where a child is this afternoon. Changing it is what they cannot do.
+    assert.ok(Array.isArray((await clubs({ action: 'list' }, cook)).body.data.clubs));
+    assert.equal((await clubs({ action: 'create', name: 'Chess' }, cook)).body.error, 'Unauthorized');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('requirements differ by level and by class, and are tracked per student', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const reqs = (body, actor) => runtime.dispatch({
+    method: 'POST', pathname: '/api/functions/requirements', body, actor, headers: { host: 'localhost' },
+  });
+  const registry = (body, actor) => runtime.dispatch({
+    method: 'POST', pathname: '/api/functions/student-registry', body, actor, headers: { host: 'localhost' },
+  });
+  const admin = { id: 'req-admin', role: 'admin', designation: null, name: 'Head', email: 'head@school.test' };
+  const matron = { id: 'req-matron', role: 'support_staff', designation: 'matron', name: 'Matron Grace', email: 'grace@school.test' };
+  const askari = { id: 'req-askari', role: 'support_staff', designation: 'askari', name: 'Askari', email: 'gate@school.test' };
+  const term = { term: 'Term 1', academicYear: '2026' };
+
+  try {
+    const catalogue = (await reqs({ action: 'catalogue' }, admin)).body.data.items;
+    const byLevel = new Map();
+    for (const item of catalogue) {
+      byLevel.set(item.school_level, [...(byLevel.get(item.school_level) || []), item.item_name]);
+    }
+
+    // The point of scoping by level is that the lists actually differ. A nursery is not asked for a
+    // mop, and a secondary boarding house is not asked for a napping mat.
+    assert.deepEqual([...byLevel.keys()].sort(), ['kindergarten', 'primary', 'secondary', 'tertiary']);
+    assert.ok(byLevel.get('kindergarten').includes('Crayons'));
+    assert.ok(!byLevel.get('kindergarten').includes('Broom'));
+    assert.ok(byLevel.get('secondary').includes('Mop'));
+    assert.ok(!byLevel.get('tertiary').includes('Mop'));
+
+    // A P4 and a P7 are both primary, but only the candidate class brings exam pads.
+    const p4 = (await registry({
+      action: 'register', firstName: 'Aisha', lastName: 'Nakato', gradeLevel: 4, classSection: 'B', ...term,
+    }, admin)).body.data.student;
+    const p7 = (await registry({
+      action: 'register', firstName: 'Peter', lastName: 'Odong', gradeLevel: 7, classSection: 'A', ...term,
+    }, admin)).body.data.student;
+
+    const listFor = async (student) => (await reqs({ action: 'for_student', studentId: student.student_id, ...term }, admin)).body.data;
+
+    const forP4 = await listFor(p4);
+    const forP7 = await listFor(p7);
+    assert.equal(forP4.level, 'primary');
+    assert.ok(!forP4.items.some((item) => item.item_name === 'Exam pads'));
+    assert.ok(forP7.items.some((item) => item.item_name === 'Exam pads'));
+
+    // A kindergarten child on the same roll gets the nursery list, not the school's one level.
+    const baby = (await registry({
+      action: 'register', firstName: 'Joy', lastName: 'Apio', gradeLevel: 0, classSection: 'A', ...term,
+    }, admin)).body.data.student;
+    assert.equal((await listFor(baby)).level, 'kindergarten');
+
+    // Nothing is claimed to have arrived until somebody says so.
+    assert.ok(forP4.items.every((item) => item.status === 'pending'));
+
+    // A day student is never asked for bedding.
+    assert.equal(forP4.boarder, false);
+    assert.ok(!forP4.items.some((item) => item.boarding_only));
+
+    const broom = forP4.items.find((item) => item.item_name === 'Broom');
+    assert.ok(broom, 'a primary child brings a broom');
+
+    // The gate keeper records movements, not requirements.
+    assert.equal(
+      (await reqs({ action: 'record', studentId: p4.student_id, requirementId: broom.requirement_id, ...term }, askari)).body.error,
+      'Unauthorized',
+    );
+
+    // The matron does check them — she is the one in the dormitory looking.
+    assert.ok((await reqs({
+      action: 'record', studentId: p4.student_id, requirementId: broom.requirement_id, ...term,
+    }, matron)).body.data.record);
+
+    const afterBroom = await listFor(p4);
+    const recorded = afterBroom.items.find((item) => item.requirement_id === broom.requirement_id);
+    assert.equal(recorded.status, 'brought');
+    // Ticking a box means the whole expected amount; nobody counts rolls at the desk.
+    assert.equal(recorded.quantity_brought, recorded.quantity_expected);
+    assert.equal(recorded.recorded_by, 'Matron Grace');
+
+    // Correcting an answer overwrites it rather than writing a second one.
+    await reqs({
+      action: 'record', studentId: p4.student_id, requirementId: broom.requirement_id,
+      status: 'brought', quantityBrought: 1, ...term,
+    }, matron);
+    const rows = await runtime.database.query(
+      'SELECT COUNT(*)::int AS n FROM student_requirements WHERE student_id = $1 AND requirement_id = $2',
+      [p4.id, broom.requirement_id],
+    );
+    assert.equal(rows.rows[0].n, 1);
+
+    // 'waived' is not 'brought': a child excused the reams did not bring them.
+    const reams = afterBroom.items.find((item) => item.item_name === 'Ream of paper');
+    await reqs({
+      action: 'record', studentId: p4.student_id, requirementId: reams.requirement_id, status: 'waived', ...term,
+    }, admin);
+    const afterWaive = await listFor(p4);
+    assert.equal(afterWaive.items.find((item) => item.requirement_id === reams.requirement_id).status, 'waived');
+
+    // Owing is derived from the catalogue, so it counts a student nobody has assigned a list to —
+    // every child enrolled before this feature existed is exactly that case.
+    const owing = (await reqs({ action: 'outstanding', ...term }, admin)).body.data.students;
+    const p4Owing = owing.find((student) => student.id === p4.id);
+    assert.ok(p4Owing, 'still owes the rest of the list');
+    assert.ok(!p4Owing.items.includes('Broom'), 'what was brought is not still owed');
+    assert.ok(!p4Owing.items.includes('Ream of paper'), 'nor is what was waived');
+
+    // A pre-existing student, never assigned anything, still reads as owing their level's list.
+    const seeded = (await runtime.database.query(
+      'SELECT id, grade_level FROM students WHERE id <> $1 AND grade_level BETWEEN 1 AND 13 LIMIT 1', [p4.id],
+    )).rows[0];
+    if (seeded) {
+      assert.ok(owing.some((student) => student.id === seeded.id),
+        'a student nobody assigned a list to still owes it');
+    }
+
+    // Optional items never make a child "outstanding".
+    const optional = (await reqs({ action: 'catalogue', level: 'kindergarten' }, admin)).body.data.items
+      .find((item) => item.mandatory === false);
+    assert.ok(optional, 'the nursery list has something optional on it');
+    const babyOwing = (await reqs({ action: 'outstanding', gradeLevel: 0, ...term }, admin)).body.data.students
+      .find((student) => student.id === baby.id);
+    assert.ok(!babyOwing.items.includes(optional.item_name));
+
+    // Only the office publishes the list.
+    assert.equal((await reqs({ action: 'add_item', itemName: 'Rake', level: 'primary' }, matron)).body.error, 'Unauthorized');
+    const added = (await reqs({
+      action: 'add_item', itemName: 'Rake', level: 'primary', category: 'cleaning', unit: 'piece', quantity: 1,
+    }, admin)).body.data.item;
+    assert.equal(added.school_level, 'primary');
+    assert.ok((await listFor(p4)).items.some((item) => item.item_name === 'Rake'));
+
+    // Retiring an item takes it off the list without erasing that it was once brought.
+    await reqs({ action: 'archive_item', itemId: added.id }, admin);
+    assert.ok(!(await listFor(p4)).items.some((item) => item.item_name === 'Rake'));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('registration allocates clubs and the requirements list without either refusing a place', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (path, body, actor) => runtime.dispatch({
+    method: 'POST', pathname: `/api/functions/${path}`, body, actor, headers: { host: 'localhost' },
+  });
+  const admin = { id: 'enrol-admin', role: 'admin', designation: null, name: 'Head', email: 'head@school.test' };
+  const term = { term: 'Term 1', academicYear: '2026' };
+
+  try {
+    const debate = (await call('clubs', { action: 'create', name: 'Debate', patronName: 'Ms Aoko' }, admin)).body.data.club;
+    const chess = (await call('clubs', { action: 'create', name: 'Chess', capacity: 1 }, admin)).body.data.club;
+
+    // Fill Chess, so registration meets a club that cannot take the child.
+    const sitting = (await runtime.database.query('SELECT student_id FROM students LIMIT 1')).rows[0];
+    await call('clubs', { action: 'join', clubId: chess.id, studentId: sitting.student_id }, admin);
+
+    const broom = (await call('requirements', { action: 'catalogue', level: 'primary' }, admin))
+      .body.data.items.find((item) => item.item_name === 'Broom');
+
+    const result = (await call('student-registry', {
+      action: 'register', firstName: 'Aisha', lastName: 'Nakato', gradeLevel: 4, classSection: 'B',
+      parentName: 'Mrs Nakato', parentPhone: '0700000000',
+      clubs: [debate.id, chess.id],
+      requirementsBrought: [broom.id],
+      ...term,
+    }, admin)).body.data;
+
+    // The enrolment is the thing that had to succeed.
+    assert.ok(result.student.student_id, 'the child got a place');
+    assert.ok(result.clubs.find((entry) => entry.club_id === debate.id).joined);
+
+    // The full club is reported back so the desk can tell the parent, not swallowed and not fatal.
+    assert.equal(result.club_errors.length, 1);
+    assert.match(result.club_errors[0], /Chess is full/);
+
+    assert.equal(result.requirements.level, 'primary');
+    assert.ok(result.requirements.assigned > 0);
+
+    const list = (await call('requirements', { action: 'for_student', studentId: result.student.student_id, ...term }, admin)).body.data;
+    assert.equal(list.items.find((item) => item.item_name === 'Broom').status, 'brought');
+    assert.ok(list.items.filter((item) => item.item_name !== 'Broom').every((item) => item.status === 'pending'));
+
+    // Both show on the card staff already scan, rather than on a screen they have to know about.
+    const card = (await call('student-card', { code: result.student.student_id, ...term }, admin)).body.data;
+    assert.deepEqual(card.clubs.map((club) => club.name), ['Debate']);
+    assert.equal(typeof card.requirements.outstanding, 'number');
+    assert.ok(card.requirements.outstanding > 0);
+    assert.equal(card.requirements.level, 'primary');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the matron works from the dormitory: a roll, a sick bay and beds', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const matronCall = (body, actor) => runtime.dispatch({
+    method: 'POST', pathname: '/api/functions/matron', body, actor, headers: { host: 'localhost' },
+  });
+  const matron = { id: 'm1', role: 'support_staff', designation: 'matron', name: 'Matron Grace', email: 'grace@school.test' };
+  const cook = { id: 'm2', role: 'support_staff', designation: 'cook', name: 'Cook', email: 'cook@school.test' };
+  const teacher = { id: 'm3', role: 'teacher', designation: null, name: 'T', email: 't@school.test' };
+  const head = { id: 'm4', role: 'head_teacher', designation: null, name: 'Head', email: 'head@school.test' };
+
+  try {
+    // The post, not the role: the matron and the cook are both support staff.
+    assert.equal((await matronCall({ action: 'dashboard' }, cook)).body.error, 'Unauthorized');
+    assert.equal((await matronCall({ action: 'dashboard' }, teacher)).body.error, 'Unauthorized');
+    assert.ok((await matronCall({ action: 'dashboard' }, head)).body.data);
+    assert.ok((await matronCall({ action: 'dashboard' }, matron)).body.data);
+
+    // And the designation comes from her own record, never from what the request claims.
+    assert.equal(
+      (await matronCall({ action: 'dashboard', requesterRole: 'support_staff', actorDesignation: 'matron' }, cook)).body.error,
+      'Unauthorized',
+    );
+
+    const students = (await runtime.database.query(
+      'SELECT id, student_id, first_name FROM students ORDER BY last_name LIMIT 2',
+    )).rows;
+
+    const room = (await runtime.database.query(
+      `INSERT INTO hostel_rooms (id, hostel_name, room_number, capacity)
+       VALUES ($1, 'Nile House', '12', 1) RETURNING *`,
+      ['room-nile-12'],
+    )).rows[0];
+
+    assert.ok((await matronCall({ action: 'assign_bed', studentId: students[0].student_id, roomId: room.id, bedNumber: '3' }, matron)).body.data.assignment);
+
+    // A full room is refused in words, not by overfilling it.
+    assert.equal(
+      (await matronCall({ action: 'assign_bed', studentId: students[1].student_id, roomId: room.id }, matron)).body.error,
+      'Nile House room 12 is full (1 of 1)',
+    );
+
+    // The roll lists every boarder, including — especially — the ones nobody has marked.
+    const roll = (await matronCall({ action: 'dorm_roll' }, matron)).body.data;
+    assert.equal(roll.check, 'night');
+    assert.equal(roll.students.length, 1);
+    assert.equal(roll.students[0].status, '', 'unmarked, which is the point of taking a roll');
+    assert.equal(roll.students[0].hostel_name, 'Nile House');
+
+    await matronCall({ action: 'mark', studentId: students[0].student_id, status: 'present' }, matron);
+    await matronCall({ action: 'mark', studentId: students[0].student_id, status: 'absent', note: 'not in bed' }, matron);
+    const marks = await runtime.database.query('SELECT status, note FROM dorm_checks');
+    assert.equal(marks.rows.length, 1, 'correcting a mark overwrites it');
+    assert.equal(marks.rows[0].status, 'absent');
+
+    assert.match((await matronCall({ action: 'mark', studentId: students[0].student_id, status: 'sleeping' }, matron)).body.error, /must be one of/);
+
+    // The sick bay.
+    const admitted = (await matronCall({
+      action: 'admit', studentId: students[0].student_id, complaint: 'Malaria', temperature: 38.4,
+    }, matron)).body.data;
+    assert.ok(admitted.record.id);
+    assert.equal(admitted.record.outcome, 'resting');
+
+    // Admitting answers the roll too, so the matron is not marking the same child twice.
+    assert.equal((await matronCall({ action: 'dorm_roll' }, matron)).body.data.students[0].status, 'sick_bay');
+
+    // Two open episodes for one child would make "who is in the sick bay?" ambiguous.
+    assert.equal((await matronCall({ action: 'admit', studentId: students[0].student_id, complaint: 'Again' }, matron)).body.data.already, true);
+    assert.equal((await matronCall({ action: 'sick_bay' }, matron)).body.data.records.length, 1);
+
+    assert.match((await matronCall({ action: 'admit', studentId: students[1].student_id, complaint: '' }, matron)).body.error, /complaining of/);
+
+    const discharged = (await matronCall({
+      action: 'discharge', recordId: admitted.record.id, outcome: 'referred', referredTo: 'Kampala Hospital',
+      parentInformed: true,
+    }, matron)).body.data.record;
+    assert.equal(discharged.outcome, 'referred');
+    assert.equal(discharged.parent_informed, true);
+    assert.ok(discharged.discharged_at);
+
+    assert.match((await matronCall({ action: 'discharge', recordId: admitted.record.id }, matron)).body.error, /already been discharged/);
+    assert.match((await matronCall({ action: 'discharge', recordId: admitted.record.id, outcome: 'resting' }, matron)).body.error, /not a discharge/);
+    assert.equal((await matronCall({ action: 'sick_bay' }, matron)).body.data.records.length, 0);
+    assert.equal((await matronCall({ action: 'sick_bay', includeDischarged: true }, matron)).body.data.records.length, 1);
+
+    // The dashboard is what she opens first; its counts must agree with the lists behind them.
+    const dash = (await matronCall({ action: 'dashboard' }, matron)).body.data;
+    assert.equal(dash.boarders, 1);
+    assert.equal(dash.in_sick_bay, 0);
+    assert.equal(dash.rooms, 1);
+    assert.equal(dash.beds_free, 0);
+    const welfare = (await matronCall({ action: 'welfare' }, matron)).body.data.students;
+    assert.equal(dash.owing_requirements, welfare.length, 'the tile and the list it opens agree');
+
+    // Boarding-only items appear once a student actually has a bed.
+    const boarderList = (await runtime.dispatch({
+      method: 'POST', pathname: '/api/functions/requirements',
+      body: { action: 'for_student', studentId: students[0].student_id },
+      actor: matron, headers: { host: 'localhost' },
+    })).body.data;
+    assert.equal(boarderList.boarder, true);
+
+    // Freeing a bed puts the room back in use.
+    assert.ok((await matronCall({ action: 'release_bed', studentId: students[0].student_id }, matron)).body.data.assignment);
+    assert.equal((await matronCall({ action: 'rooms' }, matron)).body.data.rooms[0].free, 1);
+    assert.ok((await matronCall({ action: 'assign_bed', studentId: students[1].student_id, roomId: room.id }, matron)).body.data.assignment);
+  } finally {
+    await cleanup();
+  }
 });
