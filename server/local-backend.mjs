@@ -38,7 +38,9 @@ import {
 } from './auth/roles.mjs';
 import { attachBroker, deliverRemote, presence as busPresence, publish } from './events/bus.mjs';
 import { handleEventsRequest, isEventsRequest, useAudienceClause } from './events/sse.mjs';
-import { messageEvent, presenceEvent, readEvent } from './events/audience.mjs';
+import { activityEvent, messageEvent, presenceEvent, readEvent } from './events/audience.mjs';
+import { extractMarks, proposeMarks } from './services/mark-extraction.mjs';
+import { callModelWithTools, supportsVision } from './agent/providers.mjs';
 import {
   clearedSessionCookie,
   issueSessionToken,
@@ -1944,6 +1946,27 @@ const notifyStaff = async (database, payload) => {
   }
 };
 
+/**
+ * Publishes what a member of staff just did, without writing anybody a message.
+ *
+ * Every action a phone takes ends up here, so that a live board can show the school working;
+ * `notifyStaff` is reserved for the ones somebody must actually read. A register produces one
+ * activity per student and no inbox entries at all, which is the difference between a feed worth
+ * watching and forty messages nobody will.
+ *
+ * Fire-and-forget in the same way as notifyStaff: the action has already succeeded by the time we
+ * get here, and a feed is never worth failing a write for. Without a tenantId there is no bus to
+ * publish to — the same silent skip the notifyStaff header warns about, so callers must pass one.
+ */
+const recordActivity = (tenantId, payload) => {
+  if (!tenantId) return;
+  try {
+    publish(tenantId, activityEvent(payload));
+  } catch (error) {
+    console.warn('Could not publish an activity event:', error instanceof Error ? error.message : error);
+  }
+};
+
 const handleMessagesFunction = async (database, body = {}, { actor, tenantId } = {}) => {
   const action = body.action || 'inbox';
 
@@ -2203,10 +2226,18 @@ const handleRollCallFunction = async (database, body = {}, { actor: authenticate
           [randomUUID(), student.id, date, status, trimmedText(body.reason), trimmedText(body.markedBy)],
         );
 
+    const fullName = `${student.first_name} ${student.last_name}`;
+    recordActivity(tenantId, {
+      action: 'roll_call.mark',
+      actor: resolveActor(authenticated, body),
+      studentId: student.id,
+      summary: `${fullName} marked ${status}`,
+      detail: { status, date, student_number: student.student_id },
+    });
+
     return {
       record: row.rows[0],
-      student: { id: student.id, student_id: student.student_id,
-        full_name: `${student.first_name} ${student.last_name}` },
+      student: { id: student.id, student_id: student.student_id, full_name: fullName },
       updated: Boolean(existing.rows[0]),
     };
   }
@@ -2259,6 +2290,14 @@ const handleExamClearanceFunction = async (database, body = {}, { actor: authent
         grantedBy, trimmedText(body.grantedByEmail), body.validUntil || null,
       ],
     );
+    recordActivity(tenantId, {
+      action: 'exam.cleared',
+      actor: resolveActor(authenticated, body),
+      studentId: student.id,
+      summary: `${student.first_name} ${student.last_name} cleared for exams`,
+      detail: { granted_by: grantedBy, student_number: student.student_id },
+    });
+
     return { clearance: inserted.rows[0] };
   }
 
@@ -2310,6 +2349,15 @@ const handleExamClearanceFunction = async (database, body = {}, { actor: authent
           + `${note ? `: ${note}` : '.'}`,
       });
     }
+
+    recordActivity(tenantId, {
+      action: decision === 'rejected' ? 'exam.refused' : 'exam.admitted',
+      actor: resolveActor(authenticated, body),
+      studentId: student.id,
+      summary: `${student.first_name} ${student.last_name} `
+        + `${decision === 'rejected' ? 'turned away from' : 'admitted to'} an exam`,
+      detail: { decision, note, student_number: student.student_id },
+    });
 
     return { admission: inserted.rows[0], clearance };
   }
@@ -2405,6 +2453,14 @@ const handleGatePermissionFunction = async (database, body = {}, { actor: authen
         + `to travel to ${destination}. Reason: ${reason}.`,
     });
 
+    recordActivity(tenantId, {
+      action: 'gate.permission_granted',
+      actor: resolveActor(authenticated, body),
+      studentId: student.id,
+      summary: `${grantedBy} cleared ${student.first_name} ${student.last_name} to leave`,
+      detail: { destination, reason, student_number: student.student_id },
+    });
+
     return { permission: inserted.rows[0] };
   }
 
@@ -2421,6 +2477,15 @@ const handleGatePermissionFunction = async (database, body = {}, { actor: authen
       [id, String(body.by || '').trim()],
     );
     if (!updated.rows[0]) return { error: 'No active permission with that id' };
+
+    recordActivity(tenantId, {
+      action: 'gate.permission_cancelled',
+      actor: resolveActor(authenticated, body),
+      studentId: updated.rows[0].student_id,
+      summary: 'A gate pass was withdrawn before it was used',
+      detail: { cancelled_by: String(body.by || '').trim(), permission_id: id },
+    });
+
     return { permission: updated.rows[0] };
   }
 
@@ -2618,6 +2683,24 @@ const handleGatePassFunction = async (database, body = {}, { actor: authenticate
         note ? `: ${note}` : '.'}`,
     });
   }
+
+  /* Every movement is activity; only a refusal is also a message. A board showing the gate wants
+     both directions, but the office does not need an inbox entry per child walking back in. */
+  recordActivity(tenantId, {
+    action: decision === 'declined' ? 'gate.declined' : `gate.${direction}`,
+    actor: resolveActor(authenticated, body),
+    studentId: student.id,
+    summary: decision === 'declined'
+      ? `${studentName} turned back at the gate`
+      : `${studentName} signed ${direction === 'out' ? 'out' : 'in'}`,
+    detail: {
+      direction,
+      decision,
+      student_number: student.student_id,
+      destination: inserted.rows[0].destination || '',
+      recorded_by: String(body.recordedBy || '').trim(),
+    },
+  });
 
   const onPremises = decision === 'declined' ? true : direction === 'in';
   return { pass: inserted.rows[0], permission: closedPermission, on_premises: onPremises };
@@ -3305,6 +3388,417 @@ const handleGateLogFunction = async (database, body = {}, { actor: authenticated
  * Marks a meal as served. Serving the same meal twice in a day is a re-scan of a student who
  * already ate, not a second helping, so the existing row is returned instead of a new one.
  */
+/**
+ * Enrolling a student from a phone.
+ *
+ * The student number is the identity everything else scans on — a gate pass, a meal, a mark — so it
+ * is issued here rather than guessed at by the caller. The portal builds it from the length of the
+ * list it happens to have loaded, which collides the moment a student is removed or the list is
+ * paginated; this takes the highest number already issued for the year and adds one, and the unique
+ * index remains the backstop rather than the plan.
+ *
+ * A number freed by removing a student is issued again, and that is safe rather than sloppy: every
+ * record that referenced them is cascaded away with the row, so the number points at nothing. What
+ * must not happen is issuing one still in use, which the caller checks before inserting.
+ */
+const nextStudentNumber = async (database, year) => {
+  const prefix = `STU-${year}-`;
+  const { rows } = await database.query(
+    "SELECT student_id FROM students WHERE student_id LIKE $1",
+    [`${prefix}%`],
+  );
+
+  let highest = 0;
+  for (const row of rows) {
+    // Only the plain <prefix><digits> form counts; anything a school typed by hand is left alone
+    // rather than being parsed into a number it never was.
+    const match = /^STU-\d{4}-(\d+)$/.exec(row.student_id || '');
+    if (match) highest = Math.max(highest, Number(match[1]));
+  }
+  return `${prefix}${String(highest + 1).padStart(3, '0')}`;
+};
+
+const handleStudentRegistryFunction = async (database, body = {}, { actor: authenticated, tenantId } = {}) => {
+  const actor = resolveActor(authenticated, body);
+  const refusal = requireRole(actor, ['admin']);
+  if (refusal) return refusal;
+
+  const action = String(body.action || 'register').trim();
+  const year = String(body.year || new Date().getFullYear());
+
+  if (action === 'next_number') {
+    return { student_id: await nextStudentNumber(database, year) };
+  }
+
+  if (action !== 'register') return { error: `Unsupported action: ${action}` };
+
+  const firstName = trimmedText(body.firstName);
+  const lastName = trimmedText(body.lastName);
+  const gradeLevel = Number(body.gradeLevel);
+  const classSection = trimmedText(body.classSection);
+
+  if (!firstName || !lastName) return { error: 'A first and last name are required' };
+  if (!Number.isFinite(gradeLevel)) return { error: 'A class is required' };
+  if (!classSection) return { error: 'A class section is required' };
+
+  const email = trimmedText(body.email);
+  const parentEmail = trimmedText(body.parentEmail);
+  const looksLikeEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+  if (email && !looksLikeEmail(email)) return { error: 'That email address is not valid' };
+  if (parentEmail && !looksLikeEmail(parentEmail)) return { error: "That parent's email address is not valid" };
+
+  const studentNumber = trimmedText(body.studentId) || await nextStudentNumber(database, year);
+
+  /* Checked rather than left to the unique index, so a duplicate comes back as a sentence the
+     person at the desk can act on instead of a constraint violation. */
+  const clash = await database.query(
+    'SELECT id FROM students WHERE student_id = $1 LIMIT 1',
+    [studentNumber],
+  );
+  if (clash.rows[0]) return { error: `A student is already registered as ${studentNumber}` };
+
+  const inserted = await database.query(
+    `
+      INSERT INTO students
+        (id, student_id, first_name, last_name, grade_level, class_section, gender,
+         date_of_birth, email, phone, parent_name, parent_phone, parent_email, address,
+         enrollment_date, status)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'active')
+      RETURNING *
+    `,
+    [
+      randomUUID(), studentNumber, firstName, lastName, gradeLevel, classSection,
+      trimmedText(body.gender) || null, body.dateOfBirth || null, email || null,
+      trimmedText(body.phone) || null, trimmedText(body.parentName) || null,
+      trimmedText(body.parentPhone) || null, parentEmail || null, trimmedText(body.address) || null,
+      body.enrollmentDate || todayIso(),
+    ],
+  );
+
+  const student = inserted.rows[0];
+  const fullName = `${student.first_name} ${student.last_name}`;
+
+  recordActivity(tenantId, {
+    action: 'student.registered',
+    actor,
+    studentId: student.id,
+    summary: `${fullName} enrolled into ${student.grade_level}${student.class_section}`,
+    detail: { student_number: student.student_id },
+  });
+
+  /* Enrolment is rare and consequential, so this is a message as well as activity: the office
+     should find it later without having been watching a feed at the time. */
+  await notifyStaff(database, {
+    tenantId,
+    audienceKind: 'role',
+    audienceValue: 'admin',
+    studentId: student.id,
+    subject: `${fullName} registered`,
+    body: `${fullName} (${student.student_id}) was enrolled into `
+      + `${student.grade_level}${student.class_section}`
+      + `${actor?.name ? ` by ${actor.name}` : ''}.`,
+  });
+
+  return { student };
+};
+
+/**
+ * Recording marks: by hand, off a photograph, or out of a file.
+ *
+ * Three ways in and one way through. `roster` says which classes this teacher may enter marks for
+ * and who is in one; `extract` reads a file into a proposal and writes nothing at all; `save`
+ * commits the rows a teacher has confirmed. The separation is the safety: an extraction is a
+ * suggestion until a person agrees with it, because a misread digit becomes an academic record
+ * that nobody goes back and checks.
+ *
+ * A teacher may only touch a class allocated to them. That is what makes a mark attributable, and
+ * it is checked on every action rather than trusted from the screen.
+ */
+/**
+ * Asks a model to read a photographed mark sheet.
+ *
+ * Deliberately narrow: it returns what is written, and nothing about who anybody is. Names come
+ * back as text and are matched against the register afterwards, because a model handed a roster
+ * will return a student id it invented for a name it could not read, and that is a mark on the
+ * wrong child with nothing to show for it.
+ *
+ * `confidence` is the model's own, and is used only to flag a row for a second look — never to
+ * decide whether to save it. Everything is reviewed either way.
+ */
+const makeMarkSheetReader = ({ modelId } = {}) => async ({ mediaType, data }) => {
+  const model = resolveModelSelection(modelId);
+  if (!model || !supportsVision(model.provider)) {
+    throw new Error(
+      'Reading a photograph needs a vision-capable model. Choose one under AI keys, '
+      + 'or enter the marks by hand.',
+    );
+  }
+
+  const reply = await callModelWithTools({
+    model,
+    system:
+      'You read photographs of school mark sheets and return only what is written on them. '
+      + 'Reply with JSON: {"rows":[{"name":"as written","score":number|null,'
+      + '"maxScore":number|null,"confidence":"high"|"low"}]}. '
+      + 'Copy names exactly as written, including spelling. Use null for a score you cannot read '
+      + 'or that is marked absent — never guess a number. Mark a row "low" when the handwriting '
+      + 'is unclear. Return no other text.',
+    messages: [{
+      role: 'user',
+      content: 'Read every student and their mark from this sheet.',
+      images: [{ mediaType, data }],
+    }],
+  });
+
+  const text = String(reply?.content || '');
+  // Models fence JSON as often as not; take the object either way.
+  const match = /\{[\s\S]*\}/.exec(text);
+  if (!match) throw new Error('The model did not return anything readable from that photograph');
+
+  let parsed;
+  try {
+    parsed = JSON.parse(match[0]);
+  } catch {
+    throw new Error('The model did not return anything readable from that photograph');
+  }
+
+  return (Array.isArray(parsed.rows) ? parsed.rows : [])
+    .filter((row) => row && String(row.name || '').trim())
+    .map((row) => ({
+      name: String(row.name).trim(),
+      score: Number.isFinite(Number(row.score)) ? Number(row.score) : null,
+      maxScore: Number.isFinite(Number(row.maxScore)) ? Number(row.maxScore) : null,
+      confidence: row.confidence === 'low' ? 'low' : 'high',
+    }));
+};
+
+const handleMarksFunction = async (database, body = {}, { actor: authenticated, tenantId } = {}) => {
+  const actor = resolveActor(authenticated, body);
+  const refusal = requireRole(actor, ['admin', 'teacher']);
+  if (refusal) return refusal;
+
+  const action = String(body.action || 'roster').trim();
+  const isAdmin = actor.role === 'admin';
+
+  /* The classes this person may enter marks for. An administrator is not restricted to their own
+     allocations; a teacher is entirely restricted to them. */
+  const allocationsFor = async () => {
+    if (isAdmin && body.allTeachers === true) {
+      const { rows } = await database.query(
+        `
+          SELECT a.subject_id, a.grade_level, a.class_section, a.academic_year, a.term,
+                 c.name AS subject_name
+          FROM subject_allocations a
+          LEFT JOIN subjects_catalog c ON c.id = a.subject_id
+        `,
+      );
+      return rows;
+    }
+
+    const person = await database.query(
+      'SELECT teacher_id FROM users WHERE id = $1 LIMIT 1',
+      [actor.id],
+    );
+    const teacherId = person.rows[0]?.teacher_id;
+    if (!teacherId) return [];
+
+    const { rows } = await database.query(
+      `
+        SELECT a.subject_id, a.grade_level, a.class_section, a.academic_year, a.term,
+               c.name AS subject_name
+        FROM subject_allocations a
+        LEFT JOIN subjects_catalog c ON c.id = a.subject_id
+        WHERE a.teacher_id = $1
+      `,
+      [teacherId],
+    );
+    return rows;
+  };
+
+  const classesFrom = (rows) => {
+    const seen = new Map();
+    for (const row of rows) {
+      const key = `${row.grade_level}|${row.class_section}|${row.subject_id}`;
+      if (!seen.has(key)) {
+        seen.set(key, {
+          grade_level: row.grade_level,
+          class_section: row.class_section,
+          subject_id: row.subject_id,
+          subject_name: row.subject_name || 'Unnamed subject',
+          academic_year: row.academic_year,
+          term: row.term,
+        });
+      }
+    }
+    return [...seen.values()].sort(
+      (a, b) => a.grade_level - b.grade_level
+        || String(a.class_section).localeCompare(String(b.class_section))
+        || String(a.subject_name).localeCompare(String(b.subject_name)),
+    );
+  };
+
+  /** The students of one allocated class, refusing outright if it is not this teacher's. */
+  const rosterFor = async ({ gradeLevel, classSection, subjectId }) => {
+    const allocations = await allocationsFor();
+    const allowed = allocations.some(
+      (row) => Number(row.grade_level) === Number(gradeLevel)
+        && String(row.class_section) === String(classSection)
+        && String(row.subject_id) === String(subjectId),
+    );
+    if (!allowed) return { error: 'You are not assigned to that class for that subject' };
+
+    const { rows } = await database.query(
+      `
+        SELECT id, student_id, first_name, last_name
+        FROM students
+        WHERE grade_level = $1 AND class_section = $2
+        ORDER BY last_name, first_name
+      `,
+      [gradeLevel, classSection],
+    );
+    return {
+      students: rows.map((row) => ({
+        id: row.id,
+        student_id: row.student_id,
+        full_name: `${row.first_name} ${row.last_name}`.trim(),
+      })),
+    };
+  };
+
+  if (action === 'roster') {
+    const allocations = await allocationsFor();
+    const classes = classesFrom(allocations);
+    if (!body.gradeLevel && !body.subjectId) return { classes };
+
+    const roster = await rosterFor({
+      gradeLevel: body.gradeLevel, classSection: body.classSection, subjectId: body.subjectId,
+    });
+    if (roster.error) return roster;
+
+    /* What is already recorded, so the screen opens on the marks that exist rather than on blanks
+       a teacher would type over. */
+    const existing = await database.query(
+      `
+        SELECT g.student_id, g.score, g.max_score
+        FROM gradebook_entries g
+        WHERE g.subject_id = $1
+          ${body.examId ? 'AND g.exam_id = $2' : 'AND g.exam_id IS NULL'}
+      `,
+      body.examId ? [body.subjectId, body.examId] : [body.subjectId],
+    );
+    const marks = new Map(existing.rows.map((row) => [row.student_id, row]));
+
+    return {
+      classes,
+      students: roster.students.map((student) => ({
+        ...student,
+        score: marks.has(student.id) ? Number(marks.get(student.id).score) : null,
+        max_score: marks.has(student.id) ? Number(marks.get(student.id).max_score) : null,
+      })),
+    };
+  }
+
+  if (action === 'extract') {
+    const roster = await rosterFor({
+      gradeLevel: body.gradeLevel, classSection: body.classSection, subjectId: body.subjectId,
+    });
+    if (roster.error) return roster;
+
+    const read = await extractMarks({
+      filename: body.filename,
+      mimeType: body.mimeType,
+      base64: body.file,
+      askModel: makeMarkSheetReader({ modelId: body.modelId }),
+    });
+    if (read.error) return read;
+
+    const proposal = proposeMarks({ rows: read.rows, roster: roster.students });
+    // Nothing has been written. Said plainly in the payload so a client cannot mistake this
+    // for a save that happened.
+    return { saved: false, kind: read.kind, read_by: read.read_by, note: read.note || '', ...proposal };
+  }
+
+  if (action === 'save') {
+    const roster = await rosterFor({
+      gradeLevel: body.gradeLevel, classSection: body.classSection, subjectId: body.subjectId,
+    });
+    if (roster.error) return roster;
+
+    const allowedStudents = new Set(roster.students.map((student) => student.id));
+    const incoming = Array.isArray(body.marks) ? body.marks : [];
+    if (!incoming.length) return { error: 'There are no marks to save' };
+
+    const examId = trimmedText(body.examId) || null;
+    const written = [];
+
+    for (const mark of incoming) {
+      const studentId = trimmedText(mark.studentId);
+
+      /* A row without a student, or without a number, is not a mark. Skipped rather than stored as
+         a zero, which is a real grade and means something quite different from "not entered".
+         Tested for emptiness before Number(), because Number(null) and Number('') are both 0 —
+         which is how a blank silently became a nought. */
+      const raw = mark.score;
+      const blank = raw === null || raw === undefined || String(raw).trim() === '';
+      const score = blank ? NaN : Number(raw);
+      if (!studentId || !Number.isFinite(score)) continue;
+      // The class was checked above; this stops a crafted payload reaching another class's student.
+      if (!allowedStudents.has(studentId)) continue;
+
+      const maxScore = Number.isFinite(Number(mark.maxScore)) && Number(mark.maxScore) > 0
+        ? Number(mark.maxScore)
+        : 100;
+
+      /* Upsert by hand: re-entering a mark corrects it rather than leaving two rows, and there is
+         no unique index over (student, subject, exam) to conflict on. */
+      const existing = await database.query(
+        `
+          SELECT id FROM gradebook_entries
+          WHERE student_id = $1 AND subject_id = $2
+            ${examId ? 'AND exam_id = $3' : 'AND exam_id IS NULL'}
+          LIMIT 1
+        `,
+        examId ? [studentId, body.subjectId, examId] : [studentId, body.subjectId],
+      );
+
+      const row = existing.rows[0]
+        ? await database.query(
+          'UPDATE gradebook_entries SET score = $2, max_score = $3 WHERE id = $1 RETURNING *',
+          [existing.rows[0].id, score, maxScore],
+        )
+        : await database.query(
+          `
+            INSERT INTO gradebook_entries (id, student_id, exam_id, subject_id, score, max_score, remarks)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING *
+          `,
+          [randomUUID(), studentId, examId, body.subjectId, score, maxScore, trimmedText(mark.remarks)],
+        );
+      written.push(row.rows[0]);
+    }
+
+    if (written.length) {
+      recordActivity(tenantId, {
+        action: 'marks.recorded',
+        actor,
+        summary: `${written.length} mark(s) recorded for `
+          + `${body.gradeLevel}${body.classSection}`,
+        detail: {
+          grade_level: body.gradeLevel,
+          class_section: body.classSection,
+          subject_id: body.subjectId,
+          entered: written.length,
+          source: trimmedText(body.source) || 'manual',
+        },
+      });
+    }
+
+    return { saved: written.length, entries: written };
+  }
+
+  return { error: `Unsupported action: ${action}` };
+};
+
 const handleMealRecordFunction = async (database, body = {}, { actor: authenticated, tenantId } = {}) => {
   // Serving a meal against a student's card.
   //
@@ -3342,6 +3836,14 @@ const handleMealRecordFunction = async (database, body = {}, { actor: authentica
     `,
     [randomUUID(), student.id, mealDate, meal, String(body.servedBy || '').trim()],
   );
+
+  recordActivity(tenantId, {
+    action: 'meal.served',
+    actor,
+    studentId: student.id,
+    summary: `${student.first_name} ${student.last_name} served ${meal}`,
+    detail: { meal, meal_date: mealDate, student_number: student.student_id },
+  });
 
   return { meal: inserted.rows[0], already_served: false };
 };
@@ -4478,6 +4980,20 @@ export const createAppRuntime = async ({
       if (method === 'POST' && pathname === '/api/functions/monitoring') {
         const data = await handleMonitoringFunction(database, body);
         return { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/marks') {
+        const data = await handleMarksFunction(database, body, { actor, tenantId });
+        return data?.error
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      if (method === 'POST' && pathname === '/api/functions/student-registry') {
+        const data = await handleStudentRegistryFunction(database, body, { actor, tenantId });
+        return data?.error
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
       }
 
       if (method === 'POST' && pathname === '/api/functions/teacher-performance') {

@@ -6,9 +6,14 @@
  * the chat, the Lesson Planner and the Digital Examiner across all seven configured providers.
  *
  * Normalised messages:
- *   { role: 'user'    , content: string }
+ *   { role: 'user'    , content: string, images?: [{ mediaType, data }] }
  *   { role: 'assistant', content: string, toolCalls: [{ id, name, input }], raw?: unknown }
  *   { role: 'tool'    , toolCallId, name, content: string, isError?: boolean }
+ *
+`images` are base64 without a data: prefix, and are only ever attached to a user turn. Anthropic,
+ * OpenAI-compatible and Google all accept them; Ollama's own vision models take a different shape
+ * again and most local models have no vision at all, so `supportsVision` says who may be asked
+ * rather than letting a silently ignored image look like a bad reading.
  *
  * `raw` carries the provider's own assistant content back verbatim on the next request. It matters
  * for Claude: thinking blocks must be replayed unchanged on the same model within a tool loop, and
@@ -26,6 +31,16 @@ const OPENAI_COMPATIBLE = ['openai', 'groq', 'mistral', 'openrouter'];
  * model *uses* them well is another matter: small models often emit the call as fenced JSON in the
  * content instead, which callOllama below recovers.
  */
+/**
+ * Providers that can be shown an image.
+ *
+ * Ollama is excluded deliberately. It can serve vision models, but the payload shape differs and
+ * whether the model behind the endpoint has vision at all is unknowable from here — an image that
+ * is quietly dropped comes back as a confident answer about nothing, which is worse than a refusal.
+ */
+export const supportsVision = (provider) =>
+  OPENAI_COMPATIBLE.includes(provider) || provider === 'anthropic' || provider === 'google';
+
 export const supportsTools = (provider) =>
   OPENAI_COMPATIBLE.includes(provider) || provider === 'anthropic' || provider === 'google' || provider === 'ollama';
 
@@ -86,6 +101,20 @@ const toAnthropicMessages = (messages) => {
 
     if (message.role === 'assistant' && message.raw) {
       result.push({ role: 'assistant', content: message.raw });
+      continue;
+    }
+
+    if (message.role === 'user' && message.images?.length) {
+      result.push({
+        role: 'user',
+        content: [
+          ...message.images.map((image) => ({
+            type: 'image',
+            source: { type: 'base64', media_type: image.mediaType, data: image.data },
+          })),
+          ...(message.content ? [{ type: 'text', text: message.content }] : []),
+        ],
+      });
       continue;
     }
 
@@ -161,6 +190,20 @@ const toOpenAiMessages = (system, messages) => {
           type: 'function',
           function: { name: call.name, arguments: JSON.stringify(call.input) },
         })),
+      });
+      continue;
+    }
+
+    if (message.role === 'user' && message.images?.length) {
+      result.push({
+        role: 'user',
+        content: [
+          ...(message.content ? [{ type: 'text', text: message.content }] : []),
+          ...message.images.map((image) => ({
+            type: 'image_url',
+            image_url: { url: `data:${image.mediaType};base64,${image.data}` },
+          })),
+        ],
       });
       continue;
     }

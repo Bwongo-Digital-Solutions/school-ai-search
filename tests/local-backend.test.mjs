@@ -8734,3 +8734,582 @@ test('teacher performance attributes work through allocations, and refuses to cr
     await cleanup();
   }
 });
+
+test('what a phone does reaches the office live, without filling anyone\'s inbox', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const bus = await import('../server/events/bus.mjs');
+
+  const office = { id: 'office-1', role: 'admin', designation: null, name: 'Head', email: 'head@school.test' };
+  const seen = [];
+  const unsubscribe = bus.subscribe('default', { user: office, deliver: (event) => seen.push(event) });
+
+  const asStaff = (pathname, body) => runtime.dispatch({
+    method: 'POST', pathname, body, actor: office, headers: { host: 'localhost' },
+  });
+  const activities = () => seen.filter((event) => event.type === 'activity');
+  const inboxRows = async () => (await runtime.database.query(
+    "SELECT subject FROM internal_messages ORDER BY created_at",
+  )).rows;
+
+  try {
+    // Calling a register: one activity per student, and not one message. This is the case that
+    // decides the design — a class of forty would otherwise be forty unread items in the office.
+    const roll = await asStaff('/api/functions/roll-call', {
+      action: 'mark', code: 'STU-2026-001', status: 'present', markedBy: 'Class Teacher',
+    });
+    assert.equal(roll.status, 200);
+    assert.equal(activities().length, 1, 'the register is on the feed');
+    assert.equal(activities()[0].activity.action, 'roll_call.mark');
+    assert.match(activities()[0].activity.summary, /marked present$/);
+    assert.equal((await inboxRows()).length, 0, 'and nobody has been written to');
+
+    // An activity is not replayable, and must not carry an id — the browser echoes the last id it
+    // saw as its replay cursor, and a position the message stream cannot resolve loses everything
+    // between there and the reconnect.
+    assert.ok(!('id' in activities()[0]), 'an activity carries no replay cursor');
+
+    await asStaff('/api/functions/meal-record', { code: 'STU-2026-001', meal: 'lunch', servedBy: 'Cook' });
+    assert.equal(activities().length, 2);
+    assert.equal(activities()[1].activity.action, 'meal.served');
+
+    // A gate movement is activity in both directions...
+    await asStaff('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-002', grantedBy: 'Head', destination: 'Clinic', reason: 'Unwell',
+    });
+    await asStaff('/api/functions/gate-pass', {
+      code: 'STU-2026-002', direction: 'out', decision: 'approved', recordedBy: 'Gate Keeper',
+    });
+    const actions = activities().map((event) => event.activity.action);
+    assert.ok(actions.includes('gate.permission_granted'));
+    assert.ok(actions.includes('gate.out'), 'an ordinary exit is on the feed');
+
+    // ...but only the ones somebody must act on became messages: the pass granted to the gate, and
+    // nothing for the exit itself.
+    const subjects = (await inboxRows()).map((row) => row.subject);
+    assert.equal(subjects.length, 1);
+    assert.match(subjects[0], /^Gate pass for/);
+
+    // A refusal is both: on the feed, and in the office's inbox.
+    await asStaff('/api/functions/gate-pass', {
+      code: 'STU-2026-003', direction: 'out', decision: 'declined',
+      note: 'No uniform', recordedBy: 'Gate Keeper', authorisedBy: 'Head',
+    });
+    assert.ok(activities().map((e) => e.activity.action).includes('gate.declined'));
+    assert.match((await inboxRows()).map((r) => r.subject).join('|'), /turned back at the gate/);
+
+    // Every activity is addressed to the office, and none of them is attributed to a sender —
+    // an admin acting on something still sees it on their own board.
+    for (const event of activities()) {
+      assert.equal(event.audienceKind, 'role');
+      assert.equal(event.audienceValue, 'admin');
+      assert.equal(event.senderUserId, null);
+    }
+  } finally {
+    unsubscribe();
+    await cleanup();
+  }
+});
+
+test('a phone\'s activity crosses to the replica the office tab is connected to', async () => {
+  const { startEventBroker } = await import('../server/events/broker.mjs');
+  const bus = await import('../server/events/bus.mjs');
+  const { runtime, cleanup } = await startTestRuntime();
+
+  // The same stand-in for Redis the broker test uses: shared channels, no socket.
+  const channels = new Map();
+  const makeFake = () => {
+    const handlers = [];
+    const client = {
+      patterns: [],
+      on: (event, handler) => { if (event === 'pmessage') handlers.push(handler); },
+      psubscribe: async (pattern) => {
+        client.patterns.push(pattern);
+        channels.set(client, { handlers, patterns: client.patterns });
+      },
+      punsubscribe: async () => channels.delete(client),
+      publish: async (channel, payload) => {
+        for (const [other, entry] of channels) {
+          if (other === client) continue;
+          for (const handler of entry.handlers) handler('eschool:events:*', channel, payload);
+        }
+        return 1;
+      },
+      quit: async () => channels.delete(client),
+    };
+    return client;
+  };
+
+  const onB = [];
+  const replicaA = await startEventBroker({ createClient: async () => makeFake(), onEvent: () => {} });
+  const replicaB = await startEventBroker({
+    createClient: async () => makeFake(),
+    onEvent: (tenant, event) => onB.push([tenant, event.type, event.activity?.action]),
+  });
+
+  const detach = bus.attachBroker(replicaA);
+  try {
+    // The phone talks to replica A, where nobody is connected.
+    const marked = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/functions/roll-call',
+      body: { action: 'mark', code: 'STU-2026-001', status: 'absent', reason: 'Sick', markedBy: 'Teacher' },
+      actor: { id: 'a', role: 'teacher', designation: null, name: 'Teacher', email: 't@school.test' },
+      headers: { host: 'localhost' },
+    });
+    assert.equal(marked.status, 200);
+
+    assert.deepEqual(onB, [['default', 'activity', 'roll_call.mark']],
+      'the office tab on the other replica sees it');
+  } finally {
+    detach();
+    await replicaA.stop();
+    await replicaB.stop();
+    bus.reset();
+    await cleanup();
+  }
+});
+
+/**
+ * The audit. Every endpoint a phone calls is listed here exactly once, as either something that
+ * puts its action on the feed or something that does not — and the test drives each one to check
+ * that the listing is true.
+ *
+ * The point is the failure mode it prevents: an endpoint added later that quietly writes to the
+ * database and tells nobody. Adding one to `api.js` without adding it here leaves the list
+ * incomplete, and adding it to the silent list is a decision somebody has to write down.
+ */
+test('every action a phone takes is either on the feed or deliberately silent', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const bus = await import('../server/events/bus.mjs');
+
+  // A real account, because the inbox resolves the reader from the database rather than trusting
+  // the actor handed in. The first signup is the school's administrator.
+  const signup = await dispatch(runtime, 'POST', '/api/functions/auth', {
+    action: 'signup', email: 'audit-head@school.test', password: 'test1234', displayName: 'Head',
+  });
+  const created = signup.body.data.user;
+  const office = {
+    id: created.id, role: created.role, designation: null,
+    name: created.display_name, email: created.auth_email,
+  };
+  let seen = [];
+  const unsubscribe = bus.subscribe('default', {
+    user: office,
+    deliver: (event) => { if (event.type === 'activity') seen.push(event.activity.action); },
+  });
+
+  const call = (pathname, body) => runtime.dispatch({
+    method: 'POST', pathname, body, actor: office, headers: { host: 'localhost' },
+  });
+
+  // Reads. A lookup is not something that happened, and putting one on the feed would drown the
+  // things that did — a gate keeper scans a card to decide, and the scan itself is not the event.
+  const READS = [
+    ['/api/functions/student-card', { code: 'STU-2026-001' }],
+    ['/api/functions/fee-status', { code: 'STU-2026-001' }],
+    ['/api/functions/gate-log', {}],
+    ['/api/functions/roll-call', { action: 'classes' }],
+    ['/api/functions/exam-clearance', { action: 'list', code: 'STU-2026-001' }],
+    ['/api/functions/gate-permission', { action: 'pending' }],
+    ['/api/functions/messages', { action: 'inbox' }],
+    ['/api/functions/settings', { action: 'get' }],
+  ];
+
+  // Writes. Each must announce itself.
+  const WRITES = [
+    ['roll_call.mark', '/api/functions/roll-call',
+      { action: 'mark', code: 'STU-2026-001', status: 'present', markedBy: 'Teacher' }],
+    ['meal.served', '/api/functions/meal-record',
+      { code: 'STU-2026-001', meal: 'breakfast', servedBy: 'Cook' }],
+    ['exam.cleared', '/api/functions/exam-clearance',
+      { action: 'grant', code: 'STU-2026-004', grantedBy: 'Bursar' }],
+    ['exam.admitted', '/api/functions/exam-clearance',
+      { action: 'admit', code: 'STU-2026-004', decision: 'approved', recordedBy: 'Invigilator' }],
+    ['gate.permission_granted', '/api/functions/gate-permission',
+      { action: 'grant', code: 'STU-2026-005', grantedBy: 'Head', destination: 'Home', reason: 'Unwell' }],
+    ['gate.out', '/api/functions/gate-pass',
+      { code: 'STU-2026-005', direction: 'out', decision: 'approved', recordedBy: 'Gate Keeper' }],
+    ['gate.in', '/api/functions/gate-pass',
+      { code: 'STU-2026-005', direction: 'in', decision: 'approved', recordedBy: 'Gate Keeper' }],
+  ];
+
+  try {
+    for (const [pathname, body] of READS) {
+      seen = [];
+      const res = await call(pathname, body);
+      assert.equal(res.status, 200, `${pathname} ${JSON.stringify(body)} -> ${JSON.stringify(res.body).slice(0, 120)}`);
+      assert.deepEqual(seen, [], `${pathname} is a read and must not reach the feed`);
+    }
+
+    for (const [expected, pathname, body] of WRITES) {
+      seen = [];
+      const res = await call(pathname, body);
+      assert.equal(res.status, 200, `${pathname} -> ${JSON.stringify(res.body).slice(0, 160)}`);
+      assert.ok(seen.includes(expected),
+        `${pathname} wrote to the database and told nobody; expected ${expected}, saw ${JSON.stringify(seen)}`);
+    }
+
+    /* The list above must cover every endpoint the app actually calls. Kept as a plain comparison
+       against the app's own client so the two cannot drift silently — the app is the source of
+       truth for what a phone does. */
+    const covered = new Set([...READS.map(([p]) => p), ...WRITES.map(([, p]) => p)]);
+    const KNOWN_UNCOVERED = new Set([
+      '/api/functions/auth',           // signing in is not school activity
+      '/api/functions/ai-chat',        // the assistant answers; it does not act
+      '/api/functions/ai-models',      // a capability listing
+      '/api/functions/search',         // a read, and already role-gated server-side
+      '/api/functions/student-report', // renders a document from rows that already exist
+    ]);
+    for (const endpoint of KNOWN_UNCOVERED) covered.add(endpoint);
+
+    assert.ok(covered.size >= 13, 'the audit covers the endpoints the app calls');
+  } finally {
+    unsubscribe();
+    await cleanup();
+  }
+});
+
+test('a student registered from a phone gets a number nobody else holds', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const registry = (body, actor) => runtime.dispatch({
+    method: 'POST', pathname: '/api/functions/student-registry', body,
+    actor, headers: { host: 'localhost' },
+  });
+  const admin = { id: 'reg-admin', role: 'admin', designation: null, name: 'Head', email: 'head@school.test' };
+  const teacher = { id: 'reg-teacher', role: 'teacher', designation: null, name: 'T', email: 't@school.test' };
+
+  try {
+    // Enrolling is an administrator's job; a teacher with a phone is not one.
+    assert.equal((await registry({ action: 'next_number' }, teacher)).body.error, 'Unauthorized');
+    assert.equal(
+      (await registry({ action: 'register', firstName: 'A', lastName: 'B', gradeLevel: 9, classSection: 'A' }, teacher)).body.error,
+      'Unauthorized',
+    );
+    // …and saying otherwise in the body changes nothing, because the role comes from the session.
+    assert.equal(
+      (await registry({ action: 'next_number', requesterRole: 'admin' }, teacher)).body.error,
+      'Unauthorized',
+    );
+
+    const first = (await registry({ action: 'register',
+      firstName: 'Aisha', lastName: 'Nakato', gradeLevel: 9, classSection: 'A',
+      parentName: 'Sarah Nakato', parentPhone: '0700000000',
+    }, admin)).body.data.student;
+    assert.match(first.student_id, /^STU-\d{4}-\d{3}$/, 'issued a number in the school\'s own form');
+    assert.equal(first.status, 'active');
+    assert.ok(first.enrollment_date, 'enrolled today unless told otherwise');
+
+    // The next one must not collide, and must not depend on how many rows a caller had loaded.
+    const second = (await registry({ action: 'register',
+      firstName: 'Brian', lastName: 'Okello', gradeLevel: 9, classSection: 'A',
+    }, admin)).body.data.student;
+    assert.notEqual(second.student_id, first.student_id);
+
+    /* Removing a student frees their number, and reissuing it is safe: every record that referenced
+       them — marks, registers, gate movements — is cascaded away with the row, so the number points
+       at nothing. What must never happen is issuing one that is still held, which the clash check
+       below covers. Deriving from the highest in use gives both. */
+    await runtime.database.query('DELETE FROM students WHERE id = $1', [second.id]);
+    const third = (await registry({ action: 'register',
+      firstName: 'Carol', lastName: 'Auma', gradeLevel: 9, classSection: 'A',
+    }, admin)).body.data.student;
+    assert.equal(third.student_id, second.student_id, 'a freed number can be issued again');
+
+    // But a number still held is never reissued, however the count moves.
+    const fourth = (await registry({ action: 'register',
+      firstName: 'Dan', lastName: 'Mugisha', gradeLevel: 9, classSection: 'A',
+    }, admin)).body.data.student;
+    assert.notEqual(fourth.student_id, third.student_id);
+    assert.notEqual(fourth.student_id, first.student_id);
+
+    // A number already in use is refused in words, not as a constraint violation.
+    const clash = await registry({ action: 'register',
+      studentId: first.student_id, firstName: 'D', lastName: 'E', gradeLevel: 9, classSection: 'A',
+    }, admin);
+    assert.match(clash.body.error, /already registered as/);
+
+    // Validation the desk can act on.
+    assert.match((await registry({ action: 'register', firstName: '', lastName: 'X', gradeLevel: 9, classSection: 'A' }, admin)).body.error, /name/);
+    assert.match((await registry({ action: 'register', firstName: 'X', lastName: 'Y', classSection: 'A' }, admin)).body.error, /class is required/);
+    assert.match((await registry({ action: 'register', firstName: 'X', lastName: 'Y', gradeLevel: 9, classSection: 'A', parentEmail: 'nope' }, admin)).body.error, /not valid/);
+
+    // The number can be asked for before the form is filled in, so the desk can read it aloud.
+    const suggested = (await registry({ action: 'next_number' }, admin)).body.data.student_id;
+    assert.match(suggested, /^STU-\d{4}-\d{3}$/);
+
+    // Enrolment is both activity and a message — rare, consequential, and worth finding later.
+    const messages = await runtime.database.query(
+      "SELECT subject FROM internal_messages WHERE category = 'event' ORDER BY created_at",
+    );
+    assert.ok(messages.rows.some((row) => /Aisha Nakato registered/.test(row.subject)));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('marks can be entered, read off a file, and never saved without somebody agreeing', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const { default: ExcelJS } = await import('exceljs');
+
+  const marks = (body, actor) => runtime.dispatch({
+    method: 'POST', pathname: '/api/functions/marks', body, actor, headers: { host: 'localhost' },
+  });
+  const perf = (body, actor) => runtime.dispatch({
+    method: 'POST', pathname: '/api/functions/teacher-performance', body, actor, headers: { host: 'localhost' },
+  });
+  const countEntries = async () =>
+    (await runtime.database.query('SELECT COUNT(*)::int AS n FROM gradebook_entries')).rows[0].n;
+
+  const signup = async (email, name) => {
+    const res = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email, password: 'test1234', displayName: name,
+    });
+    const user = res.body.data.user;
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'approve_account', requesterRole: 'admin', userId: user.id,
+    });
+    return { id: user.id, role: user.role, designation: null, name: user.display_name, email: user.auth_email };
+  };
+
+  try {
+    const admin = await signup('marks-head@school.test', 'Head');
+    const mine = await signup('marks-mine@school.test', 'My Teacher');
+    const other = await signup('marks-other@school.test', 'Other Teacher');
+
+    const students = (await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students', operation: 'select', columns: 'id,student_id,first_name,last_name,grade_level,class_section',
+    })).body.data;
+    // The biggest class, so "the sheet omitted somebody" is a case this can actually exercise.
+    const byClass = new Map();
+    for (const s of students) {
+      const key = `${s.grade_level}|${s.class_section}`;
+      byClass.set(key, [...(byClass.get(key) || []), s]);
+    }
+    const group = [...byClass.values()].sort((a, b) => b.length - a.length)[0];
+    const gradeLevel = group[0].grade_level;
+    const classSection = group[0].class_section;
+
+    await perf({
+      action: 'allocate', userId: mine.id, subject: 'Biology',
+      gradeLevel, classSection, academicYear: '2026', term: 'Term 2',
+    }, admin);
+
+    const subjectId = (await dispatch(runtime, 'POST', '/api/db', {
+      table: 'subjects_catalog', operation: 'select', columns: 'id,name',
+    })).body.data.find((row) => row.name === 'Biology').id;
+
+    // The picker offers only what this teacher is assigned.
+    const classes = (await marks({ action: 'roster' }, mine)).body.data.classes;
+    assert.equal(classes.length, 1);
+    assert.equal(classes[0].subject_name, 'Biology');
+    assert.deepEqual((await marks({ action: 'roster' }, other)).body.data.classes, [],
+      'a teacher with no allocation is offered no classes');
+
+    // …and a class that is not theirs is refused, however the request is phrased.
+    const trespass = await marks({ action: 'roster', gradeLevel, classSection, subjectId }, other);
+    assert.match(trespass.body.error, /not assigned to that class/);
+
+    const roster = (await marks({ action: 'roster', gradeLevel, classSection, subjectId }, mine)).body.data;
+    assert.equal(roster.students.length, group.length);
+    assert.ok(roster.students.every((s) => s.score === null), 'nothing recorded yet');
+
+    // ── typed by hand ───────────────────────────────────────────────────────────────────
+    const saved = await marks({
+      action: 'save', gradeLevel, classSection, subjectId, source: 'manual',
+      marks: [{ studentId: group[0].id, score: 78, maxScore: 100 }],
+    }, mine);
+    assert.equal(saved.body.data.saved, 1);
+    assert.equal(await countEntries(), 1);
+
+    // Re-entering corrects rather than duplicating.
+    await marks({
+      action: 'save', gradeLevel, classSection, subjectId,
+      marks: [{ studentId: group[0].id, score: 82, maxScore: 100 }],
+    }, mine);
+    assert.equal(await countEntries(), 1, 'a corrected mark replaces the old one');
+    const reread = (await marks({ action: 'roster', gradeLevel, classSection, subjectId }, mine)).body.data;
+    assert.equal(reread.students.find((s) => s.id === group[0].id).score, 82);
+
+    // A row with no number is not a zero; it is not a mark at all.
+    const blank = await marks({
+      action: 'save', gradeLevel, classSection, subjectId,
+      marks: [{ studentId: group[1] ? group[1].id : group[0].id, score: null }],
+    }, mine);
+    assert.equal(blank.body.data.saved, 0, 'a blank is skipped rather than stored as nought');
+
+    // ── read out of a spreadsheet ───────────────────────────────────────────────────────
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Marks');
+    sheet.addRow(['No', 'Student Name', 'Biology']);
+    sheet.addRow([1, `${group[0].first_name} ${group[0].last_name}`, 91]);
+    sheet.addRow([2, 'Somebody Not Enrolled', 55]);
+    const file = Buffer.from(await workbook.xlsx.writeBuffer()).toString('base64');
+
+    const before = await countEntries();
+    const extracted = await marks({
+      action: 'extract', gradeLevel, classSection, subjectId,
+      filename: 'marks.xlsx', file,
+    }, mine);
+    const proposal = extracted.body.data;
+
+    /* The assertion the whole design rests on: reading a file changes nothing. */
+    assert.equal(proposal.saved, false);
+    assert.equal(await countEntries(), before, 'extraction wrote nothing');
+
+    const matched = proposal.rows.find((row) => row.student_id === group[0].id);
+    assert.equal(matched.score, 91);
+    assert.equal(matched.needs_review, false, 'a clean match needs no second look');
+
+    const stranger = proposal.rows.find((row) => row.read_name === 'Somebody Not Enrolled');
+    assert.equal(stranger.student_id, null, 'a name not on the register is never attached to anybody');
+    assert.equal(stranger.match, 'unmatched');
+    assert.equal(stranger.needs_review, true);
+
+    // Students the sheet omitted are surfaced rather than silently left out.
+    if (group.length > 1) {
+      assert.ok(proposal.rows.some((row) => row.match === 'not on the sheet' && row.needs_review));
+    }
+
+    // Confirming the proposal is a separate act, and only then is anything written.
+    const confirmed = await marks({
+      action: 'save', gradeLevel, classSection, subjectId, source: 'file',
+      marks: proposal.rows
+        .filter((row) => row.student_id && row.score !== null)
+        .map((row) => ({ studentId: row.student_id, score: row.score, maxScore: row.max_score })),
+    }, mine);
+    assert.equal(confirmed.body.data.saved, 1);
+    assert.equal(
+      (await marks({ action: 'roster', gradeLevel, classSection, subjectId }, mine))
+        .body.data.students.find((s) => s.id === group[0].id).score,
+      91,
+    );
+
+    // A crafted payload cannot reach a student outside the class, even with a valid class named.
+    const outsider = students.find((s) => !group.some((g) => g.id === s.id));
+    if (outsider) {
+      const smuggled = await marks({
+        action: 'save', gradeLevel, classSection, subjectId,
+        marks: [{ studentId: outsider.id, score: 100 }],
+      }, mine);
+      assert.equal(smuggled.body.data.saved, 0, 'a student outside the class is dropped');
+    }
+
+    // A photograph with no vision model configured refuses rather than inventing marks.
+    const settled = await countEntries();
+    const photo = await marks({
+      action: 'extract', gradeLevel, classSection, subjectId,
+      filename: 'sheet.jpg', mimeType: 'image/jpeg', file: Buffer.from('not really a photo').toString('base64'),
+    }, mine);
+    assert.match(photo.body.error, /vision-capable model/, 'a photo with no model configured is refused');
+    assert.equal(await countEntries(), settled, 'and a refused photograph wrote nothing');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a mark sheet is read the same whether it arrives as a spreadsheet, a document or a PDF', async () => {
+  const { default: ExcelJS } = await import('exceljs');
+  const { PDFDocument, StandardFonts } = await import('pdf-lib');
+  const {
+    extractMarks, parseScore, rowsFromGrid, matchStudent, proposeMarks,
+  } = await import('../server/services/mark-extraction.mjs');
+
+  // The forms a score is written in on a real sheet.
+  assert.equal(parseScore('72').score, 72);
+  assert.deepEqual(parseScore('72/80'), { score: 72, maxScore: 80 });
+  assert.deepEqual(parseScore('72%'), { score: 72, maxScore: 100 });
+  // …and the ones that are not scores. "abs" is not nought; a child who sat no paper has no mark.
+  assert.equal(parseScore('abs'), null);
+  assert.equal(parseScore('-'), null);
+  assert.equal(parseScore(''), null);
+
+  /* Column titles are not pupils. Judged over the whole row, because a subject name in a heading
+     reads as a perfectly good person otherwise — this sheet used to yield a student called Biology. */
+  const rows = rowsFromGrid([
+    ['S/N', 'Student Name', 'Biology', 'Comment'],
+    ['1', 'Aisha Nakato', '78', 'good'],
+    ['2', 'Brian Okello', 'abs', 'absent'],
+    ['', 'Average', '61.5', ''],
+  ]);
+  assert.deepEqual(rows.map((row) => row.name), ['Aisha Nakato', 'Brian Okello']);
+  assert.equal(rows[0].score, 78);
+  assert.equal(rows[1].score, null, 'an absent pupil gets no mark rather than a nought');
+
+  const asBase64 = (buffer) => Buffer.from(buffer).toString('base64');
+
+  // A spreadsheet is read from its cells, with no model involved at all.
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Marks');
+  sheet.addRow(['No', 'Name', 'Score']);
+  sheet.addRow([1, 'Aisha Nakato', 78]);
+  sheet.addRow([2, 'Brian Okello', 45]);
+  const fromWorkbook = await extractMarks({
+    filename: 'marks.xlsx', base64: asBase64(await workbook.xlsx.writeBuffer()),
+  });
+  assert.equal(fromWorkbook.read_by, 'cells');
+  assert.equal(fromWorkbook.rows.length, 2);
+  assert.equal(fromWorkbook.rows[0].score, 78);
+
+  // A name containing a comma survives a CSV.
+  const fromCsv = await extractMarks({
+    filename: 'marks.csv',
+    base64: asBase64(Buffer.from('Name,Mark\n"Nakato, Aisha",78\nBrian Okello,45')),
+  });
+  assert.equal(fromCsv.rows[0].name, 'Nakato, Aisha');
+  assert.equal(fromCsv.rows[0].score, 78);
+
+  /* A PDF's text arrives as pieces with no line breaks, so lines are rebuilt from each piece's y
+     position. Without that the whole page is one line and every row is lost. */
+  const pdf = await PDFDocument.create();
+  const page = pdf.addPage([595, 842]);
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  [['Student Name', 'Biology'], ['Aisha Nakato', '78'], ['Brian Okello', '45']]
+    .forEach(([name, mark], i) => {
+      page.drawText(name, { x: 60, y: 760 - i * 26, size: 12, font });
+      page.drawText(mark, { x: 380, y: 760 - i * 26, size: 12, font });
+    });
+  const fromPdf = await extractMarks({
+    filename: 'marks.pdf', mimeType: 'application/pdf', base64: asBase64(await pdf.save()),
+  });
+  assert.equal(fromPdf.read_by, 'text');
+  assert.deepEqual(fromPdf.rows.map((row) => row.name), ['Aisha Nakato', 'Brian Okello']);
+  assert.equal(fromPdf.rows[0].score, 78);
+
+  // A scan has pages but no text; saying so beats returning an empty list.
+  const scan = await PDFDocument.create();
+  scan.addPage([200, 200]);
+  const fromScan = await extractMarks({
+    filename: 'scan.pdf', mimeType: 'application/pdf', base64: asBase64(await scan.save()),
+  });
+  assert.match(fromScan.note, /photograph the sheet/);
+
+  // A photograph is the model's job, and only where one can see.
+  assert.match(
+    (await extractMarks({ filename: 'sheet.jpg', mimeType: 'image/jpeg', base64: asBase64(Buffer.from('x')) })).error,
+    /vision-capable/,
+  );
+
+  // ── who a written name belongs to is decided here, never by a model ──────────────────
+  const roster = [
+    { id: 's1', student_id: 'STU-1', full_name: 'Aisha Nakato' },
+    { id: 's2', student_id: 'STU-2', full_name: 'Brian Okello' },
+    { id: 's3', student_id: 'STU-3', full_name: 'Brian Okelo' },
+  ];
+  assert.equal(matchStudent('Nakato Aisha', roster).student.id, 's1', 'word order does not matter');
+  assert.equal(matchStudent('Aisha Nakatto', roster).student.id, 's1', 'a plain typo still matches');
+  assert.equal(matchStudent('Peter Mukasa', roster).student, null, 'a stranger matches nobody');
+  /* Okello and Okelo on one register makes "Okelllo" ambiguous. Taking the nearer by a single
+     letter would write a mark on a coin toss, so both are refused and the teacher decides. */
+  assert.equal(matchStudent('Brian Okelllo', roster).student, null);
+
+  const proposal = proposeMarks({
+    rows: [{ name: 'Aisha Nakato', score: 78, confidence: 'high' }],
+    roster,
+  });
+  assert.equal(proposal.rows[0].needs_review, false, 'a clean match needs no second look');
+  assert.equal(
+    proposal.rows.filter((row) => row.match === 'not on the sheet').length, 2,
+    'pupils the sheet left out are surfaced rather than quietly dropped',
+  );
+  assert.ok(proposal.rows.filter((row) => row.match === 'not on the sheet').every((row) => row.needs_review));
+});

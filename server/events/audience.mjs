@@ -122,3 +122,40 @@ export const presenceEvent = ({ user, online, people }) => ({
   createdAt: new Date().toISOString(),
   presence: { userId: user.id, name: user.name || '', online, people },
 });
+
+/**
+ * Something a member of staff just did.
+ *
+ * Distinct from `messageEvent` on purpose. A message is a durable `internal_messages` row that
+ * somebody is expected to read; an activity is the fact that a register was marked or a meal was
+ * served, which a live board wants and an inbox does not. Calling a register would otherwise post
+ * forty "present" messages to the office, and an inbox that costs more to skim than it gives back
+ * stops being read at all.
+ *
+ * So this is published and never stored. It reaches whoever is connected at the time; nobody
+ * catches up on it later, because there is nothing to catch up to. When an action genuinely needs
+ * to be seen — a student turned back at the gate — that is a message, and the two are sent
+ * together.
+ *
+ * No `id`, for the reason given on `readEvent`: only replayable events carry one, and an id here
+ * would move the browser's `Last-Event-ID` to a position the message replay cannot resolve.
+ */
+export const activityEvent = ({ action, actor, summary, studentId = null, detail = {} }) => ({
+  type: 'activity',
+  // Addressed to the office rather than broadcast: an activity feed is an administrative view, and
+  // the gate keeper has no use for the kitchen's traffic.
+  audienceKind: 'role',
+  audienceValue: 'admin',
+  // Null rather than the actor's id: an admin acting on something should still see it on their own
+  // board, and `reaches` drops an event from its own author.
+  senderUserId: null,
+  createdAt: new Date().toISOString(),
+  activity: {
+    action,
+    summary,
+    student_id: studentId,
+    actor_id: (actor && actor.id) || null,
+    actor_name: (actor && (actor.name || actor.display_name)) || '',
+    ...detail,
+  },
+});
