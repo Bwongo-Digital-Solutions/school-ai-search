@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Button, Modal, Tag, Toggle } from '@carbon/react';
 import { Add, Renew } from '@carbon/react/icons';
-import { CardHeader, EmptyState, Field, StudentPicker, WidgetCard } from '@/components/common';
+import { CardHeader, EmptyState, Field, StudentPicker, TableSkeleton, WidgetCard } from '@/components/common';
+import { useChatContext } from '@/contexts/ChatContext';
 import { useNotifications } from '@/contexts/NotificationContext';
 import { matronApi, type SickBayRecord } from '@/lib/schoolLife';
 import styles from '../tabs.module.scss';
@@ -28,6 +29,7 @@ const formatWhen = (value: string | null) =>
  */
 const SickBayTab: React.FC<Props> = ({ runAction, onChanged }) => {
   const { notify } = useNotifications();
+  const { students } = useChatContext();
 
   const [records, setRecords] = useState<SickBayRecord[] | null>(null);
   const [includeDischarged, setIncludeDischarged] = useState(false);
@@ -110,7 +112,7 @@ const SickBayTab: React.FC<Props> = ({ runAction, onChanged }) => {
         </CardHeader>
 
         {records === null ? (
-          <p className={styles.loading}>Loading…</p>
+          <TableSkeleton rowCount={5} columnLabels={['Student', 'Complaint', 'Admitted', 'State', '']} />
         ) : records.length === 0 ? (
           <EmptyState
             headerTitle="Sick bay"
@@ -185,7 +187,7 @@ const SickBayTab: React.FC<Props> = ({ runAction, onChanged }) => {
           hasScrollingContent
         >
           <div className={styles.stack}>
-            <StudentPicker value={studentId} onChange={setStudentId} label="Student" />
+            <StudentPicker value={studentId} onChange={setStudentId} students={students} label="Student" />
             <Field label="What are they complaining of?" value={complaint} onChange={setComplaint} placeholder="Headache and fever" />
             <div className={styles.grid2}>
               <Field label="Temperature (°C)" value={temperature} onChange={v => setTemperature(String(v))} type="number" step={0.1} min={30} max={45} />

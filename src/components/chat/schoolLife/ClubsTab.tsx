@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Button, Modal, Tag } from '@carbon/react';
 import { Add, Edit, Group, TrashCan, View } from '@carbon/react/icons';
-import { CardHeader, EmptyState, Field, WidgetCard } from '@/components/common';
+import { CardHeader, EmptyState, Field, TableSkeleton, WidgetCard } from '@/components/common';
 import { useNotifications } from '@/contexts/NotificationContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { classAndSection } from '@/lib/classLevels';
@@ -151,7 +151,7 @@ const ClubsTab: React.FC<Props> = ({ runAction, canEdit, onChanged }) => {
         </CardHeader>
 
         {clubs === null ? (
-          <p className={styles.loading}>Loading…</p>
+          <TableSkeleton rowCount={6} columnLabels={['Club', 'Patron', 'Meets', 'Members', '']} />
         ) : clubs.length === 0 ? (
           <EmptyState
             headerTitle="Clubs and societies"
@@ -292,7 +292,7 @@ const ClubsTab: React.FC<Props> = ({ runAction, canEdit, onChanged }) => {
           hasScrollingContent
         >
           {roster === null ? (
-            <p className={styles.loading}>Loading…</p>
+            <TableSkeleton rowCount={5} columnLabels={['Student', 'Class', 'Joined', ...(canEdit ? [''] : [])]} />
           ) : roster.length === 0 ? (
             <p className={styles.empty}>Nobody has joined this club yet.</p>
           ) : (

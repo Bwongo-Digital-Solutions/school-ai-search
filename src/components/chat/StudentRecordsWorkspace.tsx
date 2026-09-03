@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActionableNotification,
   Button,
-  InlineLoading,
   InlineNotification,
   Select,
   SelectItem,
@@ -42,9 +41,11 @@ import {
   AccessDenied,
   CardHeader,
   Field,
+  ListSkeleton,
   PageHeader,
   StatRow,
   StatTile,
+  StatTileSkeleton,
   StudentPicker,
   TablePager,
   WidgetCard,
@@ -66,6 +67,21 @@ const academicYear = () => {
 const getErrorMessage = (error: unknown) => (error instanceof Error ? error.message : 'Unknown error');
 const studentName = (student?: Student) => student ? `${student.first_name} ${student.last_name}` : 'Unknown student';
 const ADMISSIONS_PAGE_SIZE = 8;
+
+/** Every table this workspace reads, with the column each is newest-first by. */
+const TABLES = [
+  ['admissions', 'submitted_at'],
+  ['attendance_records', 'attendance_date'],
+  ['attendance_alerts', 'sent_at'],
+  ['gradebook_entries', 'created_at'],
+  ['discipline_records', 'incident_date'],
+  ['classes', 'academic_year'],
+  ['student_promotions', 'effective_date'],
+  ['student_transfers', 'effective_date'],
+] as const;
+
+type TableName = (typeof TABLES)[number][0];
+type TableStatus = 'pending' | 'ready' | 'failed';
 
 const emptyAdmission = {
   application_number: '',
@@ -142,9 +158,11 @@ const StudentRecordsWorkspace: React.FC = () => {
   const [admissionPane, setAdmissionPane] = useState('form');
   const [admissionPage, setAdmissionPage] = useState(1);
   const [selectedStudentId, setSelectedStudentId] = useState('');
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [records, setRecords] = useState<Record<string, SchoolRecord[]>>({});
+  // Per table rather than per pane, so a section can resolve as soon as its own tables have.
+  // Everything starts pending because nothing has been asked for yet.
+  const [tableStatus, setTableStatus] = useState<Record<string, TableStatus>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
   const [admission, setAdmission] = useState(emptyAdmission);
   const [attendance, setAttendance] = useState(emptyAttendance);
@@ -205,44 +223,67 @@ const StudentRecordsWorkspace: React.FC = () => {
    * `user` is a dependency for the same reason it is one in ChatContext's roster load: all eight
    * of these tables are gated to teaching roles, so a fetch made before the session was restored
    * was refused, and without `user` here nothing ever asked again. Signing in reloads them.
+   *
+   * The eight run together and each is committed the moment it lands, rather than the screen
+   * waiting on the slowest. They were once fetched in a `for` loop, so the pane was blank for the
+   * sum of eight round trips to show a discipline record that had arrived first. Only one section
+   * is on screen at a time, and it never needed more than its own tables.
    */
   const loadRecords = useCallback(async () => {
     if (authLoading) return;
     if (!user || isSupportStaff) {
       setRecords({});
+      setTableStatus({});
       setLoadError(null);
-      setLoading(false);
       return;
     }
-    setLoading(true);
-    const failures: string[] = [];
-    const tables = [
-      ['admissions', 'submitted_at'],
-      ['attendance_records', 'attendance_date'],
-      ['attendance_alerts', 'sent_at'],
-      ['gradebook_entries', 'created_at'],
-      ['discipline_records', 'incident_date'],
-      ['classes', 'academic_year'],
-      ['student_promotions', 'effective_date'],
-      ['student_transfers', 'effective_date'],
-    ] as const;
 
-    const loaded: Record<string, SchoolRecord[]> = {};
-    for (const [table, orderField] of tables) {
-      const { data, error } = await supabase.from<SchoolRecord[]>(table).select('*').order(orderField, { ascending: false }).limit(100);
-      if (error) {
-        failures.push(table);
-        loaded[table] = [];
-      } else {
-        loaded[table] = data || [];
-      }
-    }
-    setRecords(loaded);
+    // Marked pending without clearing `records`. A refresh has to leave the rows already on screen
+    // in place — partly so the reader is not thrown back to a skeleton, partly because emptying the
+    // list would send every pager below back to page 1.
+    setTableStatus(
+      Object.fromEntries(TABLES.map(([table]) => [table, 'pending'])) as Record<TableName, TableStatus>,
+    );
+
+    const results = await Promise.all(
+      TABLES.map(async ([table, orderField]) => {
+        const { data, error } = await supabase
+          .from<SchoolRecord[]>(table)
+          .select('*')
+          .order(orderField, { ascending: false })
+          .limit(100);
+        if (error) {
+          setTableStatus(prev => ({ ...prev, [table]: 'failed' }));
+          return table;
+        }
+        setRecords(prev => ({ ...prev, [table]: data || [] }));
+        setTableStatus(prev => ({ ...prev, [table]: 'ready' }));
+        return null;
+      }),
+    );
+
     // Named rather than counted: knowing it was attendance that would not load is the difference
-    // between "the register is missing" and "the whole workspace is broken".
+    // between "the register is missing" and "the whole workspace is broken". Read back off TABLES
+    // so the order is the reader's, not whichever request happened to fail first.
+    const failures = results.filter((table): table is TableName => table !== null);
     setLoadError(failures.length ? failures.join(', ').replace(/_/g, ' ') : null);
-    setLoading(false);
   }, [authLoading, user, isSupportStaff]);
+
+  /** A section is still coming while a table behind it is in flight and has never yet answered. */
+  const pending = useCallback(
+    (...tables: TableName[]) =>
+      tables.some(table => (tableStatus[table] ?? 'pending') === 'pending' && !records[table]),
+    [records, tableStatus],
+  );
+
+  /** A section whose tables could not be read at all — distinct from one that read back empty. */
+  const failed = useCallback(
+    (...tables: TableName[]) => tables.some(table => tableStatus[table] === 'failed' && !records[table]),
+    [records, tableStatus],
+  );
+
+  /** Anything still in flight, for the Refresh button. */
+  const loading = TABLES.some(([table]) => (tableStatus[table] ?? 'pending') === 'pending');
 
   useEffect(() => {
     loadRecords();
@@ -552,19 +593,33 @@ const StudentRecordsWorkspace: React.FC = () => {
         />
       )}
 
+      {/* Each tile waits only on its own table, so the band fills in as the eight answer rather
+          than sitting at six zeroes until the slowest one does. */}
       <div className={styles.controls}>
         <StatRow>
-          <StatTile label="Admissions" value={records.admissions?.length || 0} icon={DocumentAdd} />
-          <StatTile label="Attendance" value={records.attendance_records?.length || 0} icon={UserFollow} />
-          <StatTile label="Academics" value={records.gradebook_entries?.length || 0} icon={Book} />
-          <StatTile
-            label="Discipline"
-            value={records.discipline_records?.length || 0}
-            icon={Warning}
-            tone={(records.discipline_records?.length || 0) > 0 ? 'warning' : 'default'}
-          />
-          <StatTile label="Promotions" value={records.student_promotions?.length || 0} icon={Education} />
-          <StatTile label="Movements" value={records.student_transfers?.length || 0} icon={Repeat} />
+          {pending('admissions') ? <StatTileSkeleton /> : (
+            <StatTile label="Admissions" value={records.admissions?.length || 0} icon={DocumentAdd} />
+          )}
+          {pending('attendance_records') ? <StatTileSkeleton /> : (
+            <StatTile label="Attendance" value={records.attendance_records?.length || 0} icon={UserFollow} />
+          )}
+          {pending('gradebook_entries') ? <StatTileSkeleton /> : (
+            <StatTile label="Academics" value={records.gradebook_entries?.length || 0} icon={Book} />
+          )}
+          {pending('discipline_records') ? <StatTileSkeleton /> : (
+            <StatTile
+              label="Discipline"
+              value={records.discipline_records?.length || 0}
+              icon={Warning}
+              tone={(records.discipline_records?.length || 0) > 0 ? 'warning' : 'default'}
+            />
+          )}
+          {pending('student_promotions') ? <StatTileSkeleton /> : (
+            <StatTile label="Promotions" value={records.student_promotions?.length || 0} icon={Education} />
+          )}
+          {pending('student_transfers') ? <StatTileSkeleton /> : (
+            <StatTile label="Movements" value={records.student_transfers?.length || 0} icon={Repeat} />
+          )}
         </StatRow>
       </div>
 
@@ -622,13 +677,11 @@ const StudentRecordsWorkspace: React.FC = () => {
             </WidgetCard>
           </aside>
 
+          {/* No pane-wide loading gate. The forms in every section need none of the eight tables to
+              be usable, so blanking the whole pane charged the person filling in an admission the
+              cost of reading the discipline register. Each record list below waits on its own. */}
           <WidgetCard className={styles.main}>
-            {loading ? (
-              <div className={styles.loading}>
-                <InlineLoading description="Loading records…" />
-              </div>
-            ) : (
-              <div className={styles.pane}>
+            <div className={styles.pane}>
                 {!canEdit && (
                   <InlineNotification
                     kind="info"
@@ -698,7 +751,7 @@ const StudentRecordsWorkspace: React.FC = () => {
                             &ldquo;Admit &amp; Bill&rdquo; records the admission and raises a tuition invoice from the matching fee structure for this student&apos;s grade.
                           </p>
                         )}
-                        <RecordList rows={selectedStudentRecords.admissions} empty="No admission records for this student." fields={['application_number', 'status', 'grade_level', 'submitted_at', 'notes']} />
+                        <RecordList loading={pending('admissions')} failed={failed('admissions')} rows={selectedStudentRecords.admissions} empty="No admission records for this student." fields={['application_number', 'status', 'grade_level', 'submitted_at', 'notes']} />
                         </TabPanel>
                         <TabPanel className={styles.tabPanel}>
                         <AdmissionsZebraList
@@ -728,7 +781,7 @@ const StudentRecordsWorkspace: React.FC = () => {
                       <div className={styles.spanAll}><Field label="Reason / Note" value={attendance.reason} type="textarea" onChange={value => setAttendance(prev => ({ ...prev, reason: value }))} /></div>
                     </div>
                     <SaveButton disabled={!canEdit || saving} onClick={markAttendance} label="Mark Attendance" />
-                    <RecordList rows={selectedStudentRecords.attendance} empty="No attendance records for this student." fields={['attendance_date', 'status', 'reason', 'marked_by', 'notified_parent']} />
+                    <RecordList loading={pending('attendance_records')} failed={failed('attendance_records')} rows={selectedStudentRecords.attendance} empty="No attendance records for this student." fields={['attendance_date', 'status', 'reason', 'marked_by', 'notified_parent']} />
                   </>
                 )}
 
@@ -743,7 +796,7 @@ const StudentRecordsWorkspace: React.FC = () => {
                       <div className={styles.spanAll}><Field label="Remarks" value={academic.remarks} onChange={value => setAcademic(prev => ({ ...prev, remarks: value }))} /></div>
                     </div>
                     <SaveButton disabled={!canEdit || saving} onClick={saveAcademic} label="Save Academic Entry" />
-                    <RecordList rows={selectedStudentRecords.academic} empty="No academic entries for this student." fields={['score', 'max_score', 'grade', 'rank', 'remarks', 'created_at']} />
+                    <RecordList loading={pending('gradebook_entries')} failed={failed('gradebook_entries')} rows={selectedStudentRecords.academic} empty="No academic entries for this student." fields={['score', 'max_score', 'grade', 'rank', 'remarks', 'created_at']} />
                   </>
                 )}
 
@@ -765,7 +818,7 @@ const StudentRecordsWorkspace: React.FC = () => {
                       <div className={styles.spanAll}><Field label="Action Taken" type="textarea" value={discipline.action_taken} onChange={value => setDiscipline(prev => ({ ...prev, action_taken: value }))} /></div>
                     </div>
                     <SaveButton disabled={!canEdit || saving || !discipline.description.trim()} onClick={saveDiscipline} label="Save Discipline Record" />
-                    <RecordList rows={selectedStudentRecords.discipline} empty="No discipline records for this student." fields={['incident_date', 'category', 'severity', 'status', 'description', 'action_taken']} />
+                    <RecordList loading={pending('discipline_records')} failed={failed('discipline_records')} rows={selectedStudentRecords.discipline} empty="No discipline records for this student." fields={['incident_date', 'category', 'severity', 'status', 'description', 'action_taken']} />
                   </>
                 )}
 
@@ -789,7 +842,7 @@ const StudentRecordsWorkspace: React.FC = () => {
                       <Field label="Capacity" type="number" value={allocation.capacity} onChange={value => setAllocation(prev => ({ ...prev, capacity: value }))} />
                     </div>
                     <SaveButton disabled={!canEdit || saving} onClick={allocateClass} label="Allocate Student" />
-                    <RecordList rows={records.classes || []} empty="No classes or streams configured." fields={['grade_level', 'section_name', 'stream', 'room', 'academic_year', 'capacity']} />
+                    <RecordList loading={pending('classes')} failed={failed('classes')} rows={records.classes || []} empty="No classes or streams configured." fields={['grade_level', 'section_name', 'stream', 'room', 'academic_year', 'capacity']} />
                   </>
                 )}
 
@@ -827,11 +880,10 @@ const StudentRecordsWorkspace: React.FC = () => {
                       <div className={styles.spanAll}><Field label="Notes" type="textarea" value={lifecycle.notes} onChange={value => setLifecycle(prev => ({ ...prev, notes: value }))} /></div>
                     </div>
                     <SaveButton disabled={!canEdit || saving} onClick={saveLifecycle} label="Save Lifecycle Action" />
-                    <RecordList rows={[...selectedStudentRecords.promotions, ...selectedStudentRecords.transfers]} empty="No promotion, graduation, transfer, or withdrawal records for this student." fields={['movement_type', 'decision', 'from_grade_level', 'to_grade_level', 'effective_date', 'status', 'reason', 'notes']} />
+                    <RecordList loading={pending('student_promotions', 'student_transfers')} failed={failed('student_promotions', 'student_transfers')} rows={[...selectedStudentRecords.promotions, ...selectedStudentRecords.transfers]} empty="No promotion, graduation, transfer, or withdrawal records for this student." fields={['movement_type', 'decision', 'from_grade_level', 'to_grade_level', 'effective_date', 'status', 'reason', 'notes']} />
                   </>
                 )}
-              </div>
-            )}
+            </div>
           </WidgetCard>
         </div>
       </div>
@@ -867,7 +919,21 @@ const SaveButton = ({ disabled, onClick, label }: { disabled: boolean; onClick: 
  */
 const RECORD_PAGE_SIZE = 8;
 
-const RecordList = ({ rows, fields, empty }: { rows: SchoolRecord[]; fields: string[]; empty: string }) => {
+const RecordList = ({
+  rows,
+  fields,
+  empty,
+  loading = false,
+  failed = false,
+}: {
+  rows: SchoolRecord[];
+  fields: string[];
+  empty: string;
+  /** The table behind this list has not answered yet. */
+  loading?: boolean;
+  /** It answered with a refusal. "No records" would be a lie; say so instead. */
+  failed?: boolean;
+}) => {
   // This used to be `rows.slice(0, 8)` with no pager and no indication — so the ninth attendance
   // entry, the ninth incident and the ninth promotion simply were not on the screen, while the tag
   // beside the title stated the full count. A list that says "23" and shows eight is worse than one
@@ -880,17 +946,25 @@ const RecordList = ({ rows, fields, empty }: { rows: SchoolRecord[]; fields: str
   return (
     <WidgetCard>
       <CardHeader title="Recent records">
-        <TablePager
-          page={page}
-          pageCount={pageCount}
-          onPageChange={setPage}
-          firstOnPage={firstOnPage}
-          lastOnPage={lastOnPage}
-          total={total}
-          noun="record"
-        />
+        {/* The pager is held back while the table is still coming: "No records" beside a skeleton
+            answers a question the screen has not been able to ask yet. */}
+        {!loading && (
+          <TablePager
+            page={page}
+            pageCount={pageCount}
+            onPageChange={setPage}
+            firstOnPage={firstOnPage}
+            lastOnPage={lastOnPage}
+            total={total}
+            noun="record"
+          />
+        )}
       </CardHeader>
-      {rows.length === 0 ? (
+      {loading ? (
+        <ListSkeleton rowCount={3} lines={1} />
+      ) : failed ? (
+        <p className={styles.empty}>These records could not be loaded. Try Refresh above.</p>
+      ) : rows.length === 0 ? (
         <p className={styles.empty}>{empty}</p>
       ) : (
         pageRows.map(row => (

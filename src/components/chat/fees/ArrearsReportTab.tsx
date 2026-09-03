@@ -6,7 +6,7 @@ import { formatAmount, formatDate, todayIso } from '@/lib/format';
 import { classAndSection, classOptionsFor } from '@/lib/classLevels';
 import Field from '@/components/common/Field';
 import type { ArrearsReport } from '@/types/feeAdmin';
-import { TablePager } from '@/components/common';
+import { TablePager, TableSkeleton } from '@/components/common';
 import { usePagedRows } from '@/hooks/usePagedRows';
 import { AGING_COLUMNS, EmptyState, Panel, SecondaryButton, StandingBadge, zebra } from './shared';
 import styles from '../tabs.module.scss';
@@ -107,8 +107,18 @@ const ArrearsReportTab = ({ runAction }: { runAction: (label: string, handler: (
       </Panel>
 
       <Panel >
-        {loading ? (
-          <EmptyState message="Building arrears report…" />
+        {loading && !report ? (
+          <TableSkeleton
+            rowCount={8}
+            columnLabels={[
+              'Student',
+              'Class',
+              ...AGING_COLUMNS.map(column => column.label),
+              'Total',
+              'Oldest due',
+              'Standing',
+            ]}
+          />
         ) : !report || report.rows.length === 0 ? (
           <EmptyState message="No outstanding balances match these filters." />
         ) : (

@@ -290,9 +290,15 @@ const resolveStudent = async (database, code) => {
  * with `status` 'pending' for anything not yet recorded. Boarding-only items are included only for
  * a student who has a live hostel bed, so a day student is never asked for a mosquito net.
  */
-export const requirementsForStudent = async (database, student, { term, academicYear }) => {
+export const requirementsForStudent = async (database, student, { term, academicYear } = {}) => {
+  // Defaulted here rather than only in the action wrapper. The scope is what the LEFT JOIN matches
+  // a recorded item on, so a caller that omitted it did not get "the current term" — it got no
+  // term, matched nothing, and every item came back as still owed.
+  const scopeTerm = termOf({ term });
+  const scopeYear = yearOf({ academicYear });
+
   const level = levelForGrade(student.grade_level);
-  if (!level) return { level: null, items: [] };
+  if (!level) return { level: null, term: scopeTerm, academic_year: scopeYear, items: [] };
 
   const boarding = await database.query(
     `SELECT id FROM hostel_assignments WHERE student_id = $1 AND status = 'active' LIMIT 1`,
@@ -315,11 +321,13 @@ export const requirementsForStudent = async (database, student, { term, academic
         AND ($6 = true OR i.boarding_only = false)
       ORDER BY i.category ASC, i.item_name ASC
     `,
-    [student.id, term, academicYear, level, Number(student.grade_level), isBoarder],
+    [student.id, scopeTerm, scopeYear, level, Number(student.grade_level), isBoarder],
   );
 
   return {
     level,
+    term: scopeTerm,
+    academic_year: scopeYear,
     boarder: isBoarder,
     items: rows.map((row) => ({
       requirement_id: row.id,

@@ -1,4 +1,5 @@
 import React from 'react';
+import { SkeletonIcon, SkeletonText } from '@carbon/react';
 import styles from './stat-tile.module.scss';
 
 type Tone = 'default' | 'warning' | 'danger' | 'success';
@@ -26,6 +27,26 @@ export const StatTile: React.FC<StatTileProps> = ({ label, value, icon: Icon, to
       {label}
     </div>
     <p className={styles.value}>{value}</p>
+  </div>
+);
+
+/**
+ * A tile whose figure has not arrived yet.
+ *
+ * Lives in this file, on this stylesheet, so the two cannot drift apart — a skeleton band a
+ * different height from the real one reflows the whole page the moment the numbers land, which is
+ * the fault it exists to prevent.
+ *
+ * Show one per real tile, so the band keeps its width. A band that fails to load should render
+ * nothing at all rather than a skeleton that never resolves.
+ */
+export const StatTileSkeleton: React.FC = () => (
+  <div className={`${styles.tile} ${styles.default}`}>
+    <div className={styles.label}>
+      <SkeletonIcon />
+      <SkeletonText width="60%" className={styles.skeletonLine} />
+    </div>
+    <SkeletonText heading width="70%" className={styles.skeletonLine} />
   </div>
 );
 

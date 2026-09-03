@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import Field from '@/components/common/Field';
+import { ErrorState, ListSkeleton } from '@/components/common';
 import { useAuth } from '@/contexts/AuthContext';
 import { useNotifications } from '@/contexts/NotificationContext';
 import { callDigitalExaminer, gradeOptionsFor } from '@/lib/teaching';
@@ -49,6 +50,8 @@ const BlueprintTab: React.FC<Props> = ({ frameworks, runAction, onChanged, busy,
   const { confirm } = useNotifications();
   const { user } = useAuth();
   const [blueprints, setBlueprints] = useState<ExamBlueprint[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<unknown>(null);
   const [form, setForm] = useState(emptyForm());
   const [topicText, setTopicText] = useState('');
   const [difficultyMix, setDifficultyMix] = useState<Record<string, number>>({ easy: 3, moderate: 5, challenging: 2 });
@@ -61,11 +64,16 @@ const BlueprintTab: React.FC<Props> = ({ frameworks, runAction, onChanged, busy,
   );
 
   const load = useCallback(async () => {
+    setLoading(true);
     try {
       const result = await callDigitalExaminer<{ blueprints: ExamBlueprint[] }>('list_blueprints', {}, user);
       setBlueprints(result.blueprints);
+      setError(null);
     } catch (err) {
       console.error('Failed to load blueprints:', err);
+      setError(err);
+    } finally {
+      setLoading(false);
     }
   }, [user]);
 
@@ -199,7 +207,11 @@ const BlueprintTab: React.FC<Props> = ({ frameworks, runAction, onChanged, busy,
       </Panel>
 
       <Panel>
-        {blueprints.length === 0 ? (
+        {loading && blueprints.length === 0 ? (
+          <ListSkeleton rowCount={4} />
+        ) : error ? (
+          <ErrorState headerTitle="Blueprints" error={error} onRetry={load} />
+        ) : blueprints.length === 0 ? (
           <EmptyState message="No blueprints yet. A blueprint fixes the curriculum, year, subject and mark spread for a paper, so you can regenerate it consistently each term." />
         ) : (
           <div className={styles.rows}>

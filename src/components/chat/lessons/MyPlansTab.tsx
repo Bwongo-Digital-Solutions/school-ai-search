@@ -4,7 +4,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useNotifications } from '@/contexts/NotificationContext';
 import { callLessonPlanner, teachingDocumentUrl } from '@/lib/teaching';
 import { downloadFromUrl } from '@/lib/download';
-import { TablePager } from '@/components/common';
+import { ErrorState, ListSkeleton, TablePager } from '@/components/common';
 import { usePagedRows } from '@/hooks/usePagedRows';
 import { DangerButton, EmptyState, Panel, SecondaryButton, zebra } from '../fees/shared';
 import { CitationList, StatusBadge, LESSON_STATUS_STYLES, TERM_OPTIONS } from './shared';
@@ -30,10 +30,13 @@ const MyPlansTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey })
   const { confirm } = useNotifications();
   const { user } = useAuth();
   const [plans, setPlans] = useState<LessonPlan[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<unknown>(null);
   const [filters, setFilters] = useState({ status: '', term: '', subjectName: '' });
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    setLoading(true);
     try {
       const result = await callLessonPlanner<{ plans: LessonPlan[] }>('list', { status: filters.status, term: filters.term }, user);
       // Subject is filtered here rather than server-side: plans store a free-text subject name, so
@@ -44,8 +47,12 @@ const MyPlansTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey })
           ? result.plans.filter(plan => plan.subject_name.toLowerCase().includes(needle))
           : result.plans,
       );
+      setError(null);
     } catch (err) {
       console.error('Failed to load lesson plans:', err);
+      setError(err);
+    } finally {
+      setLoading(false);
     }
   }, [filters, user]);
 
@@ -93,7 +100,11 @@ const MyPlansTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey })
       </Panel>
 
       <Panel>
-        {plans.length === 0 ? (
+        {loading && plans.length === 0 ? (
+          <ListSkeleton rowCount={6} />
+        ) : error ? (
+          <ErrorState headerTitle="Lesson plans" error={error} onRetry={load} />
+        ) : plans.length === 0 ? (
           <EmptyState message="No lesson plans yet. Draft one from the Plan Builder." />
         ) : (
           <div className={styles.rows}>

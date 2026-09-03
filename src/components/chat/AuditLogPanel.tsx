@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Button, InlineLoading, Tag } from '@carbon/react';
+import { Button, Tag } from '@carbon/react';
 import {
   Add,
   ChevronDown,
@@ -10,7 +10,7 @@ import {
   TrashCan,
 } from '@carbon/react/icons';
 import { useAuth } from '@/contexts/AuthContext';
-import { AccessDenied, CardHeader, EmptyState, WidgetCard } from '@/components/common';
+import { AccessDenied, CardHeader, EmptyState, ErrorState, ListSkeleton, WidgetCard } from '@/components/common';
 import styles from './audit-log.module.scss';
 import type { AuditLogEntry } from '@/types/auth';
 
@@ -47,13 +47,20 @@ const AuditLogPanel: React.FC = () => {
   const [logs, setLogs] = useState<AuditLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
   const [limit, setLimit] = useState(25);
 
   const loadLogs = useCallback(async () => {
     setLoading(true);
-    const data = await fetchAuditLog(limit);
-    setLogs(data);
-    setLoading(false);
+    try {
+      setLogs(await fetchAuditLog(limit));
+      setError(null);
+    } catch (err) {
+      console.error('Failed to load the audit trail:', err);
+      setError(err);
+    } finally {
+      setLoading(false);
+    }
   }, [fetchAuditLog, limit]);
 
   useEffect(() => {
@@ -89,9 +96,9 @@ const AuditLogPanel: React.FC = () => {
 
       <div className={styles.scroller}>
         {loading && logs.length === 0 ? (
-          <div className={styles.state}>
-            <InlineLoading description="Loading the audit trail…" />
-          </div>
+          <ListSkeleton rowCount={6} />
+        ) : error && logs.length === 0 ? (
+          <ErrorState headerTitle="Audit trail" error={error} onRetry={loadLogs} />
         ) : logs.length === 0 ? (
           <EmptyState
             headerTitle="Audit trail"

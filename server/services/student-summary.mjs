@@ -19,6 +19,9 @@ import { requireRole, resolveActor } from '../auth/actor.mjs';
 import { ALL_STAFF_ROLES, TEACHING_ROLES } from '../auth/roles.mjs';
 import { normaliseProfile, profileLabel, sectionsFor } from './scan-profiles.mjs';
 import { loadReportData } from './student-report.mjs';
+import { clubsForStudent } from './clubs.mjs';
+import { requirementsForStudent } from './requirements.mjs';
+import { dormitoryForStudent } from './matron.mjs';
 
 /**
  * Sections this screen adds beyond the ones a scan can show.
@@ -71,7 +74,16 @@ export const buildStudentSummary = async (database, { code, role, designation })
   // figure on this screen and a figure on that PDF cannot disagree.
   const report = await loadReportData(database, student);
 
-  const [discipline, admissions, promotions, transfers, attendanceLog] = await Promise.all([
+  const [
+    discipline,
+    admissions,
+    promotions,
+    transfers,
+    attendanceLog,
+    clubs,
+    requirements,
+    dormitory,
+  ] = await Promise.all([
     wants('discipline')
       ? database.query(
           `SELECT id, incident_date, category, severity, description, action_taken, reported_by,
@@ -110,6 +122,13 @@ export const buildStudentSummary = async (database, { code, role, designation })
           [student.id],
         )
       : null,
+    // A child's life outside the classroom. The same three functions the ID-scan card reads, so a
+    // club shown at the gate and a club shown in the office are the same club.
+    wants('clubs') ? clubsForStudent(database, student.id) : null,
+    // The third argument is destructured, so it has to be passed even when empty — the term and
+    // year then default to the current ones inside.
+    wants('requirements') ? requirementsForStudent(database, student, {}) : null,
+    wants('dormitory') ? dormitoryForStudent(database, student.id) : null,
   ]);
 
   const summary = {
@@ -192,6 +211,32 @@ export const buildStudentSummary = async (database, { code, role, designation })
       promotions: promotions?.rows || [],
       transfers: transfers?.rows || [],
     };
+  }
+
+  if (wants('clubs')) {
+    summary.clubs = { entries: clubs || [] };
+  }
+
+  // The count of mandatory items still owed is carried alongside the list because it is the figure
+  // anyone actually asks for, and computing it twice — here and in the browser — is how the two
+  // eventually disagree. The ID-scan card derives it the same way.
+  if (wants('requirements')) {
+    summary.requirements = {
+      level: requirements?.level ?? null,
+      term: requirements?.term ?? null,
+      academic_year: requirements?.academic_year ?? null,
+      boarder: Boolean(requirements?.boarder),
+      outstanding: (requirements?.items || []).filter(
+        (item) => item.mandatory && item.status === 'pending',
+      ).length,
+      items: requirements?.items || [],
+    };
+  }
+
+  // Null is the answer for a day student, not missing data: boarding is having an active bed, so
+  // there is nothing else to look up.
+  if (wants('dormitory')) {
+    summary.dormitory = { placement: dormitory, boarder: Boolean(dormitory) };
   }
 
   return summary;

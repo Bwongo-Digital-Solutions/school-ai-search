@@ -5,7 +5,7 @@ import { callFees } from '@/lib/fees';
 import { formatDate, todayIso } from '@/lib/format';
 import { classAndSection, classOptionsFor } from '@/lib/classLevels';
 import Field from '@/components/common/Field';
-import { TablePager } from '@/components/common';
+import { TablePager, TableSkeleton } from '@/components/common';
 import { usePagedRows } from '@/hooks/usePagedRows';
 import type { StandingRow } from '@/types/feeAdmin';
 import RatingCard from './RatingCard';
@@ -116,8 +116,11 @@ const FeeRatingsTab = ({
       )}
 
       <Panel >
-        {loading ? (
-          <EmptyState message="Computing payment ratings…" />
+        {loading && rows.length === 0 ? (
+          <TableSkeleton
+            rowCount={8}
+            columnLabels={['Student', 'Class', 'Standing', 'Grade', 'Score', 'On time', 'Review', '']}
+          />
         ) : rows.length === 0 ? (
           <EmptyState message="No students match these filters." />
         ) : (

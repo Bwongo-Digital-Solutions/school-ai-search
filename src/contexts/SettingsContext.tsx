@@ -7,6 +7,12 @@ interface SettingsContextType {
   settings: SchoolSettings;
   refreshSettings: () => Promise<void>;
   setSettings: (settings: SchoolSettings) => void;
+  /**
+   * Why the school's own name and colours are missing, when they are. The app keeps working on the
+   * defaults either way — a nameless header beats no application — but a caller that wants to say
+   * so can, and the two cases are no longer indistinguishable.
+   */
+  settingsError: string | null;
 }
 
 const SettingsContext = createContext<SettingsContextType | undefined>(undefined);
@@ -23,10 +29,20 @@ export const useSettings = () => {
  */
 export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [settings, setSettings] = useState<SchoolSettings>(EMPTY_SETTINGS);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
   const { isDark } = useTheme();
 
+  // Caught here rather than thrown on: this provider wraps the whole application, and the settings
+  // are decoration. What is kept is the last good value — or the defaults on a first failure — so a
+  // reload that fails does not blank a header that was already showing the school's name.
   const refreshSettings = useCallback(async () => {
-    setSettings(await fetchSchoolSettings());
+    try {
+      setSettings(await fetchSchoolSettings());
+      setSettingsError(null);
+    } catch (err) {
+      console.error('Could not load the school settings:', err);
+      setSettingsError(err instanceof Error ? err.message : 'The school settings could not be loaded');
+    }
   }, []);
 
   useEffect(() => {
@@ -44,7 +60,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }, [settings.theme_color, isDark]);
 
   return (
-    <SettingsContext.Provider value={{ settings, refreshSettings, setSettings }}>
+    <SettingsContext.Provider value={{ settings, refreshSettings, setSettings, settingsError }}>
       {children}
     </SettingsContext.Provider>
   );

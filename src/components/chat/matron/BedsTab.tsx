@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Button, Modal, Tag } from '@carbon/react';
 import { Add, Renew } from '@carbon/react/icons';
-import { CardHeader, EmptyState, Field, StudentPicker, WidgetCard } from '@/components/common';
+import { CardHeader, EmptyState, Field, StudentPicker, TableSkeleton, WidgetCard } from '@/components/common';
+import { useChatContext } from '@/contexts/ChatContext';
 import { useNotifications } from '@/contexts/NotificationContext';
 import { matronApi, type HostelRoom } from '@/lib/schoolLife';
 import styles from '../tabs.module.scss';
@@ -20,6 +21,7 @@ interface Props {
  */
 const BedsTab: React.FC<Props> = ({ runAction, onChanged }) => {
   const { notify } = useNotifications();
+  const { students } = useChatContext();
 
   const [rooms, setRooms] = useState<HostelRoom[] | null>(null);
   const [assigning, setAssigning] = useState<HostelRoom | null>(null);
@@ -61,7 +63,7 @@ const BedsTab: React.FC<Props> = ({ runAction, onChanged }) => {
         </CardHeader>
 
         {rooms === null ? (
-          <p className={styles.loading}>Loading…</p>
+          <TableSkeleton rowCount={5} columnLabels={['Hostel', 'Room', 'Beds', 'Free', '']} />
         ) : rooms.length === 0 ? (
           <EmptyState
             headerTitle="Dormitories"
@@ -121,7 +123,7 @@ const BedsTab: React.FC<Props> = ({ runAction, onChanged }) => {
           hasScrollingContent
         >
           <div className={styles.stack}>
-            <StudentPicker value={studentId} onChange={setStudentId} label="Student" />
+            <StudentPicker value={studentId} onChange={setStudentId} students={students} label="Student" />
             <Field label="Bed number" value={bedNumber} onChange={setBedNumber} placeholder="3" />
             <p className={styles.noteRow}>
               A student who already has a bed elsewhere is moved, not duplicated.

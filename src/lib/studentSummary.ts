@@ -91,6 +91,45 @@ export interface TransferEntry {
   processed_by: string | null;
 }
 
+export interface ClubMembershipEntry {
+  id: string;
+  club_id: string;
+  name: string;
+  category: string | null;
+  patron_name: string | null;
+  meeting_day: string | null;
+  meeting_time: string | null;
+  venue: string | null;
+  joined_on: string | null;
+  left_on: string | null;
+  status: 'active' | 'left';
+}
+
+export interface RequirementEntry {
+  requirement_id: string;
+  item_name: string;
+  category: string;
+  unit: string | null;
+  quantity: number;
+  mandatory: boolean;
+  boarding_only: boolean;
+  notes: string | null;
+  status: 'pending' | 'brought' | 'waived';
+  quantity_expected: number;
+  quantity_brought: number;
+  note: string;
+  recorded_by: string;
+  recorded_at: string | null;
+}
+
+/** Where a boarder sleeps. Null on the summary means a day student, not missing data. */
+export interface DormitoryPlacement {
+  hostel_name: string;
+  room_number: string;
+  bed_number: string | null;
+  since: string | null;
+}
+
 export interface StudentSummary {
   profile: { role: string; designation: string | null; label: string };
   sections: string[];
@@ -136,6 +175,17 @@ export interface StudentSummary {
     promotions: PromotionEntry[];
     transfers: TransferEntry[];
   };
+  clubs?: { entries: ClubMembershipEntry[] };
+  requirements?: {
+    level: string | null;
+    term: string | null;
+    academic_year: string | null;
+    boarder: boolean;
+    /** Mandatory items still pending — the figure anyone actually asks for. */
+    outstanding: number;
+    items: RequirementEntry[];
+  };
+  dormitory?: { placement: DormitoryPlacement | null; boarder: boolean };
 }
 
 export const loadStudentSummary = async (code: string): Promise<StudentSummary> => {

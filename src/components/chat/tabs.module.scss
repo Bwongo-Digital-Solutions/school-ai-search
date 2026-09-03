@@ -174,11 +174,9 @@
   margin: 0;
 }
 
-.loading {
-  display: flex;
-  justify-content: center;
-  padding: layout.$spacing-07 layout.$spacing-05;
-}
+// Removed with the centred "Loading…" line it existed for. Every tab on this stylesheet now stands
+// a skeleton in the shape of the table or list that is coming, so there is nothing left to centre.
+// `panels.module.scss` keeps its own `.loading` — that one still wraps a real InlineLoading.
 
 // A read-only figure worth reading as a figure — a computed total under a form.
 .total {

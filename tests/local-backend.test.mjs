@@ -3376,6 +3376,70 @@ test('a student summary shows each role its own share of one student, and no mor
   }
 });
 
+test('a student summary carries a child\'s life outside the classroom, on the same role boundary', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const summary = (requesterRole, actorDesignation) =>
+    dispatch(runtime, 'POST', '/api/functions/student-summary', {
+      code: 'STU-2026-001', requesterRole, actorDesignation,
+    });
+
+  try {
+    const student = (await runtime.database.query(
+      `SELECT id FROM students WHERE student_id = 'STU-2026-001' LIMIT 1`,
+    )).rows[0];
+
+    await runtime.database.query(
+      `INSERT INTO hostel_rooms (id, hostel_name, room_number, capacity)
+       VALUES ('room-nile-4', 'Nile House', '4', 6)`,
+    );
+    await runtime.database.query(
+      `INSERT INTO hostel_assignments (id, student_id, room_id, bed_number, start_date, status)
+       VALUES ('bed-1', $1, 'room-nile-4', '2', '2026-02-01', 'active')`,
+      [student.id],
+    );
+    await runtime.database.query(
+      `INSERT INTO clubs (id, name, category, patron_name, meeting_day, venue, status)
+       VALUES ('club-1', 'Wildlife', 'Environment', 'Mr Okello', 'Friday', 'Lab 2', 'active')`,
+    );
+    await runtime.database.query(
+      `INSERT INTO club_members (id, club_id, student_id, joined_on, status)
+       VALUES ('cm-1', 'club-1', $1, '2026-02-10', 'active')`,
+      [student.id],
+    );
+
+    // A class teacher is entitled to know which hostel a child sleeps in — scan-profiles already
+    // says so — even though the matron's own screens refuse them outright.
+    const teacher = (await summary('teacher')).body.data;
+    assert.equal(teacher.dormitory.boarder, true, 'an active bed is what makes a boarder');
+    assert.equal(teacher.dormitory.placement.hostel_name, 'Nile House');
+    assert.equal(teacher.dormitory.placement.bed_number, '2');
+    assert.equal(teacher.clubs.entries.length, 1);
+    assert.equal(teacher.clubs.entries[0].name, 'Wildlife');
+    assert.ok(teacher.requirements, 'and what the child was asked to bring');
+    assert.equal(teacher.requirements.boarder, true, 'which follows the bed');
+
+    // The head sees the same three, on the administrator's list.
+    const head = (await summary('head_teacher')).body.data;
+    assert.equal(head.dormitory.placement.room_number, '4');
+    assert.equal(head.clubs.entries.length, 1);
+
+    // The matron's card is these three and little else; she keeps them here too.
+    const matron = (await summary('support_staff', 'matron')).body.data;
+    assert.ok(matron.dormitory, 'the matron sees the placement');
+    assert.ok(matron.requirements, 'and the list she checks against');
+
+    // The askari opens the gate. None of this is any of their business.
+    const askari = (await summary('support_staff', 'askari')).body.data;
+    assert.equal(askari.dormitory, undefined);
+    assert.equal(askari.clubs, undefined);
+    assert.equal(askari.requirements, undefined);
+    assert.ok(!JSON.stringify(askari).includes('Nile House'), 'and it never reaches their page');
+  } finally {
+    await cleanup();
+  }
+});
+
 test('a student summary prints as one PDF, and not for anyone who asks', async () => {
   const { runtime, cleanup } = await startTestRuntime();
 

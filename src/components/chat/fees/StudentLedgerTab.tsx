@@ -4,7 +4,7 @@ import { useChatContext } from '@/contexts/ChatContext';
 import { callFees, feeDocumentUrl } from '@/lib/fees';
 import { downloadFromUrl } from '@/lib/download';
 import { formatAmount, formatDate } from '@/lib/format';
-import { StudentPicker } from '@/components/common';
+import { StudentPicker, TableSkeleton } from '@/components/common';
 import StatTile from '@/components/common/StatTile';
 import type { StudentLedger } from '@/types/feeAdmin';
 import RatingCard from './RatingCard';
@@ -68,8 +68,13 @@ const StudentLedgerTab = ({
 
       {!studentId ? (
         <Panel><EmptyState message="Select a student to see every invoice, payment and receipt on their account." /></Panel>
-      ) : loading ? (
-        <Panel><EmptyState message="Loading ledger…" /></Panel>
+      ) : loading && !ledger ? (
+        <Panel>
+          <TableSkeleton
+            rowCount={6}
+            columnLabels={['Date', 'Reference', 'Description', 'Debit', 'Credit', 'Balance']}
+          />
+        </Panel>
       ) : !ledger ? (
         <Panel><EmptyState message="No ledger could be loaded for this student." /></Panel>
       ) : (

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Button, Modal, Select, SelectItem, Tag } from '@carbon/react';
 import { Add, Edit, TrashCan } from '@carbon/react/icons';
-import { CardHeader, EmptyState, Field, WidgetCard } from '@/components/common';
+import { CardHeader, EmptyState, Field, TableSkeleton, WidgetCard } from '@/components/common';
 import { useNotifications } from '@/contexts/NotificationContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { classOptionsFor, classLabel } from '@/lib/classLevels';
@@ -169,7 +169,7 @@ const RequirementsTab: React.FC<Props> = ({ runAction, canEdit }) => {
         </CardHeader>
 
         {items === null ? (
-          <p className={styles.loading}>Loading…</p>
+          <TableSkeleton rowCount={8} columnLabels={['Item', 'For', 'Quantity', 'Category', ...(canEdit ? [''] : [])]} />
         ) : grouped.length === 0 ? (
           <EmptyState
             headerTitle="Requirements"

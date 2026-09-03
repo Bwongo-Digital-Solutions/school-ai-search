@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Button, Checkbox, InlineNotification, Tag } from '@carbon/react';
 import { Plug, TrashCan } from '@carbon/react/icons';
-import { CardHeader, EmptyState, Field, WidgetCard } from '@/components/common';
+import { CardHeader, EmptyState, ErrorState, Field, ListSkeleton, WidgetCard } from '@/components/common';
 import { useAuth } from '@/contexts/AuthContext';
 import { useNotifications } from '@/contexts/NotificationContext';
 import { callMcp } from '@/lib/teaching';
@@ -24,17 +24,29 @@ const McpServersPanel: React.FC = () => {
   const { user, isAdmin } = useAuth();
   const { confirm, notify } = useNotifications();
   const [servers, setServers] = useState<McpServer[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<unknown>(null);
   const [form, setForm] = useState(emptyForm());
   const [busy, setBusy] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ id: string; ok: boolean; message: string; tools?: McpToolSummary[] } | null>(null);
 
   const load = useCallback(async () => {
-    if (!isAdmin) return;
+    // Nothing will ever be asked for, so nothing is pending. Without this the panel would sit on a
+    // skeleton for a reader who is simply not allowed to see the list.
+    if (!isAdmin) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
     try {
       const result = await callMcp<{ servers: McpServer[] }>('list', {}, user);
       setServers(result.servers);
+      setError(null);
     } catch (err) {
       console.error('Failed to load MCP servers:', err);
+      setError(err);
+    } finally {
+      setLoading(false);
     }
   }, [isAdmin, user]);
 
@@ -156,7 +168,11 @@ const McpServersPanel: React.FC = () => {
         <CardHeader title="Connected servers">
           <Tag type="cool-gray" size="sm">{servers.length}</Tag>
         </CardHeader>
-        {servers.length === 0 ? (
+        {loading && servers.length === 0 ? (
+          <ListSkeleton rowCount={3} />
+        ) : error ? (
+          <ErrorState headerTitle="MCP servers" error={error} onRetry={load} />
+        ) : servers.length === 0 ? (
           <EmptyState
             headerTitle="MCP servers"
             displayText="connected servers"

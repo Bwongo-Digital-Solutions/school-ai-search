@@ -77,11 +77,25 @@ export const EMPTY_SETTINGS: SchoolSettings = {
   grading_country: 'uganda',
 };
 
+/**
+ * The school's own name, colours and level.
+ *
+ * Failure is reported rather than swallowed. Falling back to `EMPTY_SETTINGS` silently is what made
+ * a configured school render as an unnamed one with default branding — indistinguishable from a
+ * school that had never filled the form in, and impossible to tell was broken.
+ *
+ * The caller still decides what to do about it: `SettingsContext` keeps the empty defaults on
+ * screen, because a nameless header is a better outcome than no application at all.
+ */
 export const fetchSchoolSettings = async (): Promise<SchoolSettings> => {
   const { data, error } = await supabase.functions.invoke<{ settings: SchoolSettings }>('settings', {
     body: { action: 'get' },
   });
-  if (error || !data?.settings) return EMPTY_SETTINGS;
+  if (error || !data?.settings) {
+    throw new Error(
+      (error instanceof Error ? error.message : null) || 'The school settings could not be loaded',
+    );
+  }
   return { ...EMPTY_SETTINGS, ...data.settings };
 };
 

@@ -214,16 +214,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [user]);
 
+  /**
+   * The audit trail, or the reason there isn't one.
+   *
+   * This used to answer a failure with `[]`, which the panel then rendered as "no entries" — the
+   * one thing an audit trail must never say when it does not know. A refused or broken read is now
+   * the caller's to report.
+   */
   const fetchAuditLog = useCallback(async (limit = 50): Promise<AuditLogEntry[]> => {
-    try {
-      const { data, error } = await supabase.functions.invoke<AuthFunctionResponse>('auth', {
-        body: { action: 'get_audit_log', limit },
-      });
-      if (error || data?.error) return [];
-      return data.logs || [];
-    } catch {
-      return [];
+    const { data, error } = await supabase.functions.invoke<AuthFunctionResponse>('auth', {
+      body: { action: 'get_audit_log', limit },
+    });
+    if (error || data?.error) {
+      throw new Error(data?.error || getErrorMessage(error, 'The audit trail could not be read'));
     }
+    return data.logs || [];
   }, []);
 
   const fetchUsers = useCallback(async (): Promise<UserProfile[]> => {

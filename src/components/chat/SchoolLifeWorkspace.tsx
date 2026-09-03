@@ -3,7 +3,7 @@ import { InlineLoading, Tab, TabList, Tabs } from '@carbon/react';
 import { Events, Group, ListChecked, Warning } from '@carbon/react/icons';
 import { useAuth } from '@/contexts/AuthContext';
 import { useNotifications } from '@/contexts/NotificationContext';
-import { AccessDenied, PageHeader, StatRow, StatTile } from '@/components/common';
+import { AccessDenied, PageHeader, StatRow, StatTile, StatTileSkeleton } from '@/components/common';
 import { clubsApi, requirementsApi } from '@/lib/schoolLife';
 import styles from './workspace.module.scss';
 import ClubsTab from './schoolLife/ClubsTab';
@@ -35,6 +35,9 @@ const SchoolLifeWorkspace: React.FC = () => {
   const [section, setSection] = useState<SectionKey>('clubs');
   const [busy, setBusy] = useState<string | null>(null);
   const [counts, setCounts] = useState<{ clubs: number; members: number; items: number; owing: number } | null>(null);
+  // Distinguishes "the summary is coming" from "the summary will not come". Without it a failed
+  // load leaves a skeleton band standing there for the rest of the session.
+  const [countsFailed, setCountsFailed] = useState(false);
 
   const runAction = useCallback(async (label: string, handler: () => Promise<void>) => {
     setBusy(label);
@@ -50,6 +53,7 @@ const SchoolLifeWorkspace: React.FC = () => {
 
   const loadCounts = useCallback(async () => {
     if (!canSeeStudents) return;
+    setCountsFailed(false);
     try {
       const [clubs, catalogue, owing] = await Promise.all([
         clubsApi.list(),
@@ -63,8 +67,11 @@ const SchoolLifeWorkspace: React.FC = () => {
         owing: owing.students.length,
       });
     } catch (err) {
-      // The band is a summary, not the screen. A failure here leaves the tabs perfectly usable.
+      // The band is a summary, not the screen. A failure here leaves the tabs perfectly usable —
+      // so it is recorded rather than shown, and the band goes away instead of sitting on a
+      // skeleton that would never resolve.
       console.error('Could not load the school life summary:', err);
+      setCountsFailed(true);
     }
   }, [canSeeStudents]);
 
@@ -90,7 +97,7 @@ const SchoolLifeWorkspace: React.FC = () => {
       </PageHeader>
 
       <div className={styles.controls}>
-        {counts && (
+        {counts ? (
           <StatRow>
             <StatTile label="Clubs" value={counts.clubs} icon={Events} />
             <StatTile label="Club places taken" value={counts.members} icon={Group} />
@@ -101,6 +108,13 @@ const SchoolLifeWorkspace: React.FC = () => {
               icon={Warning}
               tone={counts.owing > 0 ? 'warning' : 'default'}
             />
+          </StatRow>
+        ) : countsFailed ? null : (
+          <StatRow>
+            <StatTileSkeleton />
+            <StatTileSkeleton />
+            <StatTileSkeleton />
+            <StatTileSkeleton />
           </StatRow>
         )}
 

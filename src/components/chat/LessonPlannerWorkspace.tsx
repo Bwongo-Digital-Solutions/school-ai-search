@@ -4,7 +4,7 @@ import { Book, Calendar, Education, MagicWand, Notebook } from '@carbon/react/ic
 import { useAuth } from '@/contexts/AuthContext';
 import { useNotifications } from '@/contexts/NotificationContext';
 import { callLessonPlanner, loadCurriculumFrameworks } from '@/lib/teaching';
-import { AccessDenied, PageHeader, StatRow, StatTile } from '@/components/common';
+import { AccessDenied, PageHeader, StatRow, StatTile, StatTileSkeleton } from '@/components/common';
 import styles from './workspace.module.scss';
 import PlanBuilderTab from './lessons/PlanBuilderTab';
 import MyPlansTab from './lessons/MyPlansTab';
@@ -28,6 +28,9 @@ const LessonPlannerWorkspace: React.FC = () => {
   const [busy, setBusy] = useState<string | null>(null);
   const [frameworks, setFrameworks] = useState<CurriculumFramework[]>([]);
   const [plans, setPlans] = useState<LessonPlan[]>([]);
+  // Otherwise the band opens on three zeroes, which read as "you have written nothing" rather than
+  // "this has not been counted yet".
+  const [plansLoading, setPlansLoading] = useState(true);
   // Bumped after any mutation so the listing tab reloads without each tab owning a refresh channel.
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -36,12 +39,17 @@ const LessonPlannerWorkspace: React.FC = () => {
   }, []);
 
   const loadPlans = useCallback(async () => {
-    if (!isTeachingStaff) return;
+    if (!isTeachingStaff) {
+      setPlansLoading(false);
+      return;
+    }
     try {
       const result = await callLessonPlanner<{ plans: LessonPlan[] }>('list', {}, user);
       setPlans(result.plans);
     } catch (err) {
       console.error('Failed to load lesson plans:', err);
+    } finally {
+      setPlansLoading(false);
     }
   }, [isTeachingStaff, user]);
 
@@ -96,6 +104,14 @@ const LessonPlannerWorkspace: React.FC = () => {
 
       <div className={styles.controls}>
         <StatRow>
+          {plansLoading && plans.length === 0 ? (
+            <>
+              <StatTileSkeleton />
+              <StatTileSkeleton />
+              <StatTileSkeleton />
+            </>
+          ) : (
+            <>
           <StatTile label="Lesson plans" value={String(plans.length)} icon={Book} />
           <StatTile
             label="Awaiting review"
@@ -104,6 +120,8 @@ const LessonPlannerWorkspace: React.FC = () => {
             tone={drafts > 0 ? 'warning' : 'default'}
           />
           <StatTile label="Approved" value={String(approved)} icon={Education} tone="success" />
+            </>
+          )}
         </StatRow>
 
         <div className={styles.tabs}>

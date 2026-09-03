@@ -54,6 +54,12 @@ interface ChatContextType {
   isLoading: boolean;
   isSidebarOpen: boolean;
   students: Student[];
+  /**
+   * True until the roster has been answered for one way or the other. Without it a consumer cannot
+   * tell a school still loading from a school with no students, and every one of them guessed
+   * wrong — showing "no students match" over an empty array that was merely still in flight.
+   */
+  studentsLoading: boolean;
   /** Set when the roster could not be loaded, so an empty list can be told from a failed one. */
   studentsError: string | null;
   aiModels: AiModelOption[];
@@ -135,6 +141,10 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarOpen, setSidebarOpen] = useState(true);
   const [students, setStudents] = useState<Student[]>([]);
+  // Starts true: this provider mounts before auth has settled, so the honest answer at first paint
+  // is "still coming", not "none". Starting false is what made every consumer render its empty
+  // state over a roster that had not been asked for yet.
+  const [studentsLoading, setStudentsLoading] = useState(true);
   // Why the roster is empty, when it is empty for a reason other than the school having no
   // students. Held so a failed load reads as "could not load" rather than as an empty school.
   const [studentsError, setStudentsError] = useState<string | null>(null);
@@ -166,12 +176,16 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
    * pressed refresh. Depending on `user` means sign-in, sign-out and a role change each reload it.
    */
   const refreshStudents = useCallback(async () => {
+    // Still deciding who is asking. The roster is genuinely on its way, so stay loading rather than
+    // report an empty school for the length of the session restore.
     if (authLoading) return;
     if (!user || isSupportStaff) {
       setStudents([]);
       setStudentsError(null);
+      setStudentsLoading(false);
       return;
     }
+    setStudentsLoading(true);
     try {
       const { data, error } = await supabase
         .from<Student[]>('students')
@@ -185,6 +199,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setStudentsError(null);
     } catch (err) {
       setStudentsError(getErrorMessage(err));
+    } finally {
+      setStudentsLoading(false);
     }
   }, [authLoading, user, isSupportStaff]);
 
@@ -376,7 +392,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     <ChatContext.Provider
       value={{
         messages, conversations, currentConversationId, isLoading,
-        isSidebarOpen, students, studentsError, aiModels, selectedModelId, activeView, setActiveView,
+        isSidebarOpen, students, studentsLoading, studentsError, aiModels, selectedModelId, activeView, setActiveView,
         focus, openRecord, clearFocus,
         chatOptions, setChatOptions, mcpServers,
         setSelectedModelId, refreshStudents,

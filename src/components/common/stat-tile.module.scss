@@ -36,6 +36,12 @@
   margin: 0;
 }
 
+// Carbon's SkeletonText carries a bottom margin for stacked paragraphs. The tile centres its own
+// content, so that margin only pushes the skeleton off-centre against the real tile beside it.
+.skeletonLine {
+  margin-block-end: 0;
+}
+
 // Tone colours the label's icon, not the number. A red figure reads as "this number is wrong";
 // a red icon reads as "this is the one to watch", which is what these actually mean.
 .default .label svg {

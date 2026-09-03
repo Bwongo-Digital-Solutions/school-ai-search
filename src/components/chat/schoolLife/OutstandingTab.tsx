@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Button, Select, SelectItem, Tag } from '@carbon/react';
 import { CheckmarkFilled, Renew } from '@carbon/react/icons';
-import { CardHeader, EmptyState, WidgetCard } from '@/components/common';
+import { CardHeader, EmptyState, TableSkeleton, WidgetCard } from '@/components/common';
 import { useNotifications } from '@/contexts/NotificationContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useChatContext } from '@/contexts/ChatContext';
@@ -87,7 +87,7 @@ const OutstandingTab: React.FC<Props> = ({ runAction }) => {
       </CardHeader>
 
       {rows === null ? (
-        <p className={styles.loading}>Loading…</p>
+        <TableSkeleton rowCount={8} columnLabels={['Student', 'Class', 'Still to bring', 'Items', '']} />
       ) : rows.length === 0 ? (
         <EmptyState
           headerTitle="Still owing"

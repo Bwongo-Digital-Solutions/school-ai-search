@@ -345,6 +345,41 @@ const occupancy = async (database) => {
   return new Map(rows.map((row) => [row.room_id, row.n]));
 };
 
+/**
+ * Where one student sleeps, or null for a day student.
+ *
+ * Exported as a plain function rather than as an action, and deliberately: every action in this
+ * module goes through `MATRON_GATE`, which is the matron's and the head's alone. A class teacher
+ * looking at a student's file is entitled to know which hostel that child is in — the section
+ * policy in scan-profiles.mjs already says so — but is not entitled to the dormitory screens.
+ * Callers that have already done their own permission check reach the fact through here.
+ *
+ * Boarding is not a column on `students`; an active assignment is what makes a student a boarder,
+ * so the absence of a row here is the answer "day student" rather than missing data.
+ */
+export const dormitoryForStudent = async (database, studentId) => {
+  const { rows } = await database.query(
+    `
+      SELECT a.bed_number, a.status, a.start_date, r.hostel_name, r.room_number
+      FROM hostel_assignments a
+      JOIN hostel_rooms r ON r.id = a.room_id
+      WHERE a.student_id = $1 AND a.status = 'active'
+      LIMIT 1
+    `,
+    [studentId],
+  );
+
+  const room = rows[0];
+  return room
+    ? {
+        hostel_name: room.hostel_name,
+        room_number: room.room_number,
+        bed_number: room.bed_number,
+        since: room.start_date,
+      }
+    : null;
+};
+
 /** One room with its live occupancy, or null. */
 const roomWithOccupancy = async (database, roomId) => {
   const { rows } = await database.query('SELECT * FROM hostel_rooms WHERE id = $1 LIMIT 1', [roomId]);

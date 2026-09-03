@@ -3,7 +3,7 @@ import Field from '@/components/common/Field';
 import { useAuth } from '@/contexts/AuthContext';
 import { useNotifications } from '@/contexts/NotificationContext';
 import { callDigitalExaminer } from '@/lib/teaching';
-import { TablePager } from '@/components/common';
+import { ErrorState, ListSkeleton, TablePager } from '@/components/common';
 import { usePagedRows } from '@/hooks/usePagedRows';
 import { DangerButton, EmptyState, GhostButton, Panel, PrimaryButton, SecondaryButton } from '../fees/shared';
 import { QuestionCard } from './shared';
@@ -45,9 +45,12 @@ const QuestionBankTab: React.FC<Props> = ({
   const { confirm } = useNotifications();
   const { user } = useAuth();
   const [questions, setQuestions] = useState<ExamQuestion[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<unknown>(null);
   const [filters, setFilters] = useState({ status: 'approved', topic: '', subjectName: '' });
 
   const load = useCallback(async () => {
+    setLoading(true);
     try {
       const result = await callDigitalExaminer<{ questions: ExamQuestion[] }>(
         'list_questions',
@@ -55,8 +58,12 @@ const QuestionBankTab: React.FC<Props> = ({
         user,
       );
       setQuestions(result.questions);
+      setError(null);
     } catch (err) {
       console.error('Failed to load the question bank:', err);
+      setError(err);
+    } finally {
+      setLoading(false);
     }
   }, [filters.status, filters.topic, user]);
 
@@ -130,7 +137,13 @@ const QuestionBankTab: React.FC<Props> = ({
         </Panel>
       )}
 
-      {visible.length === 0 ? (
+      {loading && visible.length === 0 ? (
+        <Panel>
+          <ListSkeleton variant="card" rowCount={4} />
+        </Panel>
+      ) : error ? (
+        <ErrorState headerTitle="Question bank" error={error} onRetry={load} />
+      ) : visible.length === 0 ? (
         <Panel>
           <EmptyState message="No questions match. Generate some from the Generate tab, or widen the filters — newly generated questions start as “Awaiting review”." />
         </Panel>

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Button, Select, SelectItem, Tag } from '@carbon/react';
 import { Renew } from '@carbon/react/icons';
-import { CardHeader, EmptyState, WidgetCard } from '@/components/common';
+import { CardHeader, EmptyState, TableSkeleton, WidgetCard } from '@/components/common';
 import { useNotifications } from '@/contexts/NotificationContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { classAndSection } from '@/lib/classLevels';
@@ -95,7 +95,7 @@ const DormRollTab: React.FC<Props> = ({ runAction, date, check, onChanged }) => 
       </CardHeader>
 
       {rows === null ? (
-        <p className={styles.loading}>Loading…</p>
+        <TableSkeleton rowCount={8} columnLabels={['Student', 'Bed', 'Class', 'Tonight', '']} />
       ) : rows.length === 0 ? (
         <EmptyState
           headerTitle="Roll call"

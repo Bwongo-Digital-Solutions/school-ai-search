@@ -18,7 +18,7 @@ import { useNotifications } from '@/contexts/NotificationContext';
 import { callFees, feeDocumentUrl } from '@/lib/fees';
 import { downloadFromUrl } from '@/lib/download';
 import { formatAmount, todayIso } from '@/lib/format';
-import { AccessDenied, PageHeader, StatRow, StatTile } from '@/components/common';
+import { AccessDenied, PageHeader, StatRow, StatTile, StatTileSkeleton } from '@/components/common';
 import styles from './workspace.module.scss';
 import type { FeesSummary } from '@/types/feeAdmin';
 import FeeStructuresTab from './fees/FeeStructuresTab';
@@ -48,15 +48,25 @@ const FeeManagementWorkspace: React.FC = () => {
   const { user } = useAuth();
   const [section, setSection] = useState<SectionKey>('structures');
   const [summary, setSummary] = useState<FeesSummary | null>(null);
+  // Covers both "it failed" and "this reader is not an administrator, so it was never asked for".
+  // Either way the band is not coming, and a skeleton would be a promise the screen cannot keep.
+  const [summaryFailed, setSummaryFailed] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [ledgerStudentId, setLedgerStudentId] = useState('');
 
   const loadSummary = useCallback(async () => {
-    if (!isAdmin) return;
+    if (!isAdmin) {
+      setSummaryFailed(true);
+      return;
+    }
+    setSummaryFailed(false);
     try {
       setSummary(await callFees<FeesSummary>('summary', {}, user));
     } catch (err) {
+      // The band is a summary; the tabs below work without it. Recorded so a failure hides the band
+      // rather than leaving a skeleton that never resolves.
       console.error('Failed to load fees summary:', err);
+      setSummaryFailed(true);
     }
   }, [isAdmin, user]);
 
@@ -135,7 +145,15 @@ const FeeManagementWorkspace: React.FC = () => {
       </PageHeader>
 
       <div className={styles.controls}>
-        {summary && (
+        {!summary && summaryFailed ? null : !summary ? (
+          <StatRow>
+            <StatTileSkeleton />
+            <StatTileSkeleton />
+            <StatTileSkeleton />
+            <StatTileSkeleton />
+            <StatTileSkeleton />
+          </StatRow>
+        ) : (
           <StatRow>
             <StatTile label="Invoiced" value={formatAmount(summary.totals.invoiced, currency)} icon={Receipt} />
             <StatTile

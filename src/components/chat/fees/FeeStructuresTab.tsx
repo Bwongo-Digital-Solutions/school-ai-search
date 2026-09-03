@@ -6,6 +6,7 @@ import { callFees } from '@/lib/fees';
 import { academicYear, formatAmount, formatDate, TERMS } from '@/lib/format';
 import { classLabel } from '@/lib/classLevels';
 import Field from '@/components/common/Field';
+import { TableSkeleton } from '@/components/common';
 import ModalShell from '@/components/common/ModalShell';
 import type { FeeStructure } from '@/types/feeAdmin';
 import { EmptyState, Panel, PrimaryButton, SecondaryButton, zebra } from './shared';
@@ -94,8 +95,11 @@ const FeeStructuresTab = ({ runAction, onChanged }: { runAction: (label: string,
       </div>
 
       <Panel >
-        {loading ? (
-          <EmptyState message="Loading fee structures…" />
+        {loading && structures.length === 0 ? (
+          <TableSkeleton
+            rowCount={5}
+            columnLabels={['Structure', 'Applies to', 'Period', 'Amount', 'Due', 'Invoices', '']}
+          />
         ) : structures.length === 0 ? (
           <EmptyState message="No fee structures yet. Create one to start billing." />
         ) : (

@@ -4,7 +4,7 @@ import { useChatContext } from '@/contexts/ChatContext';
 import { callFees } from '@/lib/fees';
 import { formatAmount, formatDate } from '@/lib/format';
 import Field from '@/components/common/Field';
-import { StudentPicker, TablePager } from '@/components/common';
+import { StudentPicker, TablePager, TableSkeleton } from '@/components/common';
 import ModalShell from '@/components/common/ModalShell';
 import { usePagedRows } from '@/hooks/usePagedRows';
 import type { Bursary, FeeStructure } from '@/types/feeAdmin';
@@ -99,8 +99,11 @@ const BursariesTab = ({ runAction, onChanged }: { runAction: (label: string, han
       </div>
 
       <Panel >
-        {loading ? (
-          <EmptyState message="Loading bursaries…" />
+        {loading && bursaries.length === 0 ? (
+          <TableSkeleton
+            rowCount={8}
+            columnLabels={['Student', 'Bursary', 'Discount', 'Applies to', 'Valid', 'Status', '']}
+          />
         ) : bursaries.length === 0 ? (
           <EmptyState message="No bursaries have been awarded yet." />
         ) : (

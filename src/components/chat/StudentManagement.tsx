@@ -54,7 +54,9 @@ import {
   PageHeader,
   StatRow,
   StatTile,
+  StatTileSkeleton,
   TablePager,
+  TableSkeleton,
 } from '@/components/common';
 import { usePagedRows } from '@/hooks/usePagedRows';
 import styles from './student-management.module.scss';
@@ -265,7 +267,7 @@ const StudentManagement: React.FC = () => {
   const { notify } = useNotifications();
   const { settings } = useSettings();
 
-  const { students, studentsError, refreshStudents, focus, clearFocus } = useChatContext();
+  const { students, studentsLoading, studentsError, refreshStudents, focus, clearFocus } = useChatContext();
   const { user, isAuthenticated, isAdmin, isSupportStaff, logAudit } = useAuth();
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('last_name');
@@ -776,6 +778,24 @@ const StudentManagement: React.FC = () => {
     );
   }
 
+  // Named once, so the header row and the skeleton that stands in for it cannot disagree about how
+  // many columns there are or what they are called.
+  const columns = ([
+    ['Student ID', null],
+    ['Name', 'last_name'],
+    ['Grade', 'grade_level'],
+    ['GPA', 'gpa'],
+    ['Attendance', 'attendance_rate'],
+    ['Status', 'status'],
+    ['Subjects', null],
+    ...(canView ? [['Documents', null]] : []),
+    ...(canEdit ? [['Actions', null]] : []),
+  ] as [string, SortKey | null][]);
+
+  // The roster arrives from ChatContext, which mounts above the sign-in screen — so an empty list
+  // means "not yet" far more often than it means "no students".
+  const rosterPending = studentsLoading && students.length === 0;
+
   return (
     <div className={styles.screen}>
       <PageHeader title="Student management" illustration={<UserMultiple size={32} />}>
@@ -811,15 +831,28 @@ const StudentManagement: React.FC = () => {
 
       <div className={styles.controls}>
         <StatRow>
-          <StatTile label="Students" value={students.length} icon={UserMultiple} />
-          <StatTile label="Average GPA" value={avgGpa} icon={ChartLine} tone="success" />
-          <StatTile label="Average attendance" value={`${avgAtt}%`} icon={Calendar} />
-          <StatTile
-            label="Active"
-            value={students.filter(s => s.status === 'active').length}
-            icon={CheckmarkFilled}
-            tone="success"
-          />
+          {rosterPending ? (
+            // Four zeroes would be four confident, wrong figures. A skeleton says the same thing
+            // honestly, and keeps the band's height so nothing moves when the numbers land.
+            <>
+              <StatTileSkeleton />
+              <StatTileSkeleton />
+              <StatTileSkeleton />
+              <StatTileSkeleton />
+            </>
+          ) : (
+            <>
+              <StatTile label="Students" value={students.length} icon={UserMultiple} />
+              <StatTile label="Average GPA" value={avgGpa} icon={ChartLine} tone="success" />
+              <StatTile label="Average attendance" value={`${avgAtt}%`} icon={Calendar} />
+              <StatTile
+                label="Active"
+                value={students.filter(s => s.status === 'active').length}
+                icon={CheckmarkFilled}
+                tone="success"
+              />
+            </>
+          )}
         </StatRow>
 
         {/* Search and filters */}
@@ -872,20 +905,17 @@ const StudentManagement: React.FC = () => {
           Handing them over would be a rewrite of working behaviour for no visible gain, so the
           markup becomes Carbon and the logic stays put. */}
       <div className={styles.tableWrap}>
+        {rosterPending ? (
+          <TableSkeleton
+            rowCount={ROSTER_PAGE_SIZE}
+            columnLabels={columns.map(([label]) => label)}
+            size="lg"
+          />
+        ) : (
         <Table size="lg" useZebraStyles={false}>
           <TableHead>
             <TableRow>
-              {([
-                ['Student ID', null],
-                ['Name', 'last_name'],
-                ['Grade', 'grade_level'],
-                ['GPA', 'gpa'],
-                ['Attendance', 'attendance_rate'],
-                ['Status', 'status'],
-                ['Subjects', null],
-                ...(canView ? [['Documents', null]] : []),
-                ...(canEdit ? [['Actions', null]] : []),
-              ] as [string, SortKey | null][]).map(([label, key]) => (
+              {columns.map(([label, key]) => (
                 <TableHeader
                   key={label}
                   isSortable={Boolean(key)}
@@ -994,25 +1024,30 @@ const StudentManagement: React.FC = () => {
             )}
           </TableBody>
         </Table>
+        )}
 
-        <div className={styles.tableFoot}>
-          <span>
-            {filtered.length === students.length
-              ? `${students.length} student${students.length === 1 ? '' : 's'}`
-              : `${filtered.length} of ${students.length} students match`}
-            {isViewOnly && ' (view-only mode)'}
-            {isAdmin && ' (admin mode)'}
-          </span>
-          <TablePager
-            page={page}
-            pageCount={pageCount}
-            onPageChange={setPage}
-            firstOnPage={firstOnPage}
-            lastOnPage={lastOnPage}
-            total={filtered.length}
-            noun="student"
-          />
-        </div>
+        {/* Held back while the roster is pending: "0 students" under a skeleton is the same false
+            certainty the skeleton is there to avoid. */}
+        {!rosterPending && (
+          <div className={styles.tableFoot}>
+            <span>
+              {filtered.length === students.length
+                ? `${students.length} student${students.length === 1 ? '' : 's'}`
+                : `${filtered.length} of ${students.length} students match`}
+              {isViewOnly && ' (view-only mode)'}
+              {isAdmin && ' (admin mode)'}
+            </span>
+            <TablePager
+              page={page}
+              pageCount={pageCount}
+              onPageChange={setPage}
+              firstOnPage={firstOnPage}
+              lastOnPage={lastOnPage}
+              total={filtered.length}
+              noun="student"
+            />
+          </div>
+        )}
       </div>
 
       {/* The QR code on a student's plastic card, big enough to test with a phone before a batch

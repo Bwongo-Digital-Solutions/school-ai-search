@@ -4,7 +4,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useNotifications } from '@/contexts/NotificationContext';
 import { callDigitalExaminer, teachingDocumentUrl } from '@/lib/teaching';
 import { downloadFromUrl } from '@/lib/download';
-import { TablePager } from '@/components/common';
+import { ErrorState, ListSkeleton, TablePager } from '@/components/common';
 import { usePagedRows } from '@/hooks/usePagedRows';
 import { DangerButton, EmptyState, Panel, PrimaryButton, SecondaryButton, zebra } from '../fees/shared';
 import { currentAcademicYear } from '../lessons/shared';
@@ -34,6 +34,8 @@ const PapersTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey, pe
   const { confirm } = useNotifications();
   const { user } = useAuth();
   const [papers, setPapers] = useState<GeneratedPaper[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<unknown>(null);
   const [expanded, setExpanded] = useState<{ paper: GeneratedPaper; questions: ExamQuestion[] } | null>(null);
 
   const [assembleForm, setAssembleForm] = useState({
@@ -50,11 +52,16 @@ const PapersTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey, pe
   const [publishForm, setPublishForm] = useState({ examDate: '', startTime: '09:00', endTime: '10:30', room: '', classId: '' });
 
   const load = useCallback(async () => {
+    setLoading(true);
     try {
       const result = await callDigitalExaminer<{ papers: GeneratedPaper[] }>('list_papers', {}, user);
       setPapers(result.papers);
+      setError(null);
     } catch (err) {
       console.error('Failed to load papers:', err);
+      setError(err);
+    } finally {
+      setLoading(false);
     }
   }, [user]);
 
@@ -161,7 +168,11 @@ const PapersTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey, pe
       )}
 
       <Panel>
-        {papers.length === 0 ? (
+        {loading && papers.length === 0 ? (
+          <ListSkeleton rowCount={5} />
+        ) : error ? (
+          <ErrorState headerTitle="Papers" error={error} onRetry={load} />
+        ) : papers.length === 0 ? (
           <EmptyState message="No papers yet. Select approved questions in the Question Bank and assemble them into a paper." />
         ) : (
           <div className={styles.rows}>

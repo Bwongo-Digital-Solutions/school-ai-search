@@ -63,6 +63,20 @@ const SEVERITY_TONE: Record<string, 'red' | 'magenta' | 'warm-gray'> = {
   minor: 'warm-gray',
 };
 
+// The same three words the requirements screens use, so a status read here and a status read there
+// are recognisably the same thing.
+const REQUIREMENT_TONE: Record<string, 'green' | 'blue' | 'warm-gray'> = {
+  brought: 'green',
+  waived: 'blue',
+  pending: 'warm-gray',
+};
+
+const REQUIREMENT_LABEL: Record<string, string> = {
+  brought: 'Brought',
+  waived: 'Waived',
+  pending: 'Still owing',
+};
+
 const StudentSummary: React.FC = () => {
   const { focus, clearFocus, setActiveView } = useChatContext();
   const { user, isLoading: authLoading } = useAuth();
@@ -256,6 +270,31 @@ const StudentSummary: React.FC = () => {
             </Section>
           )}
 
+          {/* Placement, so it sits with the other facts about where a child is rather than with the
+              matron's screens — the question "which hostel are they in" is asked at the same desk
+              as "what class are they in". */}
+          {summary.dormitory && (
+            <Section title="Dormitory">
+              {summary.dormitory.placement ? (
+                <>
+                  <p className={styles.tags}>
+                    <Tag type="teal" size="sm">Boarder</Tag>
+                  </p>
+                  <Facts
+                    rows={[
+                      ['Hostel', summary.dormitory.placement.hostel_name],
+                      ['Room', summary.dormitory.placement.room_number],
+                      ['Bed', summary.dormitory.placement.bed_number],
+                      ['Since', formatDate(summary.dormitory.placement.since)],
+                    ]}
+                  />
+                </>
+              ) : (
+                <p className={styles.none}>Day student — no hostel bed.</p>
+              )}
+            </Section>
+          )}
+
           {summary.parents && (
             <Section title="Parents and emergency contact">
               <Facts
@@ -350,6 +389,87 @@ const StudentSummary: React.FC = () => {
                   ['Outstanding', formatAmount(summary.fees.balance_due, summary.fees.currency)],
                 ]}
               />
+            </Section>
+          )}
+
+          {summary.requirements && (
+            <Section title="What they were asked to bring">
+              {summary.requirements.items.length === 0 ? (
+                <p className={styles.none}>
+                  No list is set for this class{summary.requirements.term ? ` this ${summary.requirements.term.toLowerCase()}` : ''}.
+                </p>
+              ) : (
+                <>
+                  <p className={styles.tags}>
+                    <Tag type={summary.requirements.outstanding > 0 ? 'magenta' : 'green'} size="sm">
+                      {summary.requirements.outstanding > 0
+                        ? `${summary.requirements.outstanding} still owing`
+                        : 'Everything brought'}
+                    </Tag>
+                    {summary.requirements.term && (
+                      <Tag type="cool-gray" size="sm">
+                        {summary.requirements.term} {summary.requirements.academic_year}
+                      </Tag>
+                    )}
+                  </p>
+                  <div className={styles.tableWrap}>
+                    <table className={styles.table}>
+                      <thead>
+                        <tr>
+                          <th>Item</th>
+                          <th>Category</th>
+                          <th className={styles.numeric}>Asked</th>
+                          <th className={styles.numeric}>Brought</th>
+                          <th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {summary.requirements.items.map((row) => (
+                          <tr key={row.requirement_id}>
+                            <td>
+                              {row.item_name}
+                              {row.mandatory ? '' : ' (optional)'}
+                            </td>
+                            <td>{row.category}</td>
+                            <td className={styles.numeric}>
+                              {row.quantity_expected}
+                              {row.unit ? ` ${row.unit}` : ''}
+                            </td>
+                            <td className={styles.numeric}>{row.quantity_brought}</td>
+                            <td>
+                              <Tag type={REQUIREMENT_TONE[row.status] ?? 'warm-gray'} size="sm">
+                                {REQUIREMENT_LABEL[row.status] ?? row.status}
+                              </Tag>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </Section>
+          )}
+
+          {summary.clubs && (
+            <Section title="Clubs and societies">
+              {summary.clubs.entries.length === 0 ? (
+                <p className={styles.none}>Not a member of any club.</p>
+              ) : (
+                <Facts
+                  rows={summary.clubs.entries.map((club) => [
+                    club.name,
+                    [
+                      club.category,
+                      club.meeting_day && `meets ${club.meeting_day}${club.meeting_time ? ` at ${club.meeting_time}` : ''}`,
+                      club.venue,
+                      club.patron_name && `patron ${club.patron_name}`,
+                    ]
+                      .filter(Boolean)
+                      .join(' · '),
+                  ])}
+                />
+              )}
             </Section>
           )}
 

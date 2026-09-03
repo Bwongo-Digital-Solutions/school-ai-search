@@ -3,7 +3,7 @@ import { InlineLoading, InlineNotification, Tab, TabList, Tabs, Tag } from '@car
 import { Ai, Catalog, Document, Layers, TaskComplete } from '@carbon/react/icons';
 import { useAuth } from '@/contexts/AuthContext';
 import { callDigitalExaminer, loadCurriculumFrameworks } from '@/lib/teaching';
-import { AccessDenied, PageHeader, StatRow, StatTile } from '@/components/common';
+import { AccessDenied, PageHeader, StatRow, StatTile, StatTileSkeleton } from '@/components/common';
 import styles from './workspace.module.scss';
 import BlueprintTab from './examiner/BlueprintTab';
 import GenerateTab from './examiner/GenerateTab';
@@ -31,6 +31,8 @@ const DigitalExaminerWorkspace: React.FC = () => {
   const [refreshKey, setRefreshKey] = useState(0);
 
   const [questions, setQuestions] = useState<ExamQuestion[]>([]);
+  // Four zeroes at first paint read as an empty question bank rather than an uncounted one.
+  const [countsLoading, setCountsLoading] = useState(true);
   const [papers, setPapers] = useState<GeneratedPaper[]>([]);
   const [activeBlueprint, setActiveBlueprint] = useState<ExamBlueprint | null>(null);
   // Questions ticked in the bank, carried to the Papers tab for assembly.
@@ -41,7 +43,10 @@ const DigitalExaminerWorkspace: React.FC = () => {
   }, []);
 
   const loadCounts = useCallback(async () => {
-    if (!isTeachingStaff) return;
+    if (!isTeachingStaff) {
+      setCountsLoading(false);
+      return;
+    }
     try {
       const [questionResult, paperResult] = await Promise.all([
         callDigitalExaminer<{ questions: ExamQuestion[] }>('list_questions', {}, user),
@@ -51,6 +56,8 @@ const DigitalExaminerWorkspace: React.FC = () => {
       setPapers(paperResult.papers);
     } catch (err) {
       console.error('Failed to load examiner data:', err);
+    } finally {
+      setCountsLoading(false);
     }
   }, [isTeachingStaff, user]);
 
@@ -118,15 +125,26 @@ const DigitalExaminerWorkspace: React.FC = () => {
 
       <div className={styles.controls}>
         <StatRow>
-          <StatTile label="Questions banked" value={String(questions.length)} icon={Catalog} />
-          <StatTile
-            label="Awaiting review"
-            value={String(awaitingReview)}
-            icon={Ai}
-            tone={awaitingReview > 0 ? 'warning' : 'default'}
-          />
-          <StatTile label="Approved" value={String(approved)} icon={TaskComplete} tone="success" />
-          <StatTile label="Papers published" value={String(published)} icon={Document} />
+          {countsLoading && questions.length === 0 && papers.length === 0 ? (
+            <>
+              <StatTileSkeleton />
+              <StatTileSkeleton />
+              <StatTileSkeleton />
+              <StatTileSkeleton />
+            </>
+          ) : (
+            <>
+              <StatTile label="Questions banked" value={String(questions.length)} icon={Catalog} />
+              <StatTile
+                label="Awaiting review"
+                value={String(awaitingReview)}
+                icon={Ai}
+                tone={awaitingReview > 0 ? 'warning' : 'default'}
+              />
+              <StatTile label="Approved" value={String(approved)} icon={TaskComplete} tone="success" />
+              <StatTile label="Papers published" value={String(published)} icon={Document} />
+            </>
+          )}
         </StatRow>
 
         <div className={styles.tabs}>

@@ -92,7 +92,7 @@ import { clubsForStudent, handleClubsFunction, joinClub } from './services/clubs
 import {
   assignRequirements, handleRequirementsFunction, requirementsForStudent,
 } from './services/requirements.mjs';
-import { handleMatronFunction } from './services/matron.mjs';
+import { dormitoryForStudent, handleMatronFunction } from './services/matron.mjs';
 import { handleCurriculumFunction } from './services/curriculum.mjs';
 import { handleDigitalExaminerFunction, loadPaper } from './services/digital-examiner.mjs';
 import { handleLessonPlannerFunction } from './services/lesson-planner.mjs';
@@ -1564,18 +1564,7 @@ const handleStudentCardFunction = async (database, body = {}, { actor } = {}) =>
           [student.id],
         )
       : null,
-    wants('dormitory')
-      ? database.query(
-          `
-            SELECT a.bed_number, a.status, a.start_date, r.hostel_name, r.room_number
-            FROM hostel_assignments a
-            JOIN hostel_rooms r ON r.id = a.room_id
-            WHERE a.student_id = $1 AND a.status = 'active'
-            LIMIT 1
-          `,
-          [student.id],
-        )
-      : null,
+    wants('dormitory') ? dormitoryForStudent(database, student.id) : null,
     wants('academics')
       ? database.query(
           'SELECT id, subject_id, score, max_score, grade, remarks, rank FROM gradebook_entries WHERE student_id = $1',
@@ -1759,15 +1748,7 @@ const handleStudentCardFunction = async (database, body = {}, { actor } = {}) =>
   }
 
   if (wants('dormitory')) {
-    const room = dormitory.rows[0];
-    card.dormitory = room
-      ? {
-          hostel_name: room.hostel_name,
-          room_number: room.room_number,
-          bed_number: room.bed_number,
-          since: room.start_date,
-        }
-      : null;
+    card.dormitory = dormitory;
   }
 
   if (wants('academics')) {

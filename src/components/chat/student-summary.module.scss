@@ -74,6 +74,15 @@
   margin: 0;
 }
 
+// A line of status tags above a section's detail — "Boarder", "3 still owing". Kept above rather
+// than inline with the heading because the heading bar is shared by every card on the screen.
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: layout.$spacing-02;
+  margin: 0 0 layout.$spacing-04;
+}
+
 .meta {
   @include type.type-style('helper-text-01');
   color: $text-03;

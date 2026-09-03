@@ -11,7 +11,7 @@ import {
 } from '@carbon/react/icons';
 import { useAuth } from '@/contexts/AuthContext';
 import { useNotifications } from '@/contexts/NotificationContext';
-import { AccessDenied, PageHeader, StatRow, StatTile } from '@/components/common';
+import { AccessDenied, PageHeader, StatRow, StatTile, StatTileSkeleton } from '@/components/common';
 import { todayIso } from '@/lib/format';
 import { matronApi, type MatronDashboardData } from '@/lib/schoolLife';
 import styles from './workspace.module.scss';
@@ -49,6 +49,8 @@ const MatronDashboard: React.FC = () => {
   const [date, setDate] = useState(todayIso());
   const [check, setCheck] = useState<'morning' | 'night'>('night');
   const [summary, setSummary] = useState<MatronDashboardData | null>(null);
+  // "Will not come", as against "has not come yet" — the band is hidden on failure, not skeletoned.
+  const [summaryFailed, setSummaryFailed] = useState(false);
 
   const mayOpen = isMatron || isPrivileged;
 
@@ -66,11 +68,14 @@ const MatronDashboard: React.FC = () => {
 
   const loadSummary = useCallback(async () => {
     if (!mayOpen) return;
+    setSummaryFailed(false);
     try {
       setSummary(await matronApi.dashboard(date, check));
     } catch (err) {
-      // The band is a summary; a failure here leaves every tab below perfectly usable.
+      // The band is a summary; a failure here leaves every tab below perfectly usable. Recorded
+      // rather than shown, so the band disappears instead of holding a skeleton for ever.
       console.error('Could not load the dormitory summary:', err);
+      setSummaryFailed(true);
     }
   }, [mayOpen, date, check]);
 
@@ -97,7 +102,16 @@ const MatronDashboard: React.FC = () => {
       </PageHeader>
 
       <div className={styles.controls}>
-        {summary && (
+        {!summary && summaryFailed ? null : !summary ? (
+          <StatRow>
+            <StatTileSkeleton />
+            <StatTileSkeleton />
+            <StatTileSkeleton />
+            <StatTileSkeleton />
+            <StatTileSkeleton />
+            <StatTileSkeleton />
+          </StatRow>
+        ) : (
           <StatRow>
             <StatTile label="Boarders" value={summary.boarders} icon={UserMultiple} />
             <StatTile
