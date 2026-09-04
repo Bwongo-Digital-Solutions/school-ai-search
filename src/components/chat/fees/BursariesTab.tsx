@@ -8,7 +8,7 @@ import { StudentPicker, TablePager, TableSkeleton } from '@/components/common';
 import ModalShell from '@/components/common/ModalShell';
 import { usePagedRows } from '@/hooks/usePagedRows';
 import type { Bursary, FeeStructure } from '@/types/feeAdmin';
-import { EmptyState, Panel, PrimaryButton, SecondaryButton, zebra } from './shared';
+import { EmptyState, Panel, PrimaryButton, PrintButtons, SecondaryButton, zebra } from './shared';
 import styles from '../tabs.module.scss';
 import { Add, Edit, Education, Information, TrashCan } from '@carbon/react/icons';
 import { Button, Tag } from '@carbon/react';
@@ -93,9 +93,19 @@ const BursariesTab = ({ runAction, onChanged }: { runAction: (label: string, han
             issued keep the discount they were raised with, so past receipts stay correct.
           </p>
         </div>
-        <PrimaryButton onClick={() => setForm(emptyForm())}>
-          <Add size={16} /> New Bursary
-        </PrimaryButton>
+        <div className={styles.toolbar}>
+          {/* A sponsor asking what they fund is the usual reason this leaves the building. */}
+          <PrintButtons
+            path="/api/fees/bursaries.pdf"
+            filename="bursaries.pdf"
+            user={user}
+            runAction={runAction}
+            disabled={loading}
+          />
+          <PrimaryButton onClick={() => setForm(emptyForm())}>
+            <Add size={16} /> New Bursary
+          </PrimaryButton>
+        </div>
       </div>
 
       <Panel >

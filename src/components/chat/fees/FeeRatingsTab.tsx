@@ -9,7 +9,7 @@ import { TablePager, TableSkeleton } from '@/components/common';
 import { usePagedRows } from '@/hooks/usePagedRows';
 import type { StandingRow } from '@/types/feeAdmin';
 import RatingCard from './RatingCard';
-import { EmptyState, Panel, SecondaryButton, StandingBadge, STANDING_OPTIONS, zebra } from './shared';
+import { EmptyState, Panel, PrintButtons, SecondaryButton, StandingBadge, STANDING_OPTIONS, zebra } from './shared';
 import styles from '../tabs.module.scss';
 import { Launch, Renew, WarningAlt } from '@carbon/react/icons';
 import { Button, Checkbox } from '@carbon/react';
@@ -102,6 +102,19 @@ const FeeRatingsTab = ({
             <SecondaryButton onClick={load} disabled={loading}>
               <Renew size={16} /> Refresh
             </SecondaryButton>
+            {/* The class and standing filters travel with the document, so a list printed for one
+                class cannot be mistaken later for the whole school. */}
+            <PrintButtons
+              path="/api/fees/ratings.pdf"
+              filename="payment-ratings.pdf"
+              params={{
+                ...(gradeLevel ? { gradeLevel } : {}),
+                ...(standing ? { standing } : {}),
+              }}
+              user={user}
+              runAction={runAction}
+              disabled={loading}
+            />
           </div>
         </div>
       </Panel>

@@ -10,7 +10,7 @@ import StatTile from '@/components/common/StatTile';
 import { TablePager } from '@/components/common';
 import { usePagedRows } from '@/hooks/usePagedRows';
 import type { BillingPreview, FeeStructure } from '@/types/feeAdmin';
-import { EmptyState, Panel, PrimaryButton, SecondaryButton, zebra } from './shared';
+import { EmptyState, Panel, PrimaryButton, PrintButtons, SecondaryButton, zebra } from './shared';
 import styles from '../tabs.module.scss';
 import { CheckmarkFilled, DocumentMultiple_01, Receipt, Search } from '@carbon/react/icons';
 import { InlineNotification, Tag } from '@carbon/react';
@@ -108,6 +108,21 @@ const BillingRunTab = ({ runAction, onChanged }: { runAction: (label: string, ha
  />
         </div>
         <div className={styles.actionsEnd}>
+          {/* Printed off the preview, before anything is invoiced: the sheet a head signs to
+              approve the run. Every filter the preview was taken under goes with it, so the paper
+              is the same run that is about to be confirmed. */}
+          <PrintButtons
+            path="/api/fees/billing-run.pdf"
+            filename="billing-run.pdf"
+            params={{
+              feeStructureId,
+              ...(classSection ? { classSection } : {}),
+              ...(dueDate ? { dueDate } : {}),
+            }}
+            user={user}
+            runAction={runAction}
+            disabled={!feeStructureId || !preview}
+          />
           <PrimaryButton onClick={loadPreview} disabled={!feeStructureId}>
             <Search size={16} /> Preview
           </PrimaryButton>

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
-import { mkdir, readFile, rm, stat } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { requireRole, resolveActor } from '../auth/actor.mjs';
@@ -75,6 +75,38 @@ const defaultRunPgDump = ({ connectionString, destination }) =>
     );
     child.on('close', (code) =>
       code === 0 ? resolve() : reject(new Error(stderr.trim() || `pg_dump exited with code ${code}`)),
+    );
+  });
+
+/**
+ * Putting a dump back.
+ *
+ * `--clean --if-exists` because a restore goes into a database that already has tables in it;
+ * without them pg_restore stops on the first object that already exists and leaves the job half
+ * done. `--no-owner --no-acl` to match how the dump was taken.
+ *
+ * `--exit-on-error` is deliberately absent. A custom-format dump routinely reports harmless errors
+ * — an extension the restoring role may not drop, a comment on an object it does not own — and
+ * stopping on the first would abandon a restore that was going to succeed. The exit code is still
+ * checked, so a real failure is still a failure, and whatever pg_restore complained about is
+ * carried back to the screen rather than swallowed.
+ */
+const defaultRunPgRestore = ({ connectionString, source }) =>
+  new Promise((resolve, reject) => {
+    const args = ['--clean', '--if-exists', '--no-owner', '--no-acl', '--dbname', connectionString, source];
+    const child = spawn('pg_restore', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on('error', (error) =>
+      reject(new Error(`pg_restore could not be started: ${error.message}. Is postgresql-client installed?`)),
+    );
+    child.on('close', (code) =>
+      code === 0
+        ? resolve({ warnings: stderr.trim() })
+        : reject(new Error(stderr.trim() || `pg_restore exited with code ${code}`)),
     );
   });
 
@@ -362,6 +394,136 @@ export const runScheduledBackup = async ({ database, tenantId, runPgDump, now = 
   return { ran: true, error: failure || undefined };
 };
 
+/* The first five bytes of a pg_dump custom-format archive. Checked because the alternative is a
+   row on the backups list that looks restorable and is actually a spreadsheet somebody dragged into
+   the wrong box — a difference that would otherwise only surface at a recovery, which is the worst
+   possible moment to learn it. */
+const PGDMP_MAGIC = 'PGDMP';
+
+/** 2 GB is the outer bound of what arrives base64-encoded in a JSON body without falling over. */
+const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
+
+/**
+ * Bringing a dump in from outside.
+ *
+ * A backup taken on the old server, or on a laptop, or by a hosting provider, was of no use here:
+ * this list only ever held what this process had taken itself, so a school migrating in had a file
+ * and nowhere to put it.
+ *
+ * The row is written as `kind = 'uploaded'`, which is neither manual nor scheduled and should not
+ * pretend to be: the pruning that keeps the last N scheduled backups must not count these, and
+ * somebody reading the list a year later should be able to see that this one came from elsewhere.
+ */
+const uploadBackup = async ({ database, body, actor, tenantId }) => {
+  const encoded = String(body.content || '');
+  if (!encoded) return { error: 'No file arrived.' };
+
+  let bytes;
+  try {
+    bytes = Buffer.from(encoded, 'base64');
+  } catch {
+    return { error: 'The upload could not be decoded.' };
+  }
+  if (bytes.length === 0) return { error: 'The file is empty.' };
+  if (bytes.length > MAX_UPLOAD_BYTES) return { error: 'That file is too large to upload here.' };
+
+  if (bytes.subarray(0, PGDMP_MAGIC.length).toString('latin1') !== PGDMP_MAGIC) {
+    return {
+      error: 'That is not a PostgreSQL custom-format dump. Take one with: pg_dump --format=custom',
+    };
+  }
+
+  /* The name on disk is this server's own, not the one the browser sent. An uploaded filename is
+     attacker-controlled text, and it is the only thing tying a file to a tenant here. */
+  const filename = fileNameFor(tenantId);
+  const destination = resolveBackupPath(filename);
+  if (!destination) return { error: 'The backup directory could not be resolved.' };
+
+  const id = randomUUID();
+  try {
+    await mkdir(path.dirname(destination), { recursive: true });
+    await writeFile(destination, bytes);
+  } catch (error) {
+    return { error: `The upload could not be saved: ${error instanceof Error ? error.message : 'unknown error'}` };
+  }
+
+  await database.query(
+    `INSERT INTO school_backups (id, filename, size_bytes, kind, status, created_by)
+     VALUES ($1, $2, $3, 'uploaded', 'complete', $4)`,
+    [id, filename, bytes.length, actor?.email || ''],
+  );
+  await writeAudit(database, actor, {
+    action: 'backup_uploaded',
+    entityId: id,
+    entityName: filename,
+    // The name the file arrived under is worth keeping even though it is not the name on disk: it
+    // is how the person who uploaded it will refer to it.
+    changes: { size_bytes: bytes.length, uploaded_as: String(body.filename || '') },
+  });
+
+  return listBackups({ database });
+};
+
+/**
+ * Putting the school back to what a dump holds.
+ *
+ * The most destructive thing in this file. Everything currently in the database is dropped and
+ * replaced, so it asks for the word rather than a boolean — a stray `true` in a request body should
+ * not be able to do this — and the audit row is written *before* pg_restore runs, because a restore
+ * that goes wrong may take the audit table with it and leave no trace of who asked for it.
+ */
+const restoreBackup = async ({ database, body, actor, runPgRestore }) => {
+  if (database.kind !== 'postgres') {
+    return { error: 'Restoring needs a real PostgreSQL database. This server is running on an in-memory one.' };
+  }
+  if (String(body.confirm || '') !== 'restore') {
+    return { error: 'A restore replaces everything currently in the database. Confirm it to continue.' };
+  }
+
+  const id = String(body.id || '').trim();
+  if (!id) return { error: 'Which backup?' };
+
+  const { rows } = await database.query(
+    "SELECT filename, size_bytes, kind FROM school_backups WHERE id = $1 AND status = 'complete'",
+    [id],
+  );
+  if (rows.length === 0) return { error: 'That backup is not on file, or it never finished.' };
+
+  const source = resolveBackupPath(rows[0].filename);
+  if (!source) return { error: 'That backup could not be located on disk.' };
+  try {
+    await stat(source);
+  } catch {
+    return { error: 'That backup is recorded here but is no longer on disk.' };
+  }
+
+  const connectionString = connectionStringFor(database);
+  if (!connectionString) {
+    return { error: 'The server could not determine its own database connection, so it cannot restore into it.' };
+  }
+
+  // Before, not after. See the note above.
+  await writeAudit(database, actor, {
+    action: 'backup_restored',
+    entityId: id,
+    entityName: rows[0].filename,
+    changes: { size_bytes: rows[0].size_bytes, kind: rows[0].kind },
+  });
+
+  try {
+    const result = await (runPgRestore || defaultRunPgRestore)({ connectionString, source });
+    return {
+      restored: true,
+      filename: rows[0].filename,
+      // pg_restore's grumbles are shown rather than hidden: they are usually harmless, and an
+      // administrator staring at a database they have just replaced deserves to see them.
+      warnings: (result && result.warnings) || '',
+    };
+  } catch (error) {
+    return { error: `Restore failed: ${error instanceof Error ? error.message : 'unknown error'}` };
+  }
+};
+
 const deleteBackup = async ({ database, body, actor }) => {
   const id = String(body.id || '').trim();
   if (!id) return { error: 'Which backup?' };
@@ -407,6 +569,8 @@ export const readBackupFile = async (database, id) => {
 const ACTIONS = {
   list: listBackups,
   create: createBackup,
+  upload: uploadBackup,
+  restore: restoreBackup,
   delete: deleteBackup,
   save_schedule: saveSchedule,
 };
@@ -416,7 +580,7 @@ export const BACKUP_ACTIONS = Object.keys(ACTIONS);
 export const handleBackupFunction = async (
   database,
   body = {},
-  { actor: authenticated, tenantId, runPgDump } = {},
+  { actor: authenticated, tenantId, runPgDump, runPgRestore } = {},
 ) => {
   const actor = resolveActor(authenticated, body);
   const refusal = requireRole(actor, PRIVILEGED_ROLES);
@@ -426,5 +590,5 @@ export const handleBackupFunction = async (
   const handler = ACTIONS[action];
   if (!handler) return { error: `Unsupported backup action: ${action}` };
 
-  return handler({ database, body, actor, tenantId, runPgDump });
+  return handler({ database, body, actor, tenantId, runPgDump, runPgRestore });
 };

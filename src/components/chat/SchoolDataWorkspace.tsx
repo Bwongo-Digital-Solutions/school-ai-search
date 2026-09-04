@@ -17,6 +17,7 @@ import {
   DataBase,
   Document,
   Download,
+  Restart,
   TrashCan,
   Upload,
 } from '@carbon/react/icons';
@@ -26,13 +27,15 @@ import { downloadFromUrl } from '@/lib/download';
 import { formatDateTime } from '@/lib/format';
 import {
   backupDownloadUrl,
-  checkImport,
+  checkFileImport,
   createBackup,
+  restoreBackup,
+  uploadBackup,
   deleteBackup,
   exportSchoolData,
   loadBackups,
   loadExportableTables,
-  runImport,
+  runFileImport,
   saveBackupSchedule,
   type BackupList,
   type BackupSchedule,
@@ -93,8 +96,12 @@ const SchoolDataWorkspace: React.FC = () => {
   const [chosen, setChosen] = useState<string[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [check, setCheck] = useState<ImportCheck | null>(null);
-  const [payload, setPayload] = useState<unknown>(null);
+  /* The files as they were read, not a parsed object. CSV is parsed on the server, so that a file
+     good enough to open in a spreadsheet and a file good enough to write back are the same file
+     rather than two parsers' opinions of one. */
+  const [files, setFiles] = useState<UploadedFile[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
+  const dumpInput = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -143,24 +150,62 @@ const SchoolDataWorkspace: React.FC = () => {
     );
   }
 
-  const onFile = (event: React.ChangeEvent<HTMLInputElement>) => {
+  /**
+   * Send a `.dump` taken somewhere else up to this server.
+   *
+   * Base64 rather than a multipart upload, because every other call on this screen is JSON through
+   * the same shim and one binary path would be the only thing here that is not. Read in chunks:
+   * `String.fromCharCode(...bytes)` on a whole dump blows the argument limit and throws on any file
+   * big enough to be a real backup, which is all of them.
+   */
+  const onDump = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = async () => {
-      try {
-        const parsed = JSON.parse(String(reader.result));
-        setPayload(parsed);
-        setCheck(await checkImport(parsed));
-      } catch (err) {
-        setPayload(null);
-        setCheck(null);
-        notify.error('That file could not be read', err instanceof Error ? err.message : undefined);
+    await run('Uploading the backup', async () => {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let binary = '';
+      for (let index = 0; index < bytes.length; index += 8192) {
+        binary += String.fromCharCode(...bytes.subarray(index, index + 8192));
       }
-    };
-    reader.readAsText(file);
+
+      setBackups(await uploadBackup(file.name, btoa(binary)));
+      notify.success('Backup uploaded', `${file.name} is on the list and can be restored.`);
+    });
+  };
+
+  /**
+   * Read the chosen files and ask the server what importing them would do.
+   *
+   * Several at once, because an export is one file per table and a school putting its roll back
+   * has students.csv beside guardians.csv. The file's *name* is what says which table it holds, so
+   * they are sent as they were named rather than concatenated.
+   */
+  const onFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const chosen = Array.from(event.target.files ?? []);
+    event.target.value = '';
+    if (chosen.length === 0) return;
+
+    try {
+      const read = await Promise.all(
+        chosen.map(
+          (file) =>
+            new Promise<UploadedFile>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve({ name: file.name, content: String(reader.result) });
+              reader.onerror = () => reject(new Error(`${file.name} could not be read.`));
+              reader.readAsText(file);
+            }),
+        ),
+      );
+      setFiles(read);
+      setCheck(await checkFileImport(read));
+    } catch (err) {
+      setFiles([]);
+      setCheck(null);
+      notify.error('That file could not be read', err instanceof Error ? err.message : undefined);
+    }
   };
 
   return (
@@ -300,6 +345,24 @@ const SchoolDataWorkspace: React.FC = () => {
               >
                 {busy === 'Taking a backup' ? 'Taking…' : 'Back up now'}
               </Button>
+              {/* A school moving in has a dump and nowhere to put it: this list only ever held what
+                  this server had taken itself. */}
+              <input
+                ref={dumpInput}
+                type="file"
+                accept=".dump,application/octet-stream"
+                onChange={onDump}
+                hidden
+              />
+              <Button
+                kind="tertiary"
+                size="sm"
+                renderIcon={Upload}
+                disabled={Boolean(busy)}
+                onClick={() => dumpInput.current?.click()}
+              >
+                {busy === 'Uploading the backup' ? 'Uploading…' : 'Upload a .dump'}
+              </Button>
             </CardHeader>
 
             <div className={styles.section}>
@@ -357,6 +420,35 @@ const SchoolDataWorkspace: React.FC = () => {
                         }
                       >
                         Download
+                      </Button>
+                    )}
+                    {backup.status === 'complete' && backups?.available && (
+                      <Button
+                        kind="danger--tertiary"
+                        size="sm"
+                        renderIcon={Restart}
+                        disabled={Boolean(busy)}
+                        onClick={async () => {
+                          const ok = await confirm({
+                            title: 'Restore this backup?',
+                            message: `Everything currently in the database is replaced by what ${backup.filename} holds. Every record entered since it was taken is lost. This cannot be undone.`,
+                            confirmLabel: 'Replace everything',
+                            danger: true,
+                          });
+                          if (!ok) return;
+                          await run('Restoring', async () => {
+                            const result = await restoreBackup(backup.id);
+                            // pg_restore's grumbles are usually harmless, but somebody who has just
+                            // replaced their database deserves to see them rather than a bare tick.
+                            notify.success(
+                              'Restored',
+                              result.warnings || `The school is back to ${result.filename}.`,
+                            );
+                            await refresh();
+                          });
+                        }}
+                      >
+                        Restore
                       </Button>
                     )}
                     <Button
@@ -475,13 +567,17 @@ const SchoolDataWorkspace: React.FC = () => {
                 <input
                   ref={fileInput}
                   type="file"
-                  accept="application/json,.json"
+                  accept="text/csv,.csv,application/json,.json"
+                  multiple
                   onChange={onFile}
                   hidden
                 />
                 <Button kind="tertiary" renderIcon={Upload} onClick={() => fileInput.current?.click()}>
-                  Choose a JSON export
+                  Choose CSV or JSON files
                 </Button>
+                {files.length > 0 && (
+                  <p className={styles.blurb}>{files.map((file) => file.name).join(' · ')}</p>
+                )}
               </div>
 
               {check && (
@@ -514,10 +610,10 @@ const SchoolDataWorkspace: React.FC = () => {
                         });
                         if (!ok) return;
                         await run('Importing', async () => {
-                          const result = await runImport(payload, check.token);
+                          const result = await runFileImport(files, check.token);
                           notify.success('Import finished', `${result.rowsWritten} rows written.`);
                           setCheck(null);
-                          setPayload(null);
+                          setFiles([]);
                           await refresh();
                         });
                       }}

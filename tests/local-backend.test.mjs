@@ -2382,6 +2382,71 @@ test('documents use the global school settings for branding and the stored stude
   }
 });
 
+test('every fees screen prints, and only for the office', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const feesCall = (action, body = {}) =>
+    dispatch(runtime, 'POST', '/api/functions/fees', { action, requesterRole: 'admin', actorName: 'Admin', ...body });
+  const get = (pathname, params = {}) =>
+    runtime.dispatch({ method: 'GET', pathname, searchParams: new URLSearchParams(params) });
+
+  try {
+    const structure = (await feesCall('save_fee_structure', {
+      name: 'Grade 10 Day', gradeLevel: 10, academicYear: '2026/2027', term: 'Term 1',
+      amount: 1000000, dueDate: '2026-04-01',
+    })).body.data.structure;
+
+    const student = (await runtime.database.query(
+      'SELECT id, student_id FROM students WHERE grade_level = 10 ORDER BY last_name LIMIT 1',
+    )).rows[0];
+
+    /* A bursary named with characters pdf-lib's WinAnsi fonts cannot encode. An unencodable
+       character throws mid-render and takes the whole download with it, so the folding has to be
+       exercised rather than assumed. */
+    if (student) {
+      await feesCall('save_bursary', {
+        studentId: student.id, name: 'Bishop’s Fund — half', sponsor: 'Diocese',
+        discountType: 'percentage', discountValue: 50,
+      });
+    }
+    await feesCall('run_billing', { feeStructureId: structure.id, confirm: true });
+
+    const documents = {
+      'structures.pdf': {},
+      'billing-run.pdf': { feeStructureId: structure.id },
+      'arrears.pdf': {},
+      'bursaries.pdf': {},
+      'ratings.pdf': {},
+    };
+
+    for (const [name, params] of Object.entries(documents)) {
+      const printed = await get(`/api/fees/${name}`, { requesterRole: 'admin', ...params });
+      assert.equal(printed.status, 200, `${name} should render`);
+      assert.equal(printed.type, 'binary');
+      assert.equal(printed.headers['Content-Type'], 'application/pdf');
+      assert.ok(printed.body.length > 1000, `${name} should not be an empty page`);
+
+      // The office's business and nobody else's — the same gate the financial report sits behind.
+      for (const role of ['teacher', 'support_staff']) {
+        assert.equal((await get(`/api/fees/${name}`, { requesterRole: role, ...params })).status, 403, `${name} for ${role}`);
+      }
+      assert.equal((await get(`/api/fees/${name}`, params)).status, 403, `${name} anonymously`);
+    }
+
+    // A billing run is about one fee structure. Printing it without saying which is worth a
+    // sentence rather than a blank sheet of paper.
+    const noStructure = await get('/api/fees/billing-run.pdf', { requesterRole: 'admin' });
+    assert.equal(noStructure.status, 404);
+    assert.match(noStructure.body.error, /Which fee structure/);
+
+    // An empty list still prints: "nobody owes anything" is a result somebody needs on paper.
+    const emptyArrears = await get('/api/fees/arrears.pdf', { requesterRole: 'admin', minBalance: '999999999' });
+    assert.equal(emptyArrears.status, 200);
+    assert.ok(emptyArrears.body.length > 1000);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('admins can generate a printable financial report, others cannot', async () => {
   const { runtime, cleanup } = await startTestRuntime();
   const feesCall = (action, body = {}) =>
@@ -10052,6 +10117,85 @@ test('the matron works from the dormitory: a roll, a sick bay and beds', async (
     assert.ok((await matronCall({ action: 'release_bed', studentId: students[0].student_id }, matron)).body.data.assignment);
     assert.equal((await matronCall({ action: 'rooms' }, matron)).body.data.rooms[0].free, 1);
     assert.ok((await matronCall({ action: 'assign_bed', studentId: students[1].student_id, roomId: room.id }, matron)).body.data.assignment);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the matron keeps the room list herself, and the list says who is in each bed', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const matronCall = (body, actor) => runtime.dispatch({
+    method: 'POST', pathname: '/api/functions/matron', body, actor, headers: { host: 'localhost' },
+  });
+  const matron = { id: 'm1', role: 'support_staff', designation: 'matron', name: 'Matron Grace', email: 'grace@school.test' };
+  const cook = { id: 'm2', role: 'support_staff', designation: 'cook', name: 'Cook', email: 'cook@school.test' };
+
+  try {
+    // Keeping the list is the matron's job and only hers — the same post gate as the rest of the
+    // screen, so the cook cannot rearrange the dormitories.
+    assert.equal(
+      (await matronCall({ action: 'save_room', hostelName: 'Nile House', roomNumber: '1', capacity: 2 }, cook)).body.error,
+      'Unauthorized',
+    );
+
+    const made = (await matronCall({ action: 'save_room', hostelName: 'Nile House', roomNumber: '12', capacity: 2 }, matron)).body.data.room;
+    assert.ok(made.id);
+    assert.equal(made.capacity, 2);
+    assert.equal(made.free, 2);
+    assert.deepEqual(made.occupants, [], 'a new room is empty, in the shape the list expects');
+
+    // Two rooms with one name cannot be told apart on any screen that lists them.
+    assert.equal(
+      (await matronCall({ action: 'save_room', hostelName: 'nile house', roomNumber: '12', capacity: 4 }, matron)).body.error,
+      'Nile House already has a room 12',
+    );
+
+    // Half a bed is not a thing, and neither is a room with none.
+    assert.match((await matronCall({ action: 'save_room', hostelName: 'Nile House', roomNumber: '13', capacity: 0 }, matron)).body.error, /at least one/);
+    assert.match((await matronCall({ action: 'save_room', hostelName: 'Nile House', roomNumber: '13', capacity: 2.5 }, matron)).body.error, /whole number/);
+    assert.match((await matronCall({ action: 'save_room', hostelName: '', roomNumber: '13', capacity: 2 }, matron)).body.error, /Which hostel/);
+
+    const students = (await runtime.database.query(
+      'SELECT id, student_id, first_name, last_name FROM students ORDER BY last_name LIMIT 2',
+    )).rows;
+    for (const student of students) {
+      assert.ok((await matronCall({ action: 'assign_bed', studentId: student.student_id, roomId: made.id, bedNumber: '1' }, matron)).body.data.assignment);
+    }
+
+    /* The occupants are the point of the change: a count tells her the room is full, but only a
+       name tells her which child to move. */
+    const listed = (await matronCall({ action: 'rooms' }, matron)).body.data.rooms;
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0].occupied, 2);
+    assert.equal(listed[0].full, true);
+    assert.deepEqual(
+      listed[0].occupants.map((o) => o.student_number).sort(),
+      students.map((s) => s.student_id).sort(),
+      'the room names the children in it',
+    );
+    assert.ok(listed[0].occupants[0].last_name, 'and by name, not only by id');
+
+    // Cutting the beds out from under a sleeping child is refused in words rather than done.
+    const shrunk = await matronCall({ action: 'save_room', roomId: made.id, hostelName: 'Nile House', roomNumber: '12', capacity: 1 }, matron);
+    assert.match(shrunk.body.error, /2 children sleep in Nile House 12/);
+    assert.equal((await matronCall({ action: 'rooms' }, matron)).body.data.rooms[0].capacity, 2, 'and nothing changed');
+
+    // Deleting it would cascade the assignments away and lose the record of who slept where.
+    assert.match((await matronCall({ action: 'remove_room', roomId: made.id }, matron)).body.error, /2 children still sleep/);
+
+    // Renaming and growing a room she has in front of her.
+    const grown = (await matronCall({ action: 'save_room', roomId: made.id, hostelName: 'Nile House', roomNumber: '12A', capacity: 4 }, matron)).body.data.room;
+    assert.equal(grown.room_number, '12A');
+    assert.equal(grown.capacity, 4);
+    assert.equal(grown.free, 2);
+    assert.equal(grown.full, false);
+
+    for (const student of students) {
+      await matronCall({ action: 'release_bed', studentId: student.student_id }, matron);
+    }
+    assert.equal((await matronCall({ action: 'remove_room', roomId: made.id }, matron)).body.data.removed, made.id);
+    assert.equal((await matronCall({ action: 'rooms' }, matron)).body.data.rooms.length, 0);
+    assert.equal((await matronCall({ action: 'remove_room', roomId: made.id }, matron)).body.error, 'That room no longer exists');
   } finally {
     await cleanup();
   }

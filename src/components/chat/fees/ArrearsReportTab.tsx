@@ -8,7 +8,7 @@ import Field from '@/components/common/Field';
 import type { ArrearsReport } from '@/types/feeAdmin';
 import { TablePager, TableSkeleton } from '@/components/common';
 import { usePagedRows } from '@/hooks/usePagedRows';
-import { AGING_COLUMNS, EmptyState, Panel, SecondaryButton, StandingBadge, zebra } from './shared';
+import { AGING_COLUMNS, EmptyState, Panel, PrintButtons, SecondaryButton, StandingBadge, zebra } from './shared';
 import styles from '../tabs.module.scss';
 import { Download, Renew, Warning } from '@carbon/react/icons';
 import { InlineNotification } from '@carbon/react';
@@ -99,6 +99,20 @@ const ArrearsReportTab = ({ runAction }: { runAction: (label: string, handler: (
             <SecondaryButton onClick={load} disabled={loading}>
               <Renew size={16} /> Refresh
             </SecondaryButton>
+            {/* The filters this list is being shown under travel with it, so the paper cannot
+                quietly be a different report from the screen it was printed off. */}
+            <PrintButtons
+              path="/api/fees/arrears.pdf"
+              filename={`arrears-${report?.asOf || 'report'}.pdf`}
+              params={{
+                ...(asOf ? { asOf } : {}),
+                ...(gradeLevel ? { gradeLevel } : {}),
+                ...(minBalance > 0 ? { minBalance: String(minBalance) } : {}),
+              }}
+              user={user}
+              runAction={runAction}
+              disabled={loading}
+            />
             <SecondaryButton onClick={exportCsv} disabled={!report || report.rows.length === 0}>
               <Download size={16} /> CSV
             </SecondaryButton>

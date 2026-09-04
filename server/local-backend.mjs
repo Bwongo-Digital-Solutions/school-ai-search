@@ -73,9 +73,7 @@ import { buildReportCardPdf } from './reports/report-card.mjs';
 import { buildIdCardPdf, buildQrPayload, buildQrPng } from './reports/id-card.mjs';
 import { buildFeeReceiptPdf, buildFeeStatementPdf } from './reports/fee-receipt.mjs';
 import { buildFinanceReportPdf } from './reports/finance-report.mjs';
-import { featureRefusal, entitlements as entitlementsFor, TIERS } from './licensing/plans.mjs';
-import { clearLicenceCache, licenceFor } from './licensing/licence.mjs';
-import { handlePlanFunction } from './licensing/self-service.mjs';
+import { buildFeesTablePdf } from './reports/fees-table.mjs';
 import { APP_VERSION, BUILD_NUMBER, DEVELOPER_CONTACTS } from './version.mjs';
 import { getPublicGradingOptions } from './reports/grading-config.mjs';
 import { generateLlmSearchReply, getPublicModelCatalog, resolveModelSelection } from './services/llm-models.mjs';
@@ -4618,132 +4616,340 @@ const handleExamPaperRequest = async (database, pathname, searchParams, { actor 
  * stop a support-staff browser from pulling a student's full fee history.
  */
 /* ---------------------------------------------------------------------------- */
-/* What each endpoint is worth                                                   */
+/* The printable fees lists                                                      */
 /* ---------------------------------------------------------------------------- */
 
-/**
- * Which feature an endpoint belongs to.
- *
- * Absent means ungated, and that is the safe direction: a new endpoint is open until somebody
- * decides what it is worth, rather than dark until somebody remembers to add it here. Signing in,
- * the health check and the entitlements themselves are never listed — a school that has let its
- * subscription lapse still has to be able to log in and read why.
- */
-const FEATURE_BY_ROUTE = {
-  '/api/functions/fee-status': 'fees_core',
-  '/api/functions/student-card': 'scanning',
-  '/api/functions/student-summary': 'students',
-  '/api/functions/messages': 'messages',
-  '/api/functions/roll-call': 'attendance',
-  '/api/functions/exam-clearance': 'fees_core',
-  '/api/functions/gate-permission': 'gate',
-  '/api/functions/gate-log': 'gate',
-  '/api/functions/gate-pass': 'gate',
-  '/api/functions/meal-record': 'meals',
-  '/api/functions/monitoring': 'monitoring',
-  '/api/functions/marks': 'marks',
-  '/api/functions/student-registry': 'registration',
-  '/api/functions/clubs': 'school_life',
-  '/api/functions/requirements': 'school_life',
-  '/api/functions/matron': 'matron',
-  '/api/functions/teacher-performance': 'teaching',
-  '/api/functions/student-report': 'records',
-  '/api/functions/settings': 'settings',
-  '/api/functions/backup': 'school_data',
-  '/api/functions/data': 'school_data',
-  '/api/functions/integrations': 'integrations',
-  '/api/functions/mcp': 'integrations',
-  '/api/mcp': 'integrations',
-  '/api/functions/fees': 'fees_core',
-  '/api/functions/ai-chat': 'assistant',
-  '/api/functions/ai-models': 'assistant',
-  '/api/functions/voice-to-text': 'assistant',
-  '/api/functions/search': 'search',
-  '/api/functions/chat-report': 'ai_documents',
-  '/api/functions/lesson-planner': 'lessons',
-  '/api/functions/curriculum': 'lessons',
-  '/api/functions/digital-examiner': 'examiner',
-};
+/** Money as it reads on the screens: whole units, thousands separated, currency in front. */
+const printMoney = (amount, currency = 'UGX') =>
+  `${currency} ${Math.round(Number(amount) || 0).toLocaleString('en-US')}`;
 
-/** The generated documents, which are GETs and so are not in the map above. */
-const featureForDocument = (pathname) => {
-  if (/^\/api\/fees\/(structures|billing-run|arrears|bursaries|ratings)\.pdf$/.test(pathname)) return 'fees_billing';
-  if (pathname === '/api/fees/report.pdf') return 'finance';
-  if (/^\/api\/fees\/(receipts|statements)\//.test(pathname)) return 'fees_core';
-  if (/^\/api\/backups\//.test(pathname)) return 'school_data';
-  if (/^\/api\/id-cards\.pdf$/.test(pathname)) return 'scanning';
-  if (/^\/api\/exam-papers\//.test(pathname)) return 'examiner';
-  if (/^\/api\/lesson-plans\//.test(pathname)) return 'lessons';
-  if (/^\/api\/chat-reports\//.test(pathname)) return 'ai_documents';
-  return null;
-};
+/** Bare numbers inside a money column, so the currency is not repeated down every row. */
+const printAmount = (amount) => Math.round(Number(amount) || 0).toLocaleString('en-US');
+
+const printClass = (row) => `G${row.grade_level ?? '—'} ${row.class_section || ''}`.trim();
+
+const printDate = (value) => (value ? String(value).slice(0, 10) : '—');
 
 /**
- * Where one endpoint spans two tiers.
+ * Each fees screen as a table of strings.
  *
- * The fees screen is Essential — a school on any plan has to be able to take money and issue a
- * receipt — but the billing runs, arrears and bursaries behind the same endpoint are Professional.
- * Recording marks is Standard; reading them off a photograph is the AI feature. Gating the whole
- * endpoint either way would sell somebody a screen with half of it broken.
+ * The rows are read through `handleFeesFunction` — the same actions the screens call — rather than
+ * queried again here, so a printed list and the screen it was printed from cannot disagree. Every
+ * cell is formatted at this level and handed to the renderer as text: the renderer draws tables and
+ * knows nothing about money or terms, which is what lets one of it serve all five.
+ *
+ * The filters arrive as query parameters and are echoed into the subtitle. A list printed under a
+ * filter and a list printed without one look identical on paper otherwise, and the difference is
+ * the sort that gets noticed after the meeting.
  */
-const ACTION_FEATURE = {
-  '/api/functions/fees': {
-    summary: 'finance',
-    preview_billing_run: 'fees_billing',
-    run_billing: 'fees_billing',
-    bill_student: 'fees_billing',
-    arrears_report: 'fees_billing',
-    list_bursaries: 'fees_billing',
-    save_bursary: 'fees_billing',
-    delete_bursary: 'fees_billing',
-    list_standings: 'fees_billing',
-    set_standing: 'fees_billing',
-    clear_standing: 'fees_billing',
+const FEES_TABLE_DOCUMENTS = {
+  structures: async (database, params) => {
+    const includeArchived = params.get('includeArchived') === 'true';
+    const data = await handleFeesFunction(database, {
+      action: 'list_fee_structures', requesterRole: 'admin', includeArchived,
+    });
+    const structures = data.structures || [];
+    const currency = structures[0]?.currency || 'UGX';
+
+    return {
+      title: 'Fee structures',
+      subtitle: includeArchived ? 'Active and archived' : 'Active only',
+      filename: 'fee-structures',
+      tiles: [
+        { label: 'Structures', value: String(structures.length) },
+        {
+          label: 'Total per student',
+          value: printMoney(structures.reduce((sum, row) => sum + (Number(row.amount) || 0), 0), currency),
+        },
+      ],
+      columns: [
+        { label: 'Name', width: 3 },
+        { label: 'Class', width: 1 },
+        { label: 'Type', width: 1.2 },
+        { label: 'Year', width: 1 },
+        { label: 'Term', width: 1.2 },
+        { label: 'Due', width: 1.2 },
+        { label: 'Invoices', width: 1, align: 'right' },
+        { label: 'Amount', width: 1.5, align: 'right' },
+      ],
+      rows: structures.map((row) => [
+        row.name,
+        row.grade_level === null || row.grade_level === undefined ? 'All' : `G${row.grade_level}`,
+        row.student_type || 'All',
+        row.academic_year,
+        row.term,
+        printDate(row.due_date),
+        String(row.invoice_count ?? 0),
+        printAmount(row.amount),
+      ]),
+      emptyText: 'No fee structures have been set up.',
+    };
   },
-  '/api/functions/marks': {
-    extract: 'mark_extraction',
+
+  'billing-run': async (database, params) => {
+    const feeStructureId = params.get('feeStructureId') || '';
+    if (!feeStructureId) return { error: 'Which fee structure? Open a billing run first.' };
+
+    /* Every filter the billing screen holds is passed through, not just the structure. A run
+       previewed for one class and printed for the whole school is the kind of difference nobody
+       spots until the invoices are out. */
+    const data = await handleFeesFunction(database, {
+      action: 'preview_billing_run',
+      requesterRole: 'admin',
+      feeStructureId,
+      gradeLevel: params.get('gradeLevel') || undefined,
+      classSection: params.get('classSection') || undefined,
+      studentStatus: params.get('studentStatus') || undefined,
+      issueDate: params.get('issueDate') || undefined,
+      dueDate: params.get('dueDate') || undefined,
+    });
+    if (data.error) return { error: data.error };
+
+    const totals = data.totals || {};
+    const currency = totals.currency || 'UGX';
+    const structure = data.feeStructure || {};
+
+    return {
+      title: 'Billing run',
+      subtitle: `${structure.name || ''} · ${structure.term || ''} ${structure.academic_year || ''}`.trim(),
+      filename: `billing-run-${structure.academic_year || ''}-${structure.term || ''}`.replace(/\s+/g, '-'),
+      landscape: true,
+      tiles: [
+        { label: 'Students', value: String(totals.students ?? 0) },
+        { label: 'To be billed', value: String(totals.billable ?? 0) },
+        { label: 'Already invoiced', value: String(totals.skipped ?? 0) },
+        { label: 'Net', value: printMoney(totals.net, currency) },
+      ],
+      columns: [
+        { label: 'Student', width: 2.6 },
+        { label: 'Number', width: 1.4 },
+        { label: 'Class', width: 1 },
+        { label: 'Bursary', width: 2.4 },
+        { label: 'Gross', width: 1.2, align: 'right' },
+        { label: 'Discount', width: 1.2, align: 'right' },
+        { label: 'Net', width: 1.2, align: 'right' },
+        { label: 'Status', width: 1.6 },
+      ],
+      rows: (data.rows || []).map((row) => [
+        row.full_name,
+        row.student_number,
+        printClass(row),
+        (row.discounts || []).map((discount) => discount.name).join(', ') || '—',
+        printAmount(row.gross),
+        row.discount_total ? `-${printAmount(row.discount_total)}` : '—',
+        printAmount(row.net),
+        row.already_invoiced ? `Invoiced ${row.existing_invoice_number || ''}`.trim() : 'To bill',
+      ]),
+      totalsRow: [
+        'Totals', '', '', '',
+        printAmount(totals.gross),
+        totals.discount ? `-${printAmount(totals.discount)}` : '—',
+        printAmount(totals.net),
+        '',
+      ],
+      emptyText: 'No students match this fee structure.',
+      note: `Issue date ${printDate(data.issueDate)} · Due ${printDate(data.dueDate)}. A preview: nothing is invoiced until the run is confirmed.`,
+    };
+  },
+
+  arrears: async (database, params) => {
+    const gradeLevel = params.get('gradeLevel') || undefined;
+    const minBalance = params.get('minBalance') || undefined;
+    const data = await handleFeesFunction(database, {
+      action: 'arrears_report',
+      requesterRole: 'admin',
+      asOf: params.get('asOf') || undefined,
+      gradeLevel,
+      classSection: params.get('classSection') || undefined,
+      minBalance,
+    });
+
+    const rows = data.rows || [];
+    const totals = data.totals || {};
+    const currency = data.currency || 'UGX';
+
+    const filters = [
+      `As at ${printDate(data.asOf)}`,
+      gradeLevel ? `Class G${gradeLevel}` : 'All classes',
+      minBalance && Number(minBalance) > 0 ? `Balance over ${printMoney(minBalance, currency)}` : null,
+    ].filter(Boolean);
+
+    return {
+      title: 'Arrears',
+      subtitle: filters.join(' · '),
+      filename: `arrears-${data.asOf || 'report'}`,
+      landscape: true,
+      tiles: [
+        { label: 'Students owing', value: String(rows.length) },
+        { label: 'Total outstanding', value: printMoney(totals.total, currency) },
+        { label: 'Over 90 days', value: printMoney(totals.days_90_plus, currency) },
+      ],
+      columns: [
+        { label: 'Student', width: 2.6 },
+        { label: 'Number', width: 1.4 },
+        { label: 'Class', width: 1 },
+        { label: 'Standing', width: 1.3 },
+        { label: 'Not due', width: 1.1, align: 'right' },
+        { label: '1-30d', width: 1.1, align: 'right' },
+        { label: '31-60d', width: 1.1, align: 'right' },
+        { label: '61-90d', width: 1.1, align: 'right' },
+        { label: '90d+', width: 1.1, align: 'right' },
+        { label: 'Total', width: 1.3, align: 'right' },
+      ],
+      rows: rows.map((row) => [
+        row.full_name,
+        row.student_number,
+        printClass(row),
+        row.standing || 'Unrated',
+        row.current ? printAmount(row.current) : '—',
+        row.days_1_30 ? printAmount(row.days_1_30) : '—',
+        row.days_31_60 ? printAmount(row.days_31_60) : '—',
+        row.days_61_90 ? printAmount(row.days_61_90) : '—',
+        row.days_90_plus ? printAmount(row.days_90_plus) : '—',
+        printAmount(row.total_outstanding),
+      ]),
+      totalsRow: [
+        'Totals', '', '', '',
+        printAmount(totals.current),
+        printAmount(totals.days_1_30),
+        printAmount(totals.days_31_60),
+        printAmount(totals.days_61_90),
+        printAmount(totals.days_90_plus),
+        printAmount(totals.total),
+      ],
+      emptyText: 'No outstanding balances.',
+    };
+  },
+
+  bursaries: async (database, params) => {
+    // The action filters on `status`; absent means every award, current and ended alike.
+    const status = params.get('status') || '';
+    const data = await handleFeesFunction(database, {
+      action: 'list_bursaries', requesterRole: 'admin', status,
+    });
+    const bursaries = data.bursaries || [];
+
+    return {
+      title: 'Bursaries',
+      subtitle: status === 'active' ? 'Current only' : status === 'ended' ? 'Ended only' : 'Current and ended',
+      filename: 'bursaries',
+      landscape: true,
+      tiles: [
+        { label: 'Awards', value: String(bursaries.length) },
+        {
+          label: 'Sponsors',
+          value: String(new Set(bursaries.map((row) => row.sponsor).filter(Boolean)).size),
+        },
+      ],
+      columns: [
+        { label: 'Student', width: 2.4 },
+        { label: 'Number', width: 1.3 },
+        { label: 'Class', width: 0.9 },
+        { label: 'Award', width: 2.2 },
+        { label: 'Sponsor', width: 2 },
+        { label: 'Discount', width: 1.2, align: 'right' },
+        { label: 'Applies to', width: 1.6 },
+        { label: 'From', width: 1.1 },
+        { label: 'To', width: 1.1 },
+        { label: 'Status', width: 1 },
+      ],
+      rows: bursaries.map((row) => [
+        row.full_name || '—',
+        row.student_number || '—',
+        row.grade_level === undefined || row.grade_level === null ? '—' : printClass(row),
+        row.name,
+        row.sponsor || '—',
+        row.discount_type === 'percentage'
+          ? `${Number(row.discount_value) || 0}%`
+          : printAmount(row.discount_value),
+        [row.term, row.academic_year].filter(Boolean).join(' ') || 'Every term',
+        printDate(row.start_date),
+        row.end_date ? printDate(row.end_date) : 'Open',
+        row.status === 'ended' ? 'Ended' : 'Current',
+      ]),
+      emptyText: 'No bursaries have been awarded.',
+      note: 'A percentage discount applies to the fee structure it is attached to; a fixed one is taken off the gross.',
+    };
+  },
+
+  ratings: async (database, params) => {
+    const gradeLevel = params.get('gradeLevel') || undefined;
+    const standing = params.get('standing') || undefined;
+    const data = await handleFeesFunction(database, {
+      action: 'list_standings', requesterRole: 'admin', gradeLevel, standing,
+    });
+
+    const rows = data.rows || [];
+    const counted = rows.reduce((tally, row) => {
+      const key = row.standing || 'unrated';
+      tally[key] = (tally[key] || 0) + 1;
+      return tally;
+    }, {});
+
+    return {
+      title: 'Payment ratings',
+      subtitle: [
+        gradeLevel ? `Class G${gradeLevel}` : 'All classes',
+        standing ? `Standing: ${standing}` : null,
+      ].filter(Boolean).join(' · '),
+      filename: 'payment-ratings',
+      tiles: [
+        { label: 'Students', value: String(rows.length) },
+        { label: 'Excellent', value: String(counted.excellent || 0) },
+        { label: 'Watch', value: String(counted.watch || 0) },
+        { label: 'Delinquent', value: String(counted.delinquent || 0) },
+      ],
+      columns: [
+        { label: 'Student', width: 2.6 },
+        { label: 'Number', width: 1.4 },
+        { label: 'Class', width: 1 },
+        { label: 'Standing', width: 1.3 },
+        { label: 'Grade', width: 0.8 },
+        { label: 'Score', width: 0.9, align: 'right' },
+        { label: 'Set by', width: 1.4 },
+      ],
+      rows: rows.map((row) => [
+        row.full_name,
+        row.student_number,
+        printClass(row),
+        row.standing || 'unrated',
+        row.computed?.grade || '—',
+        row.computed?.score === null || row.computed?.score === undefined ? '—' : String(row.computed.score),
+        // A hand-set standing overrides the computed one, and whose judgement it was matters when
+        // somebody asks later why a family is rated the way it is.
+        row.source === 'manual' ? `${row.override?.set_by || 'Manual'}` : 'Computed',
+      ]),
+      emptyText: 'No students match this filter.',
+    };
   },
 };
 
-const featureForRequest = (pathname, body = {}) => {
-  const byAction = ACTION_FEATURE[pathname];
-  const action = byAction && typeof body?.action === 'string' ? byAction[body.action] : null;
-  return action || FEATURE_BY_ROUTE[pathname] || featureForDocument(pathname);
-};
+const feesTableDocument = async (database, kind, searchParams, { school, branding }) => {
+  const build = FEES_TABLE_DOCUMENTS[kind];
+  if (!build) return notFound('Unknown fees document');
 
-/**
- * 402 rather than 403.
- *
- * "You are not allowed" and "this school has not bought that" are different answers, and a client
- * that cannot tell them apart will offer to log the user in again over a billing problem.
- */
-const licenceRefusalResponse = (refusal) => ({
-  type: 'json',
-  status: 402,
-  body: {
-    error: refusal.message,
-    licence: {
-      feature: refusal.feature,
-      reason: refusal.reason,
-      plan: refusal.plan,
-      requiredPlan: refusal.requiredPlan,
-      requiredPlanLabel: refusal.requiredPlanLabel,
-    },
-    data: null,
-  },
-});
+  const spec = await build(database, searchParams);
+  if (spec.error) return notFound(spec.error);
+
+  const pdfBytes = await buildFeesTablePdf({ school, ...branding, ...spec });
+  return pdfResponse(pdfBytes, `${spec.filename || kind}.pdf`);
+};
 
 const handleFeeDocumentRequest = async (database, pathname, searchParams, { actor } = {}) => {
   const receiptMatch = pathname.match(/^\/api\/fees\/receipts\/([^/]+)\.pdf$/);
   const statementMatch = pathname.match(/^\/api\/fees\/statements\/([^/]+)\.pdf$/);
   const reportMatch = pathname === '/api/fees/report.pdf';
-  if (!receiptMatch && !statementMatch && !reportMatch) {
+  /* The printable version of each fees screen. Every one of them is a table somebody needs to carry
+     out of the building — the bursar takes arrears into a meeting, a head signs off a billing run,
+     a sponsor is sent the bursaries they fund — and none of them could be printed. */
+  const tableMatch = pathname.match(/^\/api\/fees\/(structures|billing-run|arrears|bursaries|ratings)\.pdf$/);
+  if (!receiptMatch && !statementMatch && !reportMatch && !tableMatch) {
     return null;
   }
 
-  // Receipts and the school-wide financial report stay admin-only. A single student's statement is
-  // open to teaching staff too: a teacher fielding "has this family paid?" needs the history, and it
-  // is a read of one student rather than a view of the school's finances.
+  // Receipts, the school-wide financial report and the list documents stay admin-only. A single
+  // student's statement is open to teaching staff too: a teacher fielding "has this family paid?"
+  // needs the history, and it is a read of one student rather than a view of the school's finances.
   const allowedRoles = statementMatch ? TEACHING_ROLES : FINANCE_ROLES;
   const refusal = requireRole(resolveActor(actor, { requesterRole: searchParams.get('requesterRole') }), allowedRoles);
   if (refusal) return { type: 'json', status: 403, body: refusal };
@@ -4751,6 +4957,10 @@ const handleFeeDocumentRequest = async (database, pathname, searchParams, { acto
   const settings = await loadSchoolSettings(database);
   const school = searchParams.get('schoolName') || settings.school_name;
   const branding = { tagline: settings.tagline, themeColor: settings.theme_color };
+
+  if (tableMatch) {
+    return feesTableDocument(database, tableMatch[1], searchParams, { school, branding });
+  }
 
   // School-wide financial report: headline totals, standing distribution, and arrears ageing.
   // Sourced from the same fees actions the screens use, so the numbers always match.
