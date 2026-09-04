@@ -3485,6 +3485,114 @@ test('tenants who predate plans are lifted onto Enterprise once, and never demot
 });
 
 
+test('a school changes its own tier, and only an administrator may', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const { clearLicenceCache } = await import('../server/licensing/licence.mjs');
+
+  const plan = (body) => dispatch(runtime, 'POST', '/api/functions/plan', body);
+  const call = (pathname, body = {}) =>
+    runtime.dispatch({ method: 'POST', pathname, body: { requesterRole: 'admin', ...body } });
+
+  try {
+    await runtime.database.query("UPDATE school_settings SET plan = 'essential' WHERE id = 'default'");
+    clearLicenceCache();
+
+    // Reading the plan is open to any signed-in member of staff: it is on the Settings screen and
+    // it is not a secret.
+    const seen = (await plan({ action: 'view', requesterRole: 'teacher' })).body.data;
+    assert.equal(seen.plan, 'essential');
+    assert.equal(seen.changeable, true);
+    assert.equal(seen.target, 'settings', 'no control plane here, so the licence lives in the school');
+
+    // Changing it is the account administrator's, the same fence as adding a user.
+    for (const role of ['teacher', 'bursar', 'head_teacher', 'support_staff']) {
+      const denied = await plan({ action: 'change', plan: 'enterprise', requesterRole: role });
+      assert.equal(denied.status, 403, role);
+      assert.equal(denied.body.error, 'Unauthorized');
+    }
+    assert.equal(
+      (await runtime.database.query("SELECT plan FROM school_settings WHERE id = 'default'")).rows[0].plan,
+      'essential',
+      'and nothing moved',
+    );
+
+    // Essential cannot reach the dormitories.
+    assert.equal((await call('/api/functions/matron', { action: 'dashboard' })).status, 402);
+
+    // An upgrade takes effect for the next request, not after a cache expiry somebody waits out.
+    const upgraded = (await plan({ action: 'change', plan: 'professional', requesterRole: 'admin' })).body.data;
+    assert.equal(upgraded.changed, true);
+    assert.equal(upgraded.from, 'essential');
+    assert.equal(upgraded.to, 'professional');
+    assert.equal(upgraded.plan, 'professional');
+    assert.notEqual((await call('/api/functions/matron', { action: 'dashboard' })).status, 402);
+    assert.notEqual((await call('/api/functions/digital-examiner', { action: 'list' })).status, 402);
+    // Professional stops short of the AI.
+    assert.equal((await call('/api/functions/ai-chat', { action: 'send' })).status, 402);
+
+    // A downgrade takes the screens away just as promptly — no grace period, which the UI says.
+    const downgraded = (await plan({ action: 'change', plan: 'standard', requesterRole: 'admin' })).body.data;
+    assert.equal(downgraded.to, 'standard');
+    assert.equal((await call('/api/functions/digital-examiner', { action: 'list' })).status, 402);
+    assert.notEqual((await call('/api/functions/matron', { action: 'dashboard' })).status, 402);
+
+    // Who moved a school off Professional is exactly the question asked three months later.
+    const audit = await runtime.database.query(
+      "SELECT entity_name, changes, user_role FROM audit_logs WHERE action = 'plan_changed' ORDER BY entity_name",
+    );
+    assert.equal(audit.rows.length, 2);
+    const directions = audit.rows.map((row) => {
+      const changes = typeof row.changes === 'string' ? JSON.parse(row.changes) : row.changes;
+      return changes.direction;
+    }).sort();
+    assert.deepEqual(directions, ['downgrade', 'upgrade']);
+
+    assert.match((await plan({ action: 'change', plan: 'platinum', requesterRole: 'admin' })).body.error, /Unsupported plan/);
+    assert.equal((await plan({ action: 'change', plan: 'standard', requesterRole: 'admin' })).body.data.unchanged, true);
+
+    /* Whatever tier a school is on it must be able to reach the screen that changes the tier —
+       gating this would be a door locked from inside. */
+    await runtime.database.query("UPDATE school_settings SET plan = 'essential' WHERE id = 'default'");
+    clearLicenceCache();
+    assert.notEqual((await plan({ action: 'view', requesterRole: 'admin' })).status, 402);
+    assert.notEqual((await plan({ action: 'change', plan: 'standard', requesterRole: 'admin' })).status, 402);
+  } finally {
+    clearLicenceCache();
+    await cleanup();
+  }
+});
+
+test('a plan pinned in the environment cannot be moved from inside the school', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const { clearLicenceCache } = await import('../server/licensing/licence.mjs');
+
+  process.env.LICENCE_PLAN = 'standard';
+  clearLicenceCache();
+  try {
+    const view = (await dispatch(runtime, 'POST', '/api/functions/plan', { action: 'view', requesterRole: 'admin' })).body.data;
+    assert.equal(view.plan, 'standard');
+    assert.equal(view.changeable, false, 'the screen can say why the buttons are dead');
+    assert.equal(view.target, 'environment');
+
+    /* Refused rather than written somewhere that will never be read: the operator who typed the
+       plan into the process meant it, and a save that silently does nothing is worse than a no. */
+    const refused = await dispatch(runtime, 'POST', '/api/functions/plan', {
+      action: 'change', plan: 'enterprise', requesterRole: 'admin',
+    });
+    assert.match(refused.body.error, /pins its plan in its configuration/);
+    assert.equal(
+      (await runtime.database.query("SELECT plan FROM school_settings WHERE id = 'default'")).rows[0].plan,
+      'enterprise',
+      'the settings row is untouched',
+    );
+  } finally {
+    delete process.env.LICENCE_PLAN;
+    clearLicenceCache();
+    await cleanup();
+  }
+});
+
+
 test('a student summary shows each role its own share of one student, and no more', async () => {
   const { runtime, cleanup } = await startTestRuntime();
 

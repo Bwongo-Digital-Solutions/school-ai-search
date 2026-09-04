@@ -136,3 +136,29 @@
   gap: 0.25rem;
   margin: 0.5rem 0;
 }
+
+/* The tier list on the Plan card. One row per tier, the current one marked, so the reader can see
+   what they are on and what the next one up actually adds without leaving the screen. */
+.planRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.planTiers {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
+
+.planTier {
+  border: 1px solid $ui-03;
+  padding: 0.75rem;
+}
+
+.planTierCurrent {
+  /* The school's own brand colour, the same way the side nav marks the active section. */
+  border-color: var(--brand-01, #{$brand-01-fallback});
+}

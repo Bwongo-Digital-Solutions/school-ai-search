@@ -57,3 +57,34 @@ export const fetchEntitlements = async (): Promise<Entitlements> => {
   const payload = await response.json();
   return (payload?.data as Entitlements) ?? UNKNOWN_ENTITLEMENTS;
 };
+
+/** What the plan screen needs beyond the entitlements: whether this deployment can act at all. */
+export interface PlanView extends Entitlements {
+  /** False when the plan is pinned in the environment, so the screen can say why not. */
+  changeable: boolean;
+  target: 'environment' | 'control-plane' | 'settings';
+}
+
+const callPlan = async <T,>(body: Record<string, unknown>): Promise<T> => {
+  const response = await fetch(buildApiUrl('/api/functions/plan'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    credentials: 'include',
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.error) {
+    throw new Error(payload?.error || `The plan could not be reached (${response.status})`);
+  }
+  return payload.data as T;
+};
+
+export const fetchPlanView = () => callPlan<PlanView>({ action: 'view' });
+
+/**
+ * Move the school to another tier.
+ *
+ * Takes effect immediately, in both directions — there is no proration and no grace period on a
+ * downgrade, so the screen says so before the button is pressed.
+ */
+export const changePlan = (plan: PlanTier) => callPlan<PlanView>({ action: 'change', plan });

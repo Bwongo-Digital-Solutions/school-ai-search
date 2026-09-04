@@ -17,6 +17,7 @@ import {
   listTenants,
   lookupTenantRoute,
   publicTenant,
+  setTenantPlan,
   setTenantStatus,
 } from './db/control.mjs';
 import { isPlatformOwner, platformOwnerRefusal } from './auth/platform-owner.mjs';
@@ -72,8 +73,9 @@ import { buildReportCardPdf } from './reports/report-card.mjs';
 import { buildIdCardPdf, buildQrPayload, buildQrPng } from './reports/id-card.mjs';
 import { buildFeeReceiptPdf, buildFeeStatementPdf } from './reports/fee-receipt.mjs';
 import { buildFinanceReportPdf } from './reports/finance-report.mjs';
-import { featureRefusal, entitlements as entitlementsFor } from './licensing/plans.mjs';
-import { licenceFor } from './licensing/licence.mjs';
+import { featureRefusal, entitlements as entitlementsFor, TIERS } from './licensing/plans.mjs';
+import { clearLicenceCache, licenceFor } from './licensing/licence.mjs';
+import { handlePlanFunction } from './licensing/self-service.mjs';
 import { APP_VERSION, BUILD_NUMBER, DEVELOPER_CONTACTS } from './version.mjs';
 import { getPublicGradingOptions } from './reports/grading-config.mjs';
 import { generateLlmSearchReply, getPublicModelCatalog, resolveModelSelection } from './services/llm-models.mjs';
@@ -4854,7 +4856,7 @@ const handleFeeDocumentRequest = async (database, pathname, searchParams, { acto
  * Inert (returns an error) unless a control database is configured.
  */
 // Actions that act on the platform, not on one school. Gated by the owner token, never by a role.
-const OWNER_ACTIONS = ['list', 'sweep', 'create', 'set_status'];
+const OWNER_ACTIONS = ['list', 'sweep', 'create', 'set_status', 'set_plan'];
 const TENANT_STATUSES = ['pending', 'active', 'past_due', 'suspended'];
 
 const handleProvisionFunction = async (provisioning, body = {}, httpClient, headers = {}) => {
@@ -4928,7 +4930,34 @@ const handleProvisionFunction = async (provisioning, body = {}, httpClient, head
         provisioning.provisionOptions,
       );
       provisioning.onProvisioned(tenant?.subdomain || normalizeSubdomain(body.subdomain));
-      return { tenant: publicTenant(tenant), created: true };
+
+      /* A school is usually sold a tier before it is created, so the operator says so here rather
+         than creating it and immediately changing it. Omitted means the column default, which is
+         Enterprise — see the note on liftPrePlanTenants. */
+      const wanted = String(body.plan || '').trim().toLowerCase();
+      if (wanted && !TIERS.includes(wanted)) {
+        return { error: `Unsupported plan: ${body.plan}. Use one of ${TIERS.join(', ')}.` };
+      }
+      const withPlan = wanted && tenant
+        ? await setTenantPlan(control, tenant.subdomain, wanted)
+        : tenant;
+
+      return { tenant: publicTenant(withPlan || tenant), created: true };
+    }
+
+    if (action === 'set_plan') {
+      const plan = String(body.plan || '').trim().toLowerCase();
+      if (!TIERS.includes(plan)) {
+        return { error: `Unsupported plan: ${body.plan}. Use one of ${TIERS.join(', ')}.` };
+      }
+      const tenant = await setTenantPlan(control, normalizeSubdomain(body.subdomain), plan);
+      if (!tenant) return { error: 'Unknown school' };
+
+      /* The licence is cached for a minute, and a plan changed from the owner console should be in
+         force by the time the operator has finished telling the school it is. */
+      clearLicenceCache(tenant.id);
+      clearLicenceCache(tenant.subdomain);
+      return { tenant: publicTenant(tenant) };
     }
 
     if (action === 'set_status') {
@@ -5336,6 +5365,15 @@ export const createAppRuntime = async ({
         const data = await handleStudentReportFunction(database, body, { actor });
         return data?.error
           ? { type: 'json', status: 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      /* Deliberately absent from FEATURE_BY_ROUTE: whatever tier a school is on, it has to be able
+         to reach the screen that changes the tier. Gating this would be a door locked from inside. */
+      if (method === 'POST' && pathname === '/api/functions/plan') {
+        const data = await handlePlanFunction(database, body, { actor, tenantId, control, setTenantPlan });
+        return data?.error
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
       }
 

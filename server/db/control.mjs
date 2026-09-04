@@ -168,6 +168,22 @@ export const setTenantStatus = async (control, subdomain, status) => {
   return rows[0] || null;
 };
 
+/**
+ * What a school has been sold.
+ *
+ * Separate from `setTenantStatus` because they answer different questions: status is whether the
+ * school is paid up, plan is what it bought. A suspended school on Enterprise and an active one on
+ * Essential are both ordinary states, and collapsing them into one column would make neither
+ * answerable.
+ */
+export const setTenantPlan = async (control, subdomain, plan) => {
+  const { rows } = await control.query(
+    `UPDATE tenants SET plan = $2, updated_at = NOW() WHERE subdomain = $1 RETURNING ${TENANT_COLUMNS}`,
+    [subdomain, plan],
+  );
+  return rows[0] || null;
+};
+
 export const recordTenantPayment = async (control, payment) => {
   const { rows } = await control.query(
     `
