@@ -3209,6 +3209,27 @@ const handleTeacherPerformanceFunction = async (database, body = {}, { actor: au
     };
   }
 
+  /* The allocations themselves, one row per class-and-subject.
+     `summary` groups them by class and drops the subject id, the year and the term — enough to read
+     a report, not enough to take one back. Removing an allocation needs all three, so the Users
+     screen reads them from here. */
+  if (action === 'allocations') {
+    if (!person.teacher_id) return { allocations: [] };
+
+    const { rows } = await database.query(
+      `
+        SELECT DISTINCT a.subject_id, a.grade_level, a.class_section, a.academic_year, a.term,
+               c.name AS subject_name
+        FROM subject_allocations a
+        LEFT JOIN subjects_catalog c ON c.id = a.subject_id
+        WHERE a.teacher_id = $1
+        ORDER BY a.grade_level, a.class_section, c.name
+      `,
+      [person.teacher_id],
+    );
+    return { allocations: rows };
+  }
+
   if (action === 'unallocate') {
     if (!isAdmin) return { error: 'Unauthorized' };
     if (!person.teacher_id) return { error: 'That member of staff has no allocations' };
@@ -5024,6 +5045,16 @@ const ACTION_FEATURE = {
   '/api/functions/marks': {
     extract: 'mark_extraction',
   },
+  /* Attaching a teacher to a class is staff administration, not the teaching analytics the rest of
+     this endpoint serves. Left on 'teaching' it would be unreachable on Essential, so a school
+     could hire a teacher and have no way to give them a class — and marks would never appear on
+     the phone. The report itself stays where it is. */
+  '/api/functions/teacher-performance': {
+    allocate: 'users',
+    unallocate: 'users',
+    allocations: 'users',
+    staff: 'users',
+  },
 };
 
 const featureForRequest = (pathname, body = {}) => {
@@ -5284,7 +5315,9 @@ const handleProvisionFunction = async (provisioning, body = {}, httpClient, head
 
       /* The licence is cached for a minute, and a plan changed from the owner console should be in
          force by the time the operator has finished telling the school it is. */
-      clearLicenceCache(tenant.id);
+      /* The subdomain, because that is what a tenant is keyed by everywhere — it is what
+         resolveTenantId hands to the request path. Clearing both keys was hedging against a
+         confusion now settled in licence.mjs. */
       clearLicenceCache(tenant.subdomain);
       return { tenant: publicTenant(tenant) };
     }
