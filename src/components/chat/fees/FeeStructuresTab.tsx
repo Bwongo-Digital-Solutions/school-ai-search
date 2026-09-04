@@ -9,7 +9,7 @@ import Field from '@/components/common/Field';
 import { TableSkeleton } from '@/components/common';
 import ModalShell from '@/components/common/ModalShell';
 import type { FeeStructure } from '@/types/feeAdmin';
-import { EmptyState, Panel, PrimaryButton, SecondaryButton, zebra } from './shared';
+import { EmptyState, Panel, PrimaryButton, PrintButtons, SecondaryButton, zebra } from './shared';
 import styles from '../tabs.module.scss';
 import { Add, Archive, Edit, Layers, TrashCan } from '@carbon/react/icons';
 import { Button, Checkbox, Tag } from '@carbon/react';
@@ -89,9 +89,20 @@ const FeeStructuresTab = ({ runAction, onChanged }: { runAction: (label: string,
           checked={includeArchived}
           onChange={(_event, { checked }) => setIncludeArchived(checked)}
         />
-        <PrimaryButton onClick={() => setForm(emptyForm())}>
-          <Add size={16} /> New Fee Structure
-        </PrimaryButton>
+        <div className={styles.toolbar}>
+          {/* Whether archived tiers are on screen decides whether they are on the paper too. */}
+          <PrintButtons
+            path="/api/fees/structures.pdf"
+            filename="fee-structures.pdf"
+            params={includeArchived ? { includeArchived: 'true' } : {}}
+            user={user}
+            runAction={runAction}
+            disabled={loading}
+          />
+          <PrimaryButton onClick={() => setForm(emptyForm())}>
+            <Add size={16} /> New Fee Structure
+          </PrimaryButton>
+        </div>
       </div>
 
       <Panel >

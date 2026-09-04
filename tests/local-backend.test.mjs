@@ -2382,6 +2382,71 @@ test('documents use the global school settings for branding and the stored stude
   }
 });
 
+test('every fees screen prints, and only for the office', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const feesCall = (action, body = {}) =>
+    dispatch(runtime, 'POST', '/api/functions/fees', { action, requesterRole: 'admin', actorName: 'Admin', ...body });
+  const get = (pathname, params = {}) =>
+    runtime.dispatch({ method: 'GET', pathname, searchParams: new URLSearchParams(params) });
+
+  try {
+    const structure = (await feesCall('save_fee_structure', {
+      name: 'Grade 10 Day', gradeLevel: 10, academicYear: '2026/2027', term: 'Term 1',
+      amount: 1000000, dueDate: '2026-04-01',
+    })).body.data.structure;
+
+    const student = (await runtime.database.query(
+      'SELECT id, student_id FROM students WHERE grade_level = 10 ORDER BY last_name LIMIT 1',
+    )).rows[0];
+
+    /* A bursary named with characters pdf-lib's WinAnsi fonts cannot encode. An unencodable
+       character throws mid-render and takes the whole download with it, so the folding has to be
+       exercised rather than assumed. */
+    if (student) {
+      await feesCall('save_bursary', {
+        studentId: student.id, name: 'Bishop’s Fund — half', sponsor: 'Diocese',
+        discountType: 'percentage', discountValue: 50,
+      });
+    }
+    await feesCall('run_billing', { feeStructureId: structure.id, confirm: true });
+
+    const documents = {
+      'structures.pdf': {},
+      'billing-run.pdf': { feeStructureId: structure.id },
+      'arrears.pdf': {},
+      'bursaries.pdf': {},
+      'ratings.pdf': {},
+    };
+
+    for (const [name, params] of Object.entries(documents)) {
+      const printed = await get(`/api/fees/${name}`, { requesterRole: 'admin', ...params });
+      assert.equal(printed.status, 200, `${name} should render`);
+      assert.equal(printed.type, 'binary');
+      assert.equal(printed.headers['Content-Type'], 'application/pdf');
+      assert.ok(printed.body.length > 1000, `${name} should not be an empty page`);
+
+      // The office's business and nobody else's — the same gate the financial report sits behind.
+      for (const role of ['teacher', 'support_staff']) {
+        assert.equal((await get(`/api/fees/${name}`, { requesterRole: role, ...params })).status, 403, `${name} for ${role}`);
+      }
+      assert.equal((await get(`/api/fees/${name}`, params)).status, 403, `${name} anonymously`);
+    }
+
+    // A billing run is about one fee structure. Printing it without saying which is worth a
+    // sentence rather than a blank sheet of paper.
+    const noStructure = await get('/api/fees/billing-run.pdf', { requesterRole: 'admin' });
+    assert.equal(noStructure.status, 404);
+    assert.match(noStructure.body.error, /Which fee structure/);
+
+    // An empty list still prints: "nobody owes anything" is a result somebody needs on paper.
+    const emptyArrears = await get('/api/fees/arrears.pdf', { requesterRole: 'admin', minBalance: '999999999' });
+    assert.equal(emptyArrears.status, 200);
+    assert.ok(emptyArrears.body.length > 1000);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('admins can generate a printable financial report, others cannot', async () => {
   const { runtime, cleanup } = await startTestRuntime();
   const feesCall = (action, body = {}) =>
