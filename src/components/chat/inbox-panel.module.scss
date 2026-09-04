@@ -1,0 +1,195 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  block-size: 100%;
+  overflow: hidden;
+  background-color: $ui-01;
+}
+
+// The connection state. Grey when reconnecting, green when live — a dot rather than a sentence,
+// because it is glanced at constantly and read almost never.
+.status {
+  @include type.type-style('label-01');
+  display: inline-flex;
+  align-items: center;
+  gap: layout.$spacing-02;
+  color: $text-02;
+  white-space: nowrap;
+
+  &::before {
+    content: '';
+    inline-size: layout.$spacing-03;
+    block-size: layout.$spacing-03;
+    border-radius: 50%;
+    background: $text-03;
+  }
+}
+
+.statusLive::before {
+  background: $support-success;
+}
+
+.body {
+  flex: 1;
+  min-block-size: 0;
+  overflow: auto;
+  padding: layout.$spacing-05;
+}
+
+.columns {
+  display: grid;
+  gap: layout.$spacing-05;
+  align-items: start;
+
+  // The compose form moves beside the list only when there is room for both to stay readable.
+  @media (min-width: 66rem) {
+    grid-template-columns: minmax(0, 1fr) 22rem;
+  }
+}
+
+.messages {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-03;
+  min-inline-size: 0;
+}
+
+.aside {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+}
+
+// A message. The whole tile is the click target, so the cursor says so.
+.message {
+  border: 1px solid $ui-03;
+  cursor: pointer;
+}
+
+// Unread messages carry the school's colour as a spine down the left edge. A whole-tile tint would
+// make an unread inbox into a wall of colour; a 3px edge scans just as fast and stays quiet.
+.unread {
+  border-inline-start: 3px solid var(--brand-01, #{$brand-01-fallback});
+}
+
+.messageHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: layout.$spacing-03;
+}
+
+.subject {
+  @include type.type-style('heading-compact-01');
+  color: $text-01;
+}
+
+.messageBody {
+  @include type.type-style('body-compact-01');
+  color: $text-02;
+  margin: layout.$spacing-03 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.messageMeta {
+  @include type.type-style('helper-text-01');
+  display: flex;
+  flex-wrap: wrap;
+  gap: layout.$spacing-03;
+  color: $text-03;
+}
+
+.receipt {
+  color: $support-success;
+}
+
+.composeFields {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+  padding: layout.$spacing-05;
+}
+
+.presenceList {
+  margin: 0;
+  padding: 0 layout.$spacing-05 layout.$spacing-05;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-03;
+}
+
+.presenceRow {
+  @include type.type-style('body-compact-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  color: $text-01;
+}
+
+.presenceDot {
+  inline-size: layout.$spacing-03;
+  block-size: layout.$spacing-03;
+  border-radius: 50%;
+  background: $support-success;
+  flex-shrink: 0;
+}
+
+.presenceRole {
+  @include type.type-style('helper-text-01');
+  color: $text-03;
+  margin-inline-start: auto;
+  text-transform: capitalize;
+}
+
+.asideNote {
+  @include type.type-style('helper-text-01');
+  color: $text-03;
+  margin: 0;
+  padding: 0 layout.$spacing-05 layout.$spacing-05;
+}
+
+:global(.cds--g100) {
+  .panel {
+    background-color: $ui-01-dark;
+  }
+
+  .message {
+    border-color: $ui-03-dark;
+  }
+
+  .subject,
+  .presenceRow {
+    color: #f4f4f4;
+  }
+
+  .messageBody,
+  .status {
+    color: $text-02-dark;
+  }
+
+  .messageMeta,
+  .presenceRole,
+  .asideNote {
+    color: $text-03-dark;
+  }
+}
+
+.presenceIcon {
+  fill: $text-03;
+  margin-inline-end: layout.$spacing-05;
+}
+
+
+// Tighter gutters on a phone. At 360px a 1rem gutter each side, plus each card's own padding, is a
+// third of the screen spent on whitespace — and these are dense, working screens.
+@media (max-width: 33.9375rem) {
+  .body {
+    padding-inline: layout.$spacing-03;
+  }
+}

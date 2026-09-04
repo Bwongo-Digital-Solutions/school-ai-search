@@ -1,0 +1,99 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+// Empty and error states replace the whole card rather than sitting inside it. A section with
+// nothing in it is not a section with an empty table — it is a different thing to look at, and
+// giving it the card's own border keeps the page's rhythm while saying so.
+.tile {
+  text-align: center;
+  border: 1px solid $ui-03;
+  background-color: $ui-02;
+}
+
+.heading {
+  // The title stays left-aligned inside a centred tile — it is a heading, not a caption.
+  text-align: left;
+  margin-bottom: layout.$spacing-05;
+
+  h4 {
+    @include type.type-style('heading-compact-02');
+    color: $text-02;
+    margin: 0;
+  }
+
+  h4:after {
+    content: '';
+    display: block;
+    width: layout.$spacing-07;
+    padding-top: 0.188rem;
+    border-bottom: 0.375rem solid var(--brand-03, #{$brand-03-fallback});
+  }
+}
+
+.tabletHeading h4 {
+  @include type.type-style('heading-03');
+}
+
+.illustration {
+  margin-top: layout.$spacing-05;
+  color: $text-03;
+
+  svg {
+    fill: currentColor;
+  }
+}
+
+.content {
+  @include type.type-style('heading-compact-01');
+  color: $text-02;
+  margin-top: layout.$spacing-05;
+  margin-bottom: layout.$spacing-03;
+}
+
+.helper {
+  @include type.type-style('body-compact-01');
+  color: $text-03;
+  margin-bottom: layout.$spacing-03;
+}
+
+.action {
+  margin-bottom: layout.$spacing-03;
+}
+
+// Error states put the failure itself in the emphasised line and the advice below it, so someone
+// can act on the first line and understand it from the second.
+.errorMessage {
+  @include type.type-style('heading-compact-02');
+  color: $text-01;
+  margin-top: layout.$spacing-07;
+  margin-bottom: layout.$spacing-03;
+}
+
+.errorCopy {
+  @include type.type-style('body-01');
+  color: $text-02;
+  margin: 0 auto layout.$spacing-05;
+  max-width: 28rem;
+}
+
+:global(.cds--g100) {
+  .tile {
+    background-color: $ui-02-dark;
+    border-color: $ui-03-dark;
+  }
+
+  .heading h4,
+  .content,
+  .errorCopy {
+    color: $text-02-dark;
+  }
+
+  .errorMessage {
+    color: #f4f4f4;
+  }
+
+  .helper {
+    color: $text-03-dark;
+  }
+}

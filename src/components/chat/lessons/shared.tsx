@@ -1,56 +1,48 @@
 import React from 'react';
-import { BookMarked, CheckCircle2, CircleDashed, GraduationCap } from 'lucide-react';
+import { Tag } from '@carbon/react';
+import { Book, CheckmarkFilled, Education, Incomplete } from '@carbon/react/icons';
 import type { Citation, LessonStatus, QuestionStatus } from '@/types/teaching';
+import styles from './shared.module.scss';
 
 /**
- * Status pills shared by the Lesson Planner and the Digital Examiner. Both modules run the same
- * draft → reviewed → in-use lifecycle, so they read the same way on screen.
+ * Status pills shared by the Lesson Planner and the Digital Examiner.
+ *
+ * Both modules run the same draft → approved → in-use lifecycle, so they read the same way on
+ * screen. Carbon `Tag` colours rather than hand-written classes, so a lesson's status and a fee
+ * standing look like the same kind of thing — which they are.
  */
-export const LESSON_STATUS_STYLES: Record<LessonStatus, { label: string; badge: string; icon: React.ElementType }> = {
-  draft: {
-    label: 'Draft',
-    badge: 'bg-gray-50 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border-gray-200 dark:border-gray-700',
-    icon: CircleDashed,
-  },
-  approved: {
-    label: 'Approved',
-    badge: 'bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800',
-    icon: CheckCircle2,
-  },
-  delivered: {
-    label: 'Delivered',
-    badge: 'bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 border-indigo-200 dark:border-indigo-800',
-    icon: GraduationCap,
-  },
+type TagType = 'red' | 'magenta' | 'purple' | 'blue' | 'cyan' | 'teal' | 'green' | 'gray' | 'cool-gray' | 'warm-gray';
+
+export interface StatusStyle {
+  label: string;
+  tag: TagType;
+  icon: React.ElementType;
+}
+
+export const LESSON_STATUS_STYLES: Record<LessonStatus, StatusStyle> = {
+  draft: { label: 'Draft', tag: 'cool-gray', icon: Incomplete },
+  approved: { label: 'Approved', tag: 'green', icon: CheckmarkFilled },
+  delivered: { label: 'Delivered', tag: 'blue', icon: Education },
 };
 
-export const QUESTION_STATUS_STYLES: Record<
-  QuestionStatus,
-  { label: string; badge: string; icon: React.ElementType }
-> = {
+export const QUESTION_STATUS_STYLES: Record<QuestionStatus, StatusStyle> = {
   draft: LESSON_STATUS_STYLES.draft,
   approved: LESSON_STATUS_STYLES.approved,
-  retired: {
-    label: 'Retired',
-    badge: 'bg-amber-50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-800',
-    icon: CircleDashed,
-  },
+  retired: { label: 'Retired', tag: 'warm-gray', icon: Incomplete },
 };
 
 export const StatusBadge = ({
   status,
-  styles,
+  styles: statusStyles,
 }: {
   status: string;
-  styles: Record<string, { label: string; badge: string; icon: React.ElementType }>;
+  styles: Record<string, StatusStyle>;
 }) => {
-  const style = styles[status] ?? LESSON_STATUS_STYLES.draft;
-  const Icon = style.icon;
+  const style = statusStyles[status] ?? LESSON_STATUS_STYLES.draft;
   return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${style.badge}`}>
-      <Icon className="w-2.5 h-2.5" />
+    <Tag type={style.tag} size="sm" renderIcon={style.icon}>
       {style.label}
-    </span>
+    </Tag>
   );
 };
 
@@ -65,21 +57,21 @@ export const CitationList = ({ citations, label = 'Syllabus sources' }: { citati
   if (!citations || citations.length === 0) return null;
 
   return (
-    <div className="mt-3">
-      <p className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-1.5 flex items-center gap-1">
-        <BookMarked className="w-3 h-3" /> {label}
+    <div className={styles.citations}>
+      <p className={styles.citationsLabel}>
+        <Book size={16} /> {label}
       </p>
-      <ul className="space-y-1">
+      <ul className={styles.citationList}>
         {citations.map(citation => (
           <li
             key={citation.chunkId || `${citation.documentId}-${citation.citationIndex}`}
-            className="text-[11px] text-gray-500 dark:text-gray-400 flex gap-1.5"
+            className={styles.citation}
           >
-            <span className="shrink-0 font-medium text-indigo-500">[{citation.citationIndex}]</span>
+            <span className={styles.citationIndex}>[{citation.citationIndex}]</span>
             <span>
-              <span className="font-medium text-gray-600 dark:text-gray-300">{citation.title}</span>
+              <span className={styles.citationTitle}>{citation.title}</span>
               {citation.heading && <span> — {citation.heading}</span>}
-              {citation.snippet && <span className="block text-gray-400 line-clamp-2">{citation.snippet}</span>}
+              {citation.snippet && <span className={styles.citationSnippet}>{citation.snippet}</span>}
             </span>
           </li>
         ))}

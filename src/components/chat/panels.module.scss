@@ -1,0 +1,182 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+// The admin sub-panels that live inside Settings — LibreChat, MCP servers, AI provider keys.
+// One stylesheet, because they are three variations on the same thing: a card, an explanation, a
+// field or two, and one button that changes something on the server.
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+  max-inline-size: 48rem;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+  padding: layout.$spacing-05;
+}
+
+.blurb {
+  @include type.type-style('body-compact-01');
+  color: $text-02;
+  margin: 0;
+}
+
+.note {
+  @include type.type-style('label-01');
+  color: $text-03;
+  margin: 0;
+}
+
+.strong {
+  @include type.type-style('heading-compact-01');
+  color: $text-01;
+}
+
+.grid2 {
+  display: grid;
+  gap: layout.$spacing-05;
+  grid-template-columns: 1fr;
+
+  @media (min-width: 34rem) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: layout.$spacing-03;
+}
+
+// A configuration block to paste elsewhere. Monospace and scrollable, with the copy button pinned
+// to its corner — the snippet is long and the button should not move as it wraps.
+.snippet {
+  position: relative;
+}
+
+.snippetBody {
+  @include type.type-style('code-01');
+  overflow-x: auto;
+  margin: 0;
+  padding: layout.$spacing-05;
+  padding-inline-end: layout.$spacing-10;
+  background: $ui-01;
+  border: 1px solid $ui-03;
+  color: $text-01;
+}
+
+.copyButton {
+  position: absolute;
+  inset-block-start: layout.$spacing-02;
+  inset-inline-end: layout.$spacing-02;
+}
+
+// One row in a list of configured things — a server, a provider.
+.entry {
+  border: 1px solid $ui-03;
+  background: $ui-02;
+}
+
+.entryHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: layout.$spacing-03;
+  padding: layout.$spacing-04 layout.$spacing-05;
+}
+
+.entryTitle {
+  @include type.type-style('heading-compact-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  color: $text-01;
+  margin: 0;
+
+  svg {
+    fill: var(--brand-01, #{$brand-01-fallback});
+    flex-shrink: 0;
+  }
+}
+
+.entrySub {
+  @include type.type-style('helper-text-01');
+  color: $text-03;
+  margin: layout.$spacing-01 0 0;
+}
+
+.entryBody {
+  padding: 0 layout.$spacing-05 layout.$spacing-05;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-04;
+}
+
+.warn {
+  @include type.type-style('label-01');
+  color: $caution-text;
+  margin: 0;
+}
+
+.loading {
+  display: flex;
+  justify-content: center;
+  padding: layout.$spacing-07;
+}
+
+:global(.cds--g100) {
+  .blurb {
+    color: $text-02-dark;
+  }
+
+  .note,
+  .entrySub {
+    color: $text-03-dark;
+  }
+
+  .strong,
+  .entryTitle,
+  .snippetBody {
+    color: #f4f4f4;
+  }
+
+  .snippetBody {
+    background: $ui-01-dark;
+    border-color: $ui-03-dark;
+  }
+
+  .entry {
+    background: $ui-02-dark;
+    border-color: $ui-03-dark;
+  }
+
+  .warn {
+    color: $support-warning;
+  }
+}
+
+.headerIcon {
+  fill: $text-03;
+  margin-inline-end: layout.$spacing-05;
+}
+
+.serverRow {
+  border-block-start: 1px solid $ui-03;
+}
+
+.failure {
+  @include type.type-style('label-01');
+  color: $support-error;
+  margin: layout.$spacing-01 0 0;
+}
+
+:global(.cds--g100) .serverRow {
+  border-block-start-color: $ui-03-dark;
+}

@@ -6,15 +6,21 @@
  * the chat, the Lesson Planner and the Digital Examiner across all seven configured providers.
  *
  * Normalised messages:
- *   { role: 'user'    , content: string }
+ *   { role: 'user'    , content: string, images?: [{ mediaType, data }] }
  *   { role: 'assistant', content: string, toolCalls: [{ id, name, input }], raw?: unknown }
  *   { role: 'tool'    , toolCallId, name, content: string, isError?: boolean }
+ *
+`images` are base64 without a data: prefix, and are only ever attached to a user turn. Anthropic,
+ * OpenAI-compatible and Google all accept them; Ollama's own vision models take a different shape
+ * again and most local models have no vision at all, so `supportsVision` says who may be asked
+ * rather than letting a silently ignored image look like a bad reading.
  *
  * `raw` carries the provider's own assistant content back verbatim on the next request. It matters
  * for Claude: thinking blocks must be replayed unchanged on the same model within a tool loop, and
  * reconstructing them from the normalised fields would corrupt them.
  */
 import { PROVIDER_ENV, anthropicSamplingParams, postJson } from '../services/llm-models.mjs';
+import { credentialFor } from '../services/credential-store.mjs';
 
 const OPENAI_COMPATIBLE = ['openai', 'groq', 'mistral', 'openrouter'];
 
@@ -25,19 +31,31 @@ const OPENAI_COMPATIBLE = ['openai', 'groq', 'mistral', 'openrouter'];
  * model *uses* them well is another matter: small models often emit the call as fenced JSON in the
  * content instead, which callOllama below recovers.
  */
+/**
+ * Providers that can be shown an image.
+ *
+ * Ollama is excluded deliberately. It can serve vision models, but the payload shape differs and
+ * whether the model behind the endpoint has vision at all is unknowable from here — an image that
+ * is quietly dropped comes back as a confident answer about nothing, which is worse than a refusal.
+ */
+export const supportsVision = (provider) =>
+  OPENAI_COMPATIBLE.includes(provider) || provider === 'anthropic' || provider === 'google';
+
 export const supportsTools = (provider) =>
   OPENAI_COMPATIBLE.includes(provider) || provider === 'anthropic' || provider === 'google' || provider === 'ollama';
 
 const agentMaxTokens = () => Number(process.env.AI_AGENT_MAX_TOKENS || 16000);
 
+// credentialFor, not process.env: a school may have supplied its own key and address, and these
+// two helpers are where every adapter below picks them up.
 const baseUrlFor = (provider) => {
   const env = PROVIDER_ENV[provider];
-  return (process.env[env.baseUrl] || env.defaultBaseUrl).replace(/\/$/, '');
+  return (credentialFor(env.baseUrl) || env.defaultBaseUrl).replace(/\/$/, '');
 };
 
 const requireKey = (provider, label) => {
   const env = PROVIDER_ENV[provider];
-  const apiKey = process.env[env.apiKey];
+  const apiKey = credentialFor(env.apiKey);
   if (!apiKey) throw new Error(`${env.apiKey} is required for ${label}`);
   return apiKey;
 };
@@ -83,6 +101,20 @@ const toAnthropicMessages = (messages) => {
 
     if (message.role === 'assistant' && message.raw) {
       result.push({ role: 'assistant', content: message.raw });
+      continue;
+    }
+
+    if (message.role === 'user' && message.images?.length) {
+      result.push({
+        role: 'user',
+        content: [
+          ...message.images.map((image) => ({
+            type: 'image',
+            source: { type: 'base64', media_type: image.mediaType, data: image.data },
+          })),
+          ...(message.content ? [{ type: 'text', text: message.content }] : []),
+        ],
+      });
       continue;
     }
 
@@ -158,6 +190,20 @@ const toOpenAiMessages = (system, messages) => {
           type: 'function',
           function: { name: call.name, arguments: JSON.stringify(call.input) },
         })),
+      });
+      continue;
+    }
+
+    if (message.role === 'user' && message.images?.length) {
+      result.push({
+        role: 'user',
+        content: [
+          ...(message.content ? [{ type: 'text', text: message.content }] : []),
+          ...message.images.map((image) => ({
+            type: 'image_url',
+            image_url: { url: `data:${image.mediaType};base64,${image.data}` },
+          })),
+        ],
       });
       continue;
     }
@@ -354,11 +400,24 @@ const recoverToolCallFromText = (text, toolNames) => {
 
     try {
       const parsed = JSON.parse(candidate.slice(start, end + 1));
-      const name = parsed.name || parsed.tool || parsed.function?.name;
-      if (!toolNames.includes(name)) continue;
+      const declared = parsed.name || parsed.tool || parsed.function?.name;
+      const input = parseToolInput(
+        parsed.arguments ?? parsed.parameters ?? parsed.input ?? parsed.function?.arguments ?? parsed,
+      );
 
-      const input = parsed.arguments ?? parsed.parameters ?? parsed.input ?? parsed.function?.arguments;
-      calls.push({ id: `recovered-${calls.length}`, name, input: parseToolInput(input) });
+      // A model that names the call correctly is the easy case. Models also routinely put something
+      // else in `name` — the topic, a title — while the payload is exactly right. Rejecting those on
+      // the label alone threw away good work, so when a single tool is on offer the payload is
+      // accepted whatever it was called.
+      const name = toolNames.includes(declared)
+        ? declared
+        : toolNames.length === 1 && input && Object.keys(input).length > 0
+          ? toolNames[0]
+          : null;
+
+      if (!name) continue;
+
+      calls.push({ id: `recovered-${calls.length}`, name, input });
     } catch {
       // Not JSON, or truncated mid-object — nothing to recover from this candidate.
     }
@@ -368,7 +427,7 @@ const recoverToolCallFromText = (text, toolNames) => {
 };
 
 const callOllama = async ({ model, system, messages, tools, httpClient }) => {
-  const baseUrl = (process.env.OLLAMA_BASE_URL || PROVIDER_ENV.ollama.defaultBaseUrl).replace(/\/$/, '');
+  const baseUrl = (credentialFor('OLLAMA_BASE_URL') || PROVIDER_ENV.ollama.defaultBaseUrl).replace(/\/$/, '');
 
   const body = {
     model: model.model,

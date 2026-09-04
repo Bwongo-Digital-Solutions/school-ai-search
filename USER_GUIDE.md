@@ -10,17 +10,36 @@ For architecture, endpoints and deployment, see [TECHNICAL_OVERVIEW.md](TECHNICA
 
 ## 1. Who can do what (roles)
 
-Every person signs in with one of three roles. The first account ever created becomes the
-**Administrator** automatically.
+Every person signs in with one of six roles. The first account ever created becomes the
+**Administrator** automatically; every role after that is assigned by an administrator under
+**Staff Access**.
 
 | Role | Sees | Can do |
 | --- | --- | --- |
-| **Administrator** | Everything | Manage students, records, fees, settings, staff accounts, reports; approve new sign-ups. |
-| **Teacher** | Student records (view), records workspace, teaching tools | View students; record attendance, academic, discipline, admissions, allocations, lifecycle; plan lessons; write and bank exam questions; use the AI assistant. |
-| **Support staff** | School Fees Status only | Look up a student's fee balance/status (by search or by scanning an ID card). Nothing else. |
+| **Administrator** | Everything | Everything below, plus staff accounts and roles, the audit trail, and the school settings. |
+| **Head Teacher** | Everything except staff and settings | Every student record, the fees, the whole of monitoring, and the school's data — backups, export, import, and the connected systems. Cannot change roles or system settings. |
+| **Accountant** | Fees, reports, school data | Fee structures, billing runs, payments, arrears, bursaries, ratings and financial reports. Backups, export and import. Does not see student records or the teaching tools. |
+| **Bursar** | Fees, reports, school data | The same reach as the accountant, and the counter work that goes with it — receipting payments and answering on a family's account. |
+| **Teacher** | Student records, teaching tools | View students; record attendance, academic, discipline, admissions, allocations and lifecycle; plan lessons; write and bank exam questions; use the AI assistant. |
+| **Support staff** | School Fees Status only | Look up a student's fee balance or status, by search or by scanning an ID card. Nothing else. |
 
-Support staff are non-teaching staff — gatekeepers, bursary desk, cooks, drivers — who need to
-confirm whether fees are cleared and nothing more.
+Two divisions run through that table. **Student records** are for the people who teach — the
+administrator, the head teacher and teachers. **Money** is for the people who keep the books — the
+administrator, the head teacher, the accountant and the bursar. The head teacher is in both,
+because running a school means answering for both.
+
+The third division is narrower: **the school's data as a whole** — a backup, or a bulk export — is
+every student record in one file. That is for the four roles that answer for the institution, not
+for a teacher who may perfectly well read any one of those records on their own.
+
+Support staff are non-teaching staff — gatekeepers, matrons, cooks, drivers — who need to confirm
+whether fees are cleared and nothing more. A support-staff account can be given a **post** (gate,
+dormitory or kitchen) which decides what a student ID scan shows them.
+
+> **A note if you are upgrading.** The bursar used to be a *post* on an administrator's account.
+> It is a role now — keeping the books is a job, not a posting, and it should not require handing
+> somebody the administrator's keys. Existing bursar accounts are moved across automatically the
+> first time the new version starts.
 
 ---
 
@@ -42,6 +61,23 @@ sign in** until an administrator approves them. As an admin:
 
 If someone tries to sign in before approval, they see *"Your account is awaiting administrator
 approval."*
+
+### Staying signed in
+
+Signing in gives you a session that lasts about **12 hours**, and it extends itself while you are
+working, so a long day in the gradebook does not end in a sudden sign-out. Closing the browser does
+not sign you out; **Sign Out** does, on the server as well as on your screen.
+
+What you are allowed to do is decided by the server from your account each time you ask it for
+something — not by the screen you happen to be looking at. Two things follow, and both are
+deliberate:
+
+- If an administrator changes your role, it takes effect on your **very next click**, not whenever
+  you next sign in.
+- Nothing you can change in your own browser will grant you access you have not been given.
+
+Each school's sign-in is its own. A session at `kampala-high.eschool.ink` means nothing at any other
+school on the platform, even for the same person — they sign in separately at each.
 
 ### Editing and removing accounts
 
@@ -76,10 +112,19 @@ Both editing and deleting are written to the **Audit** log with who did it and w
 - Student numbers are unique; the app will not let two students share one.
 
 ### Student ID cards
-- From a student row, open the **ID card** preview, or use **Print ID Cards** to produce a batch
-  (ten per A4 sheet, or one plastic-card-sized page each).
+- From a student row, open the **ID card** preview to check the QR scans with a phone before
+  committing to a print run.
+- **Print ID cards** opens a short dialog asking who the batch is for: a **class**, a **stream**, and
+  a **registration date range** — so you can print cards for this year's intake, or for one class, or
+  for everyone. Leave a field blank to include everyone. Ten cards fill an A4 sheet.
+- The dialog tells you how many students match and how many sheets that fills, before it prints
+  anything.
 - Each card carries the school name, logo and theme colour (from Settings), the student's photo, and
   a QR code. Scanning the QR opens that student's **fee status**.
+
+> **A student with no registration date on file is not in any date range.** If you have added
+> students without an enrolment date, the dialog will say how many are being left out. Clear the
+> dates to include them, or fill the date in on the student's record.
 
 ---
 
@@ -153,6 +198,16 @@ the arrears ageing table.
 
 ---
 
+### Paying before the bill arrives
+
+If a family pays before an invoice has been raised — a deposit at admission, a parent settling next
+term early — that money is held as **credit** against the student. When the bill is finally raised
+it comes out already reduced by what was paid, and the receipt shows how much was applied.
+
+Nothing to remember and nothing to reconcile by hand: pay 200,000 against a 500,000 term and the
+invoice is issued showing 300,000 outstanding. Pay more than the term costs and the remainder stays
+as credit against the next one.
+
 ## 6. Report cards
 
 From **Student Management**, open a student and choose **Build PDF Report Card**.
@@ -168,7 +223,7 @@ From **Student Management**, open a student and choose **Build PDF Report Card**
 
 ## 7. Settings (admin)
 
-Open **Settings** from the user menu. Administrators only. It has two tabs.
+Open **Settings** from the user menu. Administrators only.
 
 ### Branding
 
@@ -227,6 +282,92 @@ e-School's own tools also work the other way round: with a server token configur
 student search and curriculum lookup can be used from Claude Desktop, Claude Code or another MCP
 client. See [TECHNICAL_OVERVIEW.md](TECHNICAL_OVERVIEW.md) for setup.
 
+### Integrations — your Moodle and your business system
+
+Most schools already run something. **Settings → Integrations** records where those systems are, so
+staff reach them from inside e-School instead of hunting for a bookmark.
+
+**E-Learning.** Enter your Moodle's address and save. An **E-Learning** entry appears in the side
+menu and opens Moodle inside the app. Some systems refuse to be shown inside another site — a
+sensible thing for them to do, since it is what stops an untrusted page wrapping their login — and
+when that happens you get a button that opens it in its own tab instead. Nothing is broken; that is
+the system protecting itself.
+
+**Business system.** One of Odoo, ERPNext or Dolibarr. One at a time on purpose: connecting a second
+stands the first down, so the menu never shows two and leaves you guessing which one is real.
+
+An API token is optional. If you set one it is encrypted before it is stored, and it never comes
+back out — the screen shows only its last four characters, enough to recognise it and not enough to
+use it. Saving the address again leaves the stored token alone; to remove it, clear the token box
+explicitly and save.
+
+Two things the screen enforces, both about that token:
+
+- **The address must be https.** A token travels on every request, and one sent over plain http can
+  be read by anyone on the same network. It is refused when you enter it rather than being quietly
+  insecure afterwards.
+- **The server needs `SECRETS_KEY` set** to store a token at all. Without it you can still save an
+  address, and the screen says so rather than pretending to have saved a credential.
+
+**Test** asks the system whether it is really there and shows what came back — an unreachable
+address or an error code, kept against the row so it is still there after a reload.
+
+**Internal address.** Leave this blank if the system is one you already run — the address staff type
+in their browser is the address the server uses too. Fill it in only when e-School reaches the system
+by a different name than a browser does, which happens when it was started alongside e-School on the
+same machine: the browser needs something like `https://moodle.yourschool.ac.ug`, while the server
+reaches it as `http://moodle:8080`. If in doubt, leave it blank.
+
+> **Don't have a Moodle or an ERP yet?** One can be started alongside e-School rather than installed
+> separately. Ask whoever runs your server to look at option 18 in `./containers.sh` — Moodle, Odoo,
+> ERPNext and Dolibarr are all available. They are full systems with their own logins and their own
+> upkeep, so this is a decision to make deliberately, not a button to press out of curiosity.
+
+### Your school's data — backups, export and import
+
+**School Data** in the side menu, for the administrator, head teacher, accountant and bursar. Three
+tabs, answering the same worry from different directions.
+
+**Backups** are complete copies of your school's database, taken on the server. Press **Back up
+now**, and the backup appears in the list with its size and who took it. **Download** brings it to
+your computer.
+
+**Automatic backups.** Turn on **Take a backup every day**, choose a time, and the school is backed
+up without anyone remembering to. A quiet hour is best — two in the morning is the default. Automatic
+backups appear in the same list as the ones you take by hand, marked *automatic* instead of a name,
+and download the same way.
+
+- **Timezone.** Leave it blank and the time means the server's clock. If your server is elsewhere,
+  put your own zone in (for example `Africa/Kampala`) and the time means your clock.
+- **Keep the last.** Older automatic backups are deleted once there are more than this many, so they
+  do not fill the disk. **Backups you took by hand are never deleted automatically** — those are
+  yours to remove.
+- If the server was switched off at the hour you chose, it takes the day's backup when it comes back
+  rather than skipping the day.
+
+> If the screen warns that **nothing is running this schedule**, the times are saved but this server
+> was started without its backup scheduler. Ask whoever runs it to set `BACKUP_SCHEDULER=true` and
+> restart. Until then no automatic backup will be taken.
+
+> Be careful with a downloaded backup. It contains every student record, every payment, and the
+> accounts your staff sign in with. Keep it wherever you would keep the paper register — not in a
+> shared folder or an email attachment.
+
+**Export** is different, and for a different purpose. A backup is for restoring this school; an
+export is a readable copy for a spreadsheet or another system. Choose the tables you want, then CSV
+(one file per table, opens in Excel or LibreOffice) or JSON (for another system to read). Credentials
+are never exported: no password hashes, and no keys for the services you are connected to.
+
+**Import** reads a JSON export back in. It always checks the file first and tells you what it found
+before writing anything — how many rows in each table, and any problems, such as rows with no id
+that could not be matched. Only once it is clean will the import button work.
+
+> **Take a backup before an import.** An import writes over records that are already here, matching
+> on their id. It is the one thing on this screen that cannot be undone.
+
+Every one of these — taking a backup, downloading one, deleting one, exporting, importing — is
+written to the audit trail with who did it and when.
+
 ---
 
 ## 8. Teaching tools
@@ -278,9 +419,25 @@ blank is filled in from the curriculum's own paper structure.
 **Generate** — pick the topics and how many questions you want. Tick **Target weak topics** to
 weight the paper towards whatever this cohort scored lowest on in the gradebook.
 
-Every question comes back as **Awaiting review**, showing its type, marks, difficulty, Bloom level,
-assessment objective, the expected answer, the mark-by-mark scheme, and the syllabus passage behind
-it. Approve the ones you want; retire the ones you do not.
+What comes back opens in a **text editor**, as readable questions rather than as a machine format.
+It is an ordinary document: retype a stem, add or delete an option, change the marks, remove a
+question you do not want, or write a new one at the bottom by hand. The toolbar has bold, italic,
+headings, bullet and numbered lists and links, with **Undo**/**Redo** and the usual **Ctrl+B** /
+**Ctrl+I** shortcuts; **Preview** shows the paper as it reads, and **Ctrl+S** saves.
+
+- **Save to question bank** writes the document back. Questions you edited are updated in place —
+  editing does not create a second copy — and anything you added is banked as a new draft. It says
+  how many were updated and how many added.
+- **Download** takes the document as a Markdown file, and **Copy** puts it on the clipboard, so a
+  draft is never trapped in the browser.
+
+Nothing the model wrote is thrown away. If it answers in prose, or in a format that cannot be read
+as questions at all, its reply opens in the same editor for you to shape and save, instead of
+disappearing into an error message.
+
+Below the editor, every question also appears as a card marked **Awaiting review**, showing its
+type, marks, difficulty, Bloom level, assessment objective, the expected answer, the mark-by-mark
+scheme, and the syllabus passage behind it. Approve the ones you want; retire the ones you do not.
 
 **Question Bank** — your approved questions, reusable across terms and years. Filter by status,
 topic or subject, tick the ones you want, and assemble them into a paper.
@@ -299,6 +456,39 @@ you can:
 
 ---
 
+### AI Providers
+
+By default your school uses the platform's AI accounts, and there is nothing to set up. If your
+school has its own account — an OpenAI or Anthropic key you pay for, or an Ollama machine on your
+own network — enter it here and this school will use it instead. Only this school; no other school
+on the platform is affected.
+
+- A key you enter is **stored encrypted and never shown again** — the screen only ever shows the last
+  four characters, so there is no way for anyone, including you, to read it back out of the app.
+- **Use the platform's** removes your key and hands the school back to the shared account.
+- Ollama needs only an address, not a key — point it at your own machine.
+
+> If the screen says the server has no encryption key configured, provider keys cannot be stored at
+> all. That is a platform-level setting; ask whoever runs it. You can still set a self-hosted address.
+
+## 8c. Messages
+
+**Messages** in the top navigation is the staff inbox. Colleagues' messages and school events — a
+student refused at the gate, an exam admission rejected — share one list, because the bell is one
+bell.
+
+- **New messages arrive without refreshing.** The badge on the tab moves the moment someone sends
+  one. A small **Live** marker shows the connection is up; if it says *Offline* the app still works
+  exactly as before, it just waits until you next open the inbox.
+- **Send to one person, a role, a team, or everybody.** Roles are Administrators, Teachers and
+  Support staff; teams are designations like *askari* or *bursar*. You never receive your own
+  broadcast.
+- **Tick urgent** for something that cannot wait — it is marked in the list.
+- **Read receipts**: when someone reads your message you see it, without reloading.
+- **Online now** lists who is signed in at your school this minute.
+
+Support staff are included — messaging is how the gate and the kitchen get told things.
+
 ## 9. Finding things — global search
 
 Press **⌘K** (or **Ctrl+K**) anywhere in the app, or click **Search…** in the top bar. One box
@@ -309,7 +499,24 @@ searches across:
 - **lesson plans** and **banked exam questions** — find the osmosis question you wrote last term;
 - **attendance**, and for administrators **fees** — invoices, receipts and payment references.
 
-Results are grouped by type; pick one to jump to it.
+Results are grouped by type; pick one to jump to it. **Picking a student opens their summary** — see
+below.
+
+### A student's whole record
+
+Choosing a student from search (or opening one from the roster) opens a single screen with everything
+the school holds about them: date of birth and contacts, class, their parents and emergency contact,
+their marks subject by subject, the attendance register, the fee balance and what has been paid, any
+disciplinary record, and their passage through the school from admission through promotions to any
+transfer.
+
+**Print everything** puts the lot on paper in one go — the same document a parent can be emailed —
+and **Download** saves it as a PDF.
+
+> **You see the parts of the record your job needs.** A teacher sees marks, attendance and
+> discipline, but not the family's payment history. The bursar and the accountant see what is owed
+> and what has been paid, but not disciplinary records. This is decided on the server: the parts you
+> may not see are never sent to your browser at all.
 
 > **You only ever see what your role allows.** A teacher's search never returns fee records, even
 > though they are indexed. Support staff have no search at all — they see fee status on their own
@@ -394,10 +601,27 @@ overrides, account approvals, exam publishing, settings changes — each with wh
 ## 12. For platform operators — onboarding schools
 
 e-School can run many schools from one deployment, each with its **own isolated database**, reached
-at its **own subdomain** (`your-school.eschool.app`).
+at its **own subdomain** (`your-school.eschool.ink`).
+
+### The operator's console
+
+If you run the platform, **`/owner`** is your screen. It asks for the operator token set on the
+server, then lists every school with its status and paid-to date, and lets you:
+
+- **add a school directly**, with no payment — its subdomain is live immediately, and the first
+  account created there becomes its administrator;
+- **change a school's status** (active, past due, suspended, pending);
+- **run the renewal sweep** by hand.
+
+Nothing in a school's own screens can reach any of this. A school's administrator is an
+administrator *of that school*: they cannot see that any other school exists.
+
+> The token lives only in that browser tab — close it and it is gone. It is never saved to the
+> browser, so there is nothing on your machine for anything else to read.
 
 ### Self-service sign-up
-A school signs itself up at the public page **`/signup`** (e.g. `apply.eschool.app/signup`):
+
+A school signs itself up at the public page **`/signup`** (e.g. `apply.eschool.ink/signup`):
 
 1. Enter the school name, pick a web address (subdomain — availability is checked live), and an admin
    email.
@@ -413,9 +637,119 @@ then, if unpaid, is **suspended** — its subdomain shows a renewal notice until
 Renewing (sign up again with the same subdomain → pay) reactivates it.
 
 ### What operators configure (once)
-Wildcard DNS/TLS for the root domain, a control database, subscription pricing, live payment-provider
-keys, and (optionally) an email provider for the activation email. See
-[TECHNICAL_OVERVIEW.md](TECHNICAL_OVERVIEW.md) → *Multi-Tenancy and Self-Service Provisioning*.
+
+Wildcard DNS and a wildcard TLS certificate for the root domain, a control database, subscription
+pricing, live payment-provider keys, and (optionally) an email provider for the activation email.
+Two secrets matter more than the rest:
+
+- **`SESSION_SECRET`** — without it, everyone is signed out every time the server restarts.
+- **`PLATFORM_OWNER_TOKEN`** — without it, `/owner` refuses everything and no school can be created.
+
+Generate each with `openssl rand -hex 32`. The full runbook is in
+[DEPLOYMENT.md](DEPLOYMENT.md); the design is in [TECHNICAL_OVERVIEW.md](TECHNICAL_OVERVIEW.md) →
+*Multi-Tenancy and Self-Service Provisioning*.
+
+### Running the servers
+
+`./containers.sh` is the helper for all of it — an interactive menu, or direct commands:
+
+```bash
+PROXY=nginx ./containers.sh start        # start everything behind nginx, with TLS
+PROXY=caddy ./containers.sh start        # or behind Caddy, which manages its own certificate
+./containers.sh cert-status              # what certificate is installed and when it expires
+./containers.sh cert-issue               # get a wildcard certificate (nginx)
+./containers.sh cert-renew               # renew it and reload — safe to run from cron
+./containers.sh status                   # what is running
+./containers.sh logs                     # follow the logs
+```
+
+Every school is a subdomain, so the certificate has to be a **wildcard** (`*.eschool.ink`), and a
+wildcard certificate can only be issued if the certificate authority can check a **DNS record** —
+so `cert-issue` needs an API token for your domain's DNS. Caddy does the same thing by itself if you
+would rather not think about renewals at all.
+
+Once the wildcard is in place, **a new school needs no DNS work**: it is reachable the moment it is
+created, at 10pm on a Sunday if that is when someone pays.
+
+### Which database the stack uses
+
+By default the stack brings its own PostgreSQL container — one machine, nothing else to look after.
+That is the right choice for a single school on a single VPS.
+
+You can point it at your own database instead: a managed Postgres from a cloud provider, one already
+running on the host, or one on another machine. Set the connection in `.env.production` and choose
+**option 17** in `./containers.sh`, or set `DB_MODE=external`:
+
+```bash
+DATABASE_URL=postgres://schoolapp:secret@db.example.org:5432/school_ai_search
+DATABASE_SSL=true
+```
+
+For a Postgres running on the host rather than in Docker, use `host.docker.internal` as the host
+name — the container is already set up to reach it.
+
+Choosing external stops the bundled container from starting at all. The script checks the connection
+before it starts anything, so a wrong address or password fails with a message rather than an app
+container that restarts forever saying nothing useful.
+
+`DATABASE_SSL=true` is almost always right for a managed database. Set
+`DATABASE_SSL_REJECT_UNAUTHORIZED=false` only for a server presenting a self-signed certificate on a
+network you trust — it turns off the check that the certificate belongs to the host you asked for.
+
+### Backups
+
+Backups are written inside the app container to `BACKUP_DIR` (`/var/backups/eschool`), which is a
+named Docker volume — so they survive the container being rebuilt or replaced.
+
+They are taken from the app itself, under **School Data**, by an administrator, head teacher,
+accountant or bursar. There is nothing to run on the server for a routine backup.
+
+**Automatic backups need one thing switching on.** A school can set a daily time under **School
+Data → Backups**, but nothing acts on it unless the app container is started with
+`BACKUP_SCHEDULER=true`. Set it on the long-running app container and **nowhere else**: two
+processes with it on would each take the day's backup and each believe it was the one that had.
+The Backups screen warns the school when a schedule is saved and no scheduler is running, so this
+does not fail silently.
+
+Two things worth knowing:
+
+- **A backup volume is not off-site.** It survives a container being replaced; it does not survive
+  the machine being lost. Copy the volume somewhere else on whatever schedule the school's risk
+  deserves.
+- **A dump contains everything**, including password hashes and the tokens for any MCP servers the
+  school has connected. Treat the volume and any downloaded copy as you would the database itself.
+
+Restoring is an operator job on the server, with the ordinary PostgreSQL tools:
+
+```bash
+docker compose cp app:/var/backups/eschool/<file>.dump ./restore.dump
+pg_restore --clean --if-exists --no-owner -d "$DATABASE_URL" ./restore.dump
+```
+
+### Bundled systems — Moodle, Odoo, ERPNext, Dolibarr
+
+A school that does not already run a learning platform or an ERP can have one started alongside
+e-School rather than installed separately. Option **18** in `./containers.sh`, or directly:
+
+```bash
+docker compose -f deploy/integrations/moodle.yml -p school-ai-search-moodle up -d
+```
+
+Each is a complete stack in its own file under `deploy/integrations/`, with its own database and its
+own volumes. Start the app first — they join its network (`school-ai-search_default`) rather than
+creating one, and the script will say so rather than failing obscurely if it is not there yet.
+
+Sizes differ a great deal. Dolibarr is two containers; Moodle is two; Odoo is two; **ERPNext is
+seven** and wants a couple of gigabytes of memory. ERPNext also has no site until one is created,
+which is a separate command the script prints for you after starting it.
+
+Nothing is published beyond loopback. Put a bundled system behind the same reverse proxy as the app
+to give it a real address, then connect it under **Settings → Integrations** with two addresses: the
+public one staff will open, and `http://<name>:<port>` as the **internal address** the server uses.
+
+> These are real systems with their own logins, their own upgrades and their own backups — this
+> script starts them, it does not look after them. A school that already runs one should connect
+> that one instead.
 
 ---
 
@@ -423,7 +757,33 @@ keys, and (optionally) an email provider for the activation email. See
 
 | Symptom | Likely cause / fix |
 | --- | --- |
+| **"Backups cannot be taken on this server"** | The PostgreSQL client tools are missing from the image, or the app is running against an in-memory database. Rebuild the image (`./containers.sh build`) — `pg_dump` ships in it. |
+| **No automatic backup has been taken** | Check the Backups screen: if it warns *nothing is running this schedule*, the server was started without `BACKUP_SCHEDULER=true`. Otherwise check the time and timezone — a blank timezone means the *server's* clock, which may not be yours. |
+| **The last automatic backup failed** | The reason is shown on the Backups screen and against the row in the list. It is usually a full disk or an unreachable database; it will be tried again at the next day's scheduled time, not sooner. |
+| **A backup is stuck at "In progress"** | The dump was interrupted, usually by the container restarting. Delete that row and take another; a half-written file is deliberately never listed as complete. |
+| **Automatic backups are on but none are being taken** | The screen will say *nothing is running this schedule* if that is why — the server was started without `BACKUP_SCHEDULER=true`. Otherwise check the time and timezone: a blank timezone means the server's clock, which may not be yours. |
+| **An automatic backup I wanted is gone** | Retention deleted it — only so many automatic backups are kept. Raise **Keep the last**, or take the ones that matter by hand: backups you take yourself are never deleted automatically. |
+| **"Print ID cards" says no students match** | The class, stream and date range together match nobody. Widen one of them. If you set dates, remember that students with no registration date on file are in no range at all — the dialog says how many. |
+| **A student's summary is missing a section I expected** | You are seeing the parts of the record your role covers. A teacher has no payment history; the bursar and accountant have no disciplinary records. An administrator or head teacher sees all of it. |
+| **I had to refresh the browser to see students** | Fixed. If it still happens, it is a genuine load failure rather than an empty school — the screen now says so and offers **Try again**, and the reason it gives is worth passing on. |
+| **An import will not start** | It has not been checked yet, or the check found problems. The button stays off until the file reads cleanly — the list of problems above it says what to fix. |
+| **Printing ID cards leaves students out** | Only students with a registration date on file are in a date range. The print dialog says how many are being left out for that reason — clear the dates, or fill the enrolment date in on their records. |
+| **A student summary is missing a section** | You are seeing the parts of the record your role covers. A teacher has no payment history; the bursar and accountant have no disciplinary records. This is decided on the server and cannot be changed from the browser. |
+| **A connected system shows "will not open inside the app"** | That system sends `X-Frame-Options`, refusing to be displayed inside another site. This is normal and is that system protecting its own login. Use the "Open in a new tab" button. |
+| **"The stored token can no longer be decrypted"** | `SECRETS_KEY` changed on the server. The old value cannot be recovered; enter the token again under Settings → Integrations. |
+| **A bundled system tests as unreachable** | It is probably still installing — Moodle and ERPNext take several minutes on first run. If it persists, the **Internal address** is likely wrong: for a system started alongside e-School it is the service name, such as `http://moodle:8080`, not the address you type in your browser. |
+| **A token will not save** | `SECRETS_KEY` is not set on the server, so there is nothing to encrypt it with. Set it (`openssl rand -hex 32`) and restart. An address alone still saves without it. |
+| **The app will not start against my own Postgres** | Check `DATABASE_URL` is reachable from the container (`host.docker.internal` for a database on the host, not `localhost`), and that `DATABASE_SSL=true` if the server requires TLS — most managed ones do. `./containers.sh` option 17 tests the connection before starting anything. |
 | *"Your account is awaiting administrator approval."* | Ask an admin to approve you under **Staff → Pending Approval**. |
+| Everyone is signed out whenever the server restarts | `SESSION_SECRET` is not set on the server, so it invents a new signing key each time it starts. Set it (`openssl rand -hex 32`) and restart once more. |
+| You are signed out after about half a day | Expected — a session lasts 12 hours and is extended while you are working. Sign in again. |
+| A screen says *Unauthorized* even though you are signed in | Your role does not allow it. The server decides this from your account, not from the screen, so changing anything in the browser will not help — ask an administrator. |
+| An admin was demoted but still had admin screens | No longer possible: the role is re-read from their account on every request, so a change takes effect on their very next click. |
+| The operator console at `/owner` refuses the token | Either `PLATFORM_OWNER_TOKEN` is not set on the server (it fails closed), or the token is wrong. It is also refused if it is shorter than 24 characters. |
+| A browser warns the certificate is invalid for `school.eschool.ink` | The certificate is not a wildcard. Run `./containers.sh cert-status` — *Covers* must list `*.eschool.ink`, not just the bare domain. Re-issue with `./containers.sh cert-issue`. |
+| Every school shows the same school's data | The reverse proxy is rewriting the `Host` header, so every request looks like the apex. In nginx it must be `proxy_set_header Host $host;` — see `deploy/nginx/`. |
+| Uploading a photo or logo fails with a 413 | The proxy's upload limit. `client_max_body_size 25m;` is already in the shipped nginx configs — check yours matches if you wrote your own. |
+| A long AI generation ends in a 504 | The proxy's read timeout. The shipped configs use 300s; a 60s default will cut off a local model mid-paper. |
 | No Delete button on a staff row | That is your own account — you cannot delete the account you are signed in with. Ask another administrator. |
 | *"This is the only administrator account…"* | Promote a second person to Administrator under **Staff**, then delete the first. |
 | A staff member cannot sign in after you edited them | Their sign-in email changed. Check it under **Staff → Edit**; that address is what they must use. |
@@ -443,7 +803,8 @@ keys, and (optionally) an email provider for the activation email. See
 | Support staff sees only the fees screen | Expected — that role is limited to fee status by design. |
 | **Draft this lesson** / **Write questions** is greyed out | Pick a configured AI model in the chat composer first. The **Local Rules** engine searches student records only and cannot write. |
 | The **Agent** or **MCP** switch is greyed out | Only the built-in **Local Rules** engine cannot call tools — every real model can. Pick one from the model menu. |
-| A local model writes questions as prose instead of filling in the form | Small models often cannot follow a structured format. They are read back automatically and flagged, but marks and answers may be missing — check each one, or use a larger model. |
+| A local model writes questions as prose instead of filling in the form | They are read back automatically and flagged. Marks and answers may be missing — check each one in the editor before approving. |
+| The Digital Examiner's reply does not look like questions | It opens in the editor as the model wrote it. Number each question (`1.`, `2.`) and give it a line of text, then **Save to question bank** — nothing is lost while it sits there. |
 | A generated plan or question says the syllabus does not cover something | The curriculum library has nothing on that topic. Upload your scheme of work for it under the curriculum library, then try again. |
 | Answers cite IGCSE outlines when you teach the Uganda syllabus | Set the curriculum on the form, and upload your own material — your uploads rank above the bundled outlines for your topics. |
 | **Publish** on a paper is refused | Every question on the paper must be approved first. Open the Question Bank and approve the remaining ones. |

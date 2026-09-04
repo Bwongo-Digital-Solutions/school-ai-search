@@ -1,0 +1,209 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+// The trigger in the header. Reads as a search box rather than a button, because that is what it
+// opens — and it shows the shortcut, which is how anyone learns the shortcut exists.
+.trigger {
+  display: none;
+  align-items: center;
+  gap: layout.$spacing-03;
+  block-size: 3rem;
+  padding: 0 layout.$spacing-05;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: inherit;
+  @include type.type-style('body-compact-01');
+
+  @media (min-width: 42rem) {
+    display: flex;
+  }
+
+  &:hover {
+    background: var(--brand-02, #{$brand-02-fallback});
+  }
+
+  svg {
+    fill: currentColor;
+  }
+}
+
+.shortcut {
+  @include type.type-style('label-01');
+  padding: 0 layout.$spacing-02;
+  border: 1px solid currentColor;
+  opacity: 0.7;
+  font-family: inherit;
+}
+
+// The palette itself.
+.modal {
+  // White, not the theme's layer grey. This is a palette floating over the page; on g10 the two
+  // greys are the same value, so it reads as part of the page rather than above it.
+  :global(.cds--modal-container) {
+    inline-size: min(40rem, 90vw);
+    background-color: $ui-02;
+  }
+
+  :global(.cds--modal-header),
+  :global(.cds--modal-content) {
+    background-color: $ui-02;
+  }
+
+  // Carbon's Search sits on `field` by default, which is grey again inside a white panel.
+  :global(.cds--search-input) {
+    background-color: $ui-01;
+  }
+
+  // The dialog is the search box plus its results; Carbon's heading row would only add a title
+  // saying so, which is what the placeholder already says.
+  :global(.cds--modal-header) {
+    padding-block-end: layout.$spacing-03;
+  }
+
+  :global(.cds--modal-content) {
+    padding-inline: 0;
+    min-block-size: 18rem;
+    max-block-size: 60vh;
+  }
+}
+
+.searchRow {
+  padding-inline: layout.$spacing-05;
+}
+
+.results {
+  padding-block-start: layout.$spacing-03;
+}
+
+.groupHeading {
+  @include type.type-style('label-01');
+  color: $text-03;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  padding: layout.$spacing-04 layout.$spacing-05 layout.$spacing-02;
+  margin: 0;
+}
+
+.hit {
+  display: flex;
+  align-items: flex-start;
+  gap: layout.$spacing-03;
+  inline-size: 100%;
+  padding: layout.$spacing-03 layout.$spacing-05;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: start;
+
+  &:hover,
+  &:focus-visible {
+    background: $ui-01;
+  }
+
+  svg {
+    fill: var(--brand-01, #{$brand-01-fallback});
+    flex-shrink: 0;
+    margin-block-start: 0.15em;
+  }
+}
+
+.hitText {
+  min-inline-size: 0;
+}
+
+.hitTitle {
+  display: block;
+  @include type.type-style('body-compact-01');
+  color: $text-01;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hitSub {
+  display: block;
+  @include type.type-style('label-01');
+  color: $text-03;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hitSnippet {
+  display: block;
+  @include type.type-style('label-01');
+  color: $text-03;
+  margin: layout.$spacing-01 0 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.message {
+  @include type.type-style('body-compact-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  color: $text-02;
+  padding: layout.$spacing-07 layout.$spacing-05;
+}
+
+.foot {
+  @include type.type-style('label-01');
+  color: $text-03;
+  padding: layout.$spacing-03 layout.$spacing-05;
+  border-block-start: 1px solid $ui-03;
+  margin: layout.$spacing-03 0 0;
+}
+
+.footWarning {
+  color: $caution-text;
+}
+
+:global(.cds--g100) {
+  .modal {
+    :global(.cds--modal-container),
+    :global(.cds--modal-header),
+    :global(.cds--modal-content) {
+      background-color: $ui-02-dark;
+    }
+
+    :global(.cds--search-input) {
+      background-color: $ui-01-dark;
+    }
+  }
+
+  .hitTitle {
+  display: block;
+    color: #f4f4f4;
+  }
+
+  .hitSub,
+  .hitSnippet,
+  .groupHeading,
+  .foot {
+    color: $text-03-dark;
+  }
+
+  .message {
+    color: $text-02-dark;
+  }
+
+  .hit:hover,
+  .hit:focus-visible {
+    background: $ui-03-dark;
+  }
+
+  .foot {
+    border-block-start-color: $ui-03-dark;
+  }
+
+  .footWarning {
+    color: $support-warning;
+  }
+}

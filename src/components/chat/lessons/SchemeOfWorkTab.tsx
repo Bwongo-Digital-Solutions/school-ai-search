@@ -1,5 +1,4 @@
 import React, { useCallback, useMemo, useState } from 'react';
-import { AlertTriangle, CalendarRange, Sparkles } from 'lucide-react';
 import Field from '@/components/common/Field';
 import { useAuth } from '@/contexts/AuthContext';
 import { useChatContext } from '@/contexts/ChatContext';
@@ -7,6 +6,8 @@ import { callLessonPlanner, gradeOptionsFor } from '@/lib/teaching';
 import { EmptyState, Panel, PrimaryButton } from '../fees/shared';
 import { StatusBadge, LESSON_STATUS_STYLES, TERM_OPTIONS, currentAcademicYear } from './shared';
 import type { CurriculumFramework, LessonPlan } from '@/types/teaching';
+import styles from '../tabs.module.scss';
+import { Ai, Calendar, Warning } from '@carbon/react/icons';
 
 interface Props {
   frameworks: CurriculumFramework[];
@@ -72,34 +73,34 @@ const SchemeOfWorkTab: React.FC<Props> = ({ frameworks, runAction, onChanged, bu
   );
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[340px,1fr]">
-      <Panel className="p-4 h-fit">
-        <h3 className="text-sm font-semibold text-gray-800 dark:text-white mb-3 flex items-center gap-2">
-          <CalendarRange className="w-4 h-4 text-indigo-500" /> Term scope
+    <div className={styles.split}>
+      <Panel className={styles.padFit}>
+        <h3 className={styles.subheading}>
+          <Calendar size={16} /> Term scope
         </h3>
 
-        <div className="space-y-3">
+        <div className={styles.stackTight}>
           <Field
             label="Curriculum"
             value={form.curriculum}
             onChange={set('curriculum')}
             options={frameworks.map(entry => ({ value: entry.id, label: entry.label }))}
-          />
+ />
           <Field
             label="Year / class"
             value={form.gradeLevel}
             onChange={set('gradeLevel')}
             options={gradeOptionsFor(framework)}
-          />
+ />
           <Field label="Subject" value={form.subjectName} onChange={set('subjectName')} />
-          <div className="grid grid-cols-2 gap-2">
+          <div className={styles.grid2}>
             <Field label="Academic year" value={form.academicYear} onChange={set('academicYear')} />
             <Field
               label="Term"
               value={form.term}
               onChange={set('term')}
               options={TERM_OPTIONS.filter(option => option.value)}
-            />
+ />
           </div>
           <Field
             label="Lesson length (minutes)"
@@ -108,60 +109,60 @@ const SchemeOfWorkTab: React.FC<Props> = ({ frameworks, runAction, onChanged, bu
             max={200}
             value={form.durationMinutes}
             onChange={set('durationMinutes')}
-          />
+ />
           <Field
             label="Topics"
             type="textarea"
             value={topicText}
             onChange={value => setTopicText(String(value ?? ''))}
             hint={`One topic per line, in teaching order. ${topics.length} listed (maximum 20).`}
-          />
+ />
         </div>
 
         <PrimaryButton
-          className="w-full mt-4 justify-center"
+          className={styles.fullWidth}
           onClick={generate}
           disabled={Boolean(busy) || topics.length === 0 || topics.length > 20 || !canGenerate}
         >
-          <Sparkles className="w-4 h-4" /> Plan the term
+          <Ai size={16} /> Plan the term
         </PrimaryButton>
 
         {!canGenerate && (
-          <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-2">
+          <p className={styles.warn}>
             Pick a configured AI model in the chat composer first.
           </p>
         )}
         {topics.length > 0 && canGenerate && (
-          <p className="text-[11px] text-gray-400 mt-2">
+          <p className={styles.note}>
             This drafts {topics.length} full lesson{topics.length === 1 ? '' : 's'} and may take a minute.
           </p>
         )}
       </Panel>
 
-      <Panel className="p-4">
+      <Panel className={styles.pad}>
         {!result ? (
           <EmptyState message="List the topics for the term, one per line, and press “Plan the term”. Each topic becomes its own lesson plan you can then edit." />
         ) : (
-          <div className="space-y-4">
+          <div className={styles.stack}>
             <div>
-              <p className="text-sm font-semibold text-gray-800 dark:text-white">
+              <p className={styles.subheading}>
                 {result.plans.length} lesson{result.plans.length === 1 ? '' : 's'} drafted
               </p>
-              <p className="text-xs text-gray-400">Open My Plans to edit, approve and export them.</p>
+              <p className={styles.note}>Open My Plans to edit, approve and export them.</p>
             </div>
 
-            <ol className="space-y-2">
+            <ol className={styles.stackTight}>
               {result.plans.map((plan, index) => (
                 <li
                   key={plan.id}
-                  className="flex items-start gap-3 p-3 rounded-lg border border-gray-100 dark:border-gray-700"
+                  className={styles.boxRow}
                 >
-                  <span className="shrink-0 w-6 h-6 rounded-full bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-300 text-[11px] font-semibold flex items-center justify-center">
+                  <span className={styles.index}>
                     {index + 1}
                   </span>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-gray-800 dark:text-white">{plan.title}</p>
-                    <p className="text-[11px] text-gray-400">
+                  <div className={styles.grow}>
+                    <p className={styles.strong}>{plan.title}</p>
+                    <p className={styles.note}>
                       {plan.topic} · {plan.activities.length} stages · {plan.refs.length} source
                       {plan.refs.length === 1 ? '' : 's'}
                     </p>
@@ -172,15 +173,15 @@ const SchemeOfWorkTab: React.FC<Props> = ({ frameworks, runAction, onChanged, bu
             </ol>
 
             {result.failures.length > 0 && (
-              <div className="p-3 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800">
-                <p className="text-xs font-medium text-amber-700 dark:text-amber-300 flex items-center gap-1.5 mb-1.5">
-                  <AlertTriangle className="w-3.5 h-3.5" />
+              <div className={styles.calloutWarn}>
+                <p className={styles.calloutTitle}>
+                  <Warning size={16} />
                   {result.failures.length} topic{result.failures.length === 1 ? '' : 's'} could not be planned
                 </p>
-                <ul className="space-y-1 text-[11px] text-amber-700 dark:text-amber-300">
+                <ul className={styles.stackTight}>
                   {result.failures.map(failure => (
                     <li key={failure.topic}>
-                      <span className="font-medium">{failure.topic}:</span> {failure.reason}
+                      <span className={styles.strong}>{failure.topic}:</span> {failure.reason}
                     </li>
                   ))}
                 </ul>

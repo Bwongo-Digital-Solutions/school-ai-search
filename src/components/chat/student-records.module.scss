@@ -1,0 +1,340 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  block-size: 100%;
+  overflow: hidden;
+  background-color: $ui-01;
+}
+
+.controls {
+  padding: layout.$spacing-05;
+  flex-shrink: 0;
+}
+
+.body {
+  flex: 1;
+  min-block-size: 0;
+  overflow: auto;
+  padding: 0 layout.$spacing-05 layout.$spacing-05;
+}
+
+.columns {
+  display: grid;
+  gap: layout.$spacing-05;
+  align-items: start;
+
+  @media (min-width: 72rem) {
+    grid-template-columns: 18rem minmax(0, 1fr);
+  }
+}
+
+.aside {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+}
+
+.asideBody {
+  padding: layout.$spacing-05;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-03;
+}
+
+.studentFacts {
+  @include type.type-style('label-01');
+  color: $text-02;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-01;
+  margin: 0;
+
+  dt {
+    display: inline;
+    color: $text-03;
+  }
+
+  dd {
+    display: inline;
+    margin: 0 0 0 layout.$spacing-02;
+  }
+}
+
+// Which part of a student's file is open. A list rather than tabs: there are six, several are long
+// words, and they would wrap at any sensible width across the top of the panel.
+.sectionNav {
+  display: flex;
+  flex-direction: column;
+  padding: layout.$spacing-02;
+}
+
+.sectionLink {
+  @include type.type-style('body-compact-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  inline-size: 100%;
+  padding: layout.$spacing-03 layout.$spacing-04;
+  background: none;
+  border: none;
+  border-inline-start: 3px solid transparent;
+  cursor: pointer;
+  color: $text-02;
+  text-align: start;
+
+  &:hover {
+    background: $ui-01;
+  }
+
+  svg {
+    fill: currentColor;
+    flex-shrink: 0;
+  }
+}
+
+.sectionCurrent {
+  background: $ui-01;
+  border-inline-start-color: var(--brand-01, #{$brand-01-fallback});
+  color: $text-01;
+  font-weight: 600;
+
+  svg {
+    fill: var(--brand-01, #{$brand-01-fallback});
+  }
+}
+
+.main {
+  min-inline-size: 0;
+}
+
+.pane {
+  padding: layout.$spacing-05;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-06;
+}
+
+// A section's title and what it is for, above its form.
+.sectionTitle {
+  display: flex;
+  align-items: flex-start;
+  gap: layout.$spacing-04;
+}
+
+.sectionMark {
+  inline-size: layout.$spacing-08;
+  block-size: layout.$spacing-08;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: $ui-01;
+  color: var(--brand-01, #{$brand-01-fallback});
+
+  svg {
+    fill: currentColor;
+  }
+}
+
+.sectionHeading {
+  @include type.type-style('heading-compact-02');
+  color: $text-01;
+  margin: 0;
+}
+
+.sectionDescription {
+  @include type.type-style('label-01');
+  color: $text-03;
+  margin: layout.$spacing-01 0 0;
+}
+
+// Forms. Two or three columns on a wide screen, one on a narrow one; a field can claim the row.
+.grid2,
+.grid3 {
+  display: grid;
+  gap: layout.$spacing-05;
+  grid-template-columns: 1fr;
+}
+
+@media (min-width: 48rem) {
+  .grid2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .grid3 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .spanAll {
+    grid-column: 1 / -1;
+  }
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: layout.$spacing-03;
+}
+
+.actionNote {
+  @include type.type-style('label-01');
+  color: $text-03;
+  margin: 0;
+}
+
+// The recent-records list under each form.
+.records {
+  border: 1px solid $ui-03;
+}
+
+.recordRow {
+  display: grid;
+  gap: layout.$spacing-03;
+  padding: layout.$spacing-04 layout.$spacing-05;
+  border-block-start: 1px solid $ui-03;
+  grid-template-columns: 1fr;
+
+  @media (min-width: 48rem) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  @media (min-width: 72rem) {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.recordLabel {
+  @include type.type-style('label-01');
+  color: $text-03;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin: 0;
+}
+
+.recordValue {
+  @include type.type-style('body-compact-01');
+  color: $text-01;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.loading {
+  display: flex;
+  justify-content: center;
+  padding: layout.$spacing-09;
+}
+
+.tabs {
+  :global(.cds--tab--list) {
+    padding-inline-start: 0;
+  }
+}
+
+:global(.cds--g100) {
+  .screen {
+    background-color: $ui-01-dark;
+  }
+
+  .sectionHeading,
+  .recordValue,
+  .sectionCurrent {
+    color: #f4f4f4;
+  }
+
+  .sectionLink,
+  .studentFacts {
+    color: $text-02-dark;
+  }
+
+  .sectionDescription,
+  .recordLabel,
+  .actionNote,
+  .studentFacts dt {
+    color: $text-03-dark;
+  }
+
+  .sectionLink:hover,
+  .sectionCurrent,
+  .sectionMark {
+    background: $ui-03-dark;
+  }
+
+  .records,
+  .recordRow {
+    border-color: $ui-03-dark;
+  }
+}
+
+.empty {
+  @include type.type-style('body-compact-01');
+  padding: layout.$spacing-07 layout.$spacing-05;
+  text-align: center;
+  color: $text-02;
+  margin: 0;
+}
+
+:global(.cds--g100) .empty {
+  color: $text-02-dark;
+}
+
+.tabPanel {
+  padding: layout.$spacing-05 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-02;
+}
+
+.note {
+  @include type.type-style('label-01');
+  color: $text-03;
+  white-space: nowrap;
+}
+
+.strong {
+  @include type.type-style('heading-compact-01');
+  color: $text-01;
+}
+
+.tableWrap {
+  overflow-x: auto;
+}
+
+.truncate {
+  max-inline-size: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:global(.cds--g100) {
+  .note {
+    color: $text-03-dark;
+  }
+
+  .strong {
+    color: #f4f4f4;
+  }
+}
+
+
+// Tighter gutters on a phone. At 360px a 1rem gutter each side, plus each card's own padding, is a
+// third of the screen spent on whitespace — and these are dense, working screens.
+@media (max-width: 33.9375rem) {
+  .controls {
+    padding-inline: layout.$spacing-03;
+  }
+  .body {
+    padding-inline: layout.$spacing-03;
+  }
+}

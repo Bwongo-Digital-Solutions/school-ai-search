@@ -13,8 +13,9 @@
  *      app already used, and reports which engine answered. No existing deployment changes
  *      behaviour by upgrading.
  */
-import { INDEXES, indexesForRole, reindexAll } from '../search/indexer.mjs';
+import { INDEXES, indexUidFor, indexesForRole, reindexAll } from '../search/indexer.mjs';
 import { isSearchConfigured, multiSearch } from '../search/meili.mjs';
+import { requireRole, resolveActor } from '../auth/actor.mjs';
 
 // Support staff are deliberately absent: they may see fee status through /api/functions/fee-status
 // and nothing else, and a search box would be a way past that.
@@ -112,7 +113,7 @@ const presentHit = (index, hit) => {
   }
 };
 
-const query = async ({ database, body, actor, httpClient }) => {
+const query = async ({ database, body, actor, httpClient, tenantId }) => {
   const text = trimmed(body.query);
   if (!text) return { engine: isSearchConfigured() ? 'meilisearch' : 'postgres', groups: [] };
 
@@ -132,8 +133,10 @@ const query = async ({ database, body, actor, httpClient }) => {
     return { engine: 'meilisearch', groups: [] };
   }
 
+  // Two boundaries, not one: which school's indexes are queried (the uid) and which documents in
+  // them this role may see (the filter). Neither substitutes for the other.
   const queries = requested.map((name) => ({
-    indexUid: name,
+    indexUid: indexUidFor(tenantId, name),
     q: text,
     limit: Number(body.limit) || HIT_LIMIT,
     filter: `roles = ${actor.role}`,
@@ -145,14 +148,18 @@ const query = async ({ database, body, actor, httpClient }) => {
   try {
     const results = await multiSearch(queries, { httpClient });
 
+    // Meilisearch answers with the namespaced uid; the UI groups by the plain index name, so the
+    // school's own prefix is stripped back off here rather than leaking into the response.
+    const plainName = (uid) => requested.find((name) => indexUidFor(tenantId, name) === uid) || uid;
+
     return {
       engine: 'meilisearch',
       groups: results
         .map((result) => ({
-          index: result.indexUid,
+          index: plainName(result.indexUid),
           total: result.estimatedTotalHits ?? result.hits.length,
           processingTimeMs: result.processingTimeMs,
-          hits: (result.hits || []).map((hit) => presentHit(result.indexUid, hit)),
+          hits: (result.hits || []).map((hit) => presentHit(plainName(result.indexUid), hit)),
         }))
         .filter((group) => group.hits.length > 0),
     };
@@ -165,7 +172,7 @@ const query = async ({ database, body, actor, httpClient }) => {
   }
 };
 
-const reindex = async ({ database, actor, httpClient }) => {
+const reindex = async ({ database, actor, httpClient, tenantId }) => {
   if (actor.role !== 'admin') return { error: 'Only an administrator can rebuild the search index' };
   if (!isSearchConfigured()) {
     return {
@@ -175,7 +182,9 @@ const reindex = async ({ database, actor, httpClient }) => {
     };
   }
 
-  const counts = await reindexAll(database, { httpClient });
+  // Scoped to the school that asked: rebuilding one school's index must leave every other one
+  // untouched, which was not true while all of them shared six indexes.
+  const counts = await reindexAll(database, { httpClient, tenantId });
   return { counts, total: Object.values(counts).reduce((sum, value) => sum + value, 0) };
 };
 
@@ -189,17 +198,20 @@ const ACTIONS = { query, reindex, status };
 
 export const SEARCH_ACTIONS = Object.keys(ACTIONS);
 
-export const handleSearchFunction = async (database, body = {}, httpClient = fetch) => {
-  if (!SEARCH_ROLES.includes(body.requesterRole)) return { error: 'Unauthorized' };
+export const handleSearchFunction = async (
+  database,
+  body = {},
+  httpClient = fetch,
+  { tenantId, actor: authenticated } = {},
+) => {
+  const actor = resolveActor(authenticated, body);
+  const refusal = requireRole(actor, SEARCH_ROLES);
+  if (refusal) return refusal;
 
   const handler = ACTIONS[body.action];
   if (!handler) return { error: `Unsupported search action: ${body.action}` };
 
-  const actor = {
-    email: trimmed(body.actorEmail),
-    name: trimmed(body.actorName),
-    role: body.requesterRole,
-  };
-
-  return handler({ database, body, actor, httpClient });
+  // tenantId comes from the request's own Host, decided before any handler ran. It is never read
+  // from the body, so a school cannot name another school's indexes.
+  return handler({ database, body, actor, httpClient, tenantId });
 };

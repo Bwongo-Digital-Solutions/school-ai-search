@@ -1,6 +1,12 @@
 import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
 import type { UserProfile, AuditLogEntry, JsonRecord, UserRole } from '@/types/auth';
+import {
+  ACCOUNT_ADMIN_ROLES,
+  FINANCE_ROLES,
+  PRIVILEGED_ROLES,
+  TEACHING_ROLES,
+} from '@/lib/roles';
 
 type AuthFunctionResponse = {
   error?: string;
@@ -20,6 +26,25 @@ interface AuthContextType {
   isAdmin: boolean;
   isTeacher: boolean;
   isSupportStaff: boolean;
+  /**
+   * Runs the dormitories. A *designation*, not a role — a matron's role is `support_staff`, the
+   * same as the cook's and the askari's, so the two must be asked separately. This mirrors
+   * `requirePost` in server/auth/actor.mjs, which is what actually gates her screens; this flag
+   * only decides what the browser renders.
+   */
+  isMatron: boolean;
+  /** Runs the school: sees everything an administrator does, bar staff and system settings. */
+  isHeadTeacher: boolean;
+  /** Keeps the books — accountant or bursar. */
+  isFinanceStaff: boolean;
+  /** Trusted with the school's data as a whole: backups, export/import, integrations. */
+  isPrivileged: boolean;
+  /** May read and change student records. */
+  canSeeStudents: boolean;
+  /** May see money — invoices, payments, arrears. */
+  canSeeFinance: boolean;
+  /** May manage other people's accounts and roles. Administrators only. */
+  canManageStaff: boolean;
   isLoading: boolean;
   signIn: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   signUp: (email: string, password: string, displayName: string) => Promise<{ success: boolean; error?: string; pending?: boolean }>;
@@ -57,20 +82,48 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<UserProfile | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Restore session from localStorage
+  /**
+   * Who is signed in, according to the server.
+   *
+   * The stored profile is painted first so a reload does not flash the sign-in screen, but it is
+   * only a hint: the session itself is an HttpOnly cookie this code cannot read or forge, and the
+   * server's answer replaces whatever localStorage said. Editing the stored role to "admin" now
+   * changes nothing — the server reads the role from the users row the cookie points at.
+   */
   useEffect(() => {
     const stored = localStorage.getItem(SESSION_KEY);
     if (stored) {
       try {
         const parsed = JSON.parse(stored);
-        if (parsed && parsed.id && parsed.auth_email) {
-          setUser(parsed);
-        }
+        if (parsed && parsed.id && parsed.auth_email) setUser(parsed);
       } catch {
         localStorage.removeItem(SESSION_KEY);
       }
     }
-    setIsLoading(false);
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await supabase.functions.invoke<AuthFunctionResponse>('auth', {
+          body: { action: 'session' },
+        });
+        if (cancelled) return;
+
+        const current = data?.user ?? null;
+        setUser(current);
+        if (current) localStorage.setItem(SESSION_KEY, JSON.stringify(current));
+        else localStorage.removeItem(SESSION_KEY);
+      } catch {
+        // The server is unreachable. Keep the stored profile on screen rather than signing someone
+        // out over a dropped connection; every request they make will be refused until it is back.
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const signIn = useCallback(async (email: string, password: string) => {
@@ -129,6 +182,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const signOut = useCallback(() => {
     setUser(null);
     localStorage.removeItem(SESSION_KEY);
+    // The cookie is the credential, and only the server can clear it — dropping the local copy
+    // would otherwise leave the session usable by anything that could reach the API.
+    void supabase.functions.invoke('auth', { body: { action: 'signout' } });
   }, []);
 
   const logAudit = useCallback(async (
@@ -158,16 +214,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [user]);
 
+  /**
+   * The audit trail, or the reason there isn't one.
+   *
+   * This used to answer a failure with `[]`, which the panel then rendered as "no entries" — the
+   * one thing an audit trail must never say when it does not know. A refused or broken read is now
+   * the caller's to report.
+   */
   const fetchAuditLog = useCallback(async (limit = 50): Promise<AuditLogEntry[]> => {
-    try {
-      const { data, error } = await supabase.functions.invoke<AuthFunctionResponse>('auth', {
-        body: { action: 'get_audit_log', limit },
-      });
-      if (error || data?.error) return [];
-      return data.logs || [];
-    } catch {
-      return [];
+    const { data, error } = await supabase.functions.invoke<AuthFunctionResponse>('auth', {
+      body: { action: 'get_audit_log', limit },
+    });
+    if (error || data?.error) {
+      throw new Error(data?.error || getErrorMessage(error, 'The audit trail could not be read'));
     }
+    return data.logs || [];
   }, []);
 
   const fetchUsers = useCallback(async (): Promise<UserProfile[]> => {
@@ -188,7 +249,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     try {
       const { data, error } = await supabase.functions.invoke<AuthFunctionResponse>('auth', {
-        body: { action: 'update_role', userId, newRole, requesterRole: user.role },
+        body: { action: 'update_role', userId, newRole },
       });
       if (error || data?.error) {
         return { success: false, error: data?.error || 'Failed to update role' };
@@ -213,14 +274,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     try {
       const { data, error } = await supabase.functions.invoke<AuthFunctionResponse>('auth', {
-        body: {
-          action,
-          userId,
-          ...extra,
-          requesterRole: user.role,
-          requesterEmail: user.auth_email,
-          requesterName: user.display_name,
-        },
+        // Who is asking is settled by the session cookie; the local check above is only there to
+        // keep the UI honest about which buttons it offers.
+        body: { action, userId, ...extra },
       });
       if (error || data?.error) {
         return { success: false, error: data?.error || 'Failed to update account' };
@@ -244,6 +300,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const isAdmin = user?.role === 'admin';
   const isTeacher = user?.role === 'teacher';
   const isSupportStaff = user?.role === 'support_staff';
+  const isMatron = isSupportStaff && user?.designation === 'matron';
+  const isHeadTeacher = user?.role === 'head_teacher';
+  const isFinanceStaff = user?.role === 'accountant' || user?.role === 'bursar';
+
+  // Derived from the shared role lists rather than from a chain of `||` comparisons. A gate spelled
+  // out by hand at each screen is a gate that drifts: the whole point of naming these lists once is
+  // that adding a role later cannot leave one screen behind.
+  const has = (roles: readonly string[]) => Boolean(user) && roles.includes(user!.role);
+  const isPrivileged = has(PRIVILEGED_ROLES);
+  const canSeeStudents = has(TEACHING_ROLES);
+  const canSeeFinance = has(FINANCE_ROLES);
+  const canManageStaff = has(ACCOUNT_ADMIN_ROLES);
 
   return (
     <AuthContext.Provider
@@ -253,6 +321,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isAdmin,
         isTeacher,
         isSupportStaff,
+        isMatron,
+        isHeadTeacher,
+        isFinanceStaff,
+        isPrivileged,
+        canSeeStudents,
+        canSeeFinance,
+        canManageStaff,
         isLoading,
         signIn,
         signUp,

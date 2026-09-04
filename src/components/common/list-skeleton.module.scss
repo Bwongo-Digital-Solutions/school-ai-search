@@ -1,0 +1,30 @@
+@use '@carbon/layout';
+@use '../../styles/vars' as *;
+
+// Takes the hairline rule and the gutters of the real row lists (`tabs.module.scss` `.row`), so the
+// skeleton occupies the same space as what replaces it and the page does not jump at the swap.
+.row {
+  padding: layout.$spacing-04 layout.$spacing-05;
+  border-block-start: 1px solid $ui-03;
+}
+
+// The card lists — a question with its stem, options and actions — are roughly twice the height.
+.card {
+  padding: layout.$spacing-05;
+  min-block-size: 5.5rem;
+  border-block-start: 1px solid $ui-03;
+}
+
+// Carbon's SkeletonText carries a bottom margin meant for stacked paragraphs. Inside a row the
+// padding above already does that work, and the margin only makes the rows taller than the real
+// ones.
+.line:last-child {
+  margin-block-end: 0;
+}
+
+:global(.cds--g100) {
+  .row,
+  .card {
+    border-block-start-color: $ui-03-dark;
+  }
+}

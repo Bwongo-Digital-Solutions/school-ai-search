@@ -1,0 +1,634 @@
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  Button,
+  Checkbox,
+  InlineLoading,
+  InlineNotification,
+  NumberInput,
+  Tab,
+  TabList,
+  Tabs,
+  Tag,
+  TextInput,
+  Toggle,
+} from '@carbon/react';
+import {
+  Archive,
+  DataBase,
+  Document,
+  Download,
+  Restart,
+  TrashCan,
+  Upload,
+} from '@carbon/react/icons';
+import { useAuth } from '@/contexts/AuthContext';
+import { useNotifications } from '@/contexts/NotificationContext';
+import { downloadFromUrl } from '@/lib/download';
+import { formatDateTime } from '@/lib/format';
+import {
+  backupDownloadUrl,
+  checkFileImport,
+  createBackup,
+  restoreBackup,
+  uploadBackup,
+  deleteBackup,
+  exportSchoolData,
+  loadBackups,
+  loadExportableTables,
+  runFileImport,
+  saveBackupSchedule,
+  type BackupList,
+  type BackupSchedule,
+  type ExportableTable,
+  type ImportCheck,
+} from '@/lib/schoolData';
+import { AccessDenied, CardHeader, EmptyState, PageHeader, WidgetCard } from '@/components/common';
+import styles from './school-data.module.scss';
+
+/**
+ * The school's records as a whole: backups, and taking the data in and out.
+ *
+ * One screen, because they are the same worry from two directions — "can we get this back?" and
+ * "can we get this out?" — and a school asks both of a new system in the same conversation.
+ *
+ * Restricted to the roles that answer for the institution. A backup is every student record in one
+ * file, so this is not a teacher's screen even though a teacher may read any one of those records.
+ */
+
+const SECTIONS = [
+  { key: 'backups', label: 'Backups', icon: Archive },
+  { key: 'export', label: 'Export', icon: Download },
+  { key: 'import', label: 'Import', icon: Upload },
+] as const;
+
+type SectionKey = (typeof SECTIONS)[number]['key'];
+
+const readableSize = (bytes: number) => {
+  if (!bytes) return '—';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+};
+
+/** What the browser thinks it is, offered as the placeholder so the field is not a blank guess. */
+const serverZoneLabel = (() => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'the server clock';
+  } catch {
+    return 'the server clock';
+  }
+})();
+
+type ScheduleForm = Pick<BackupSchedule, 'enabled' | 'runAt' | 'timezone' | 'keepLast'>;
+
+const EMPTY_SCHEDULE: ScheduleForm = { enabled: false, runAt: '02:00', timezone: '', keepLast: 7 };
+
+const SchoolDataWorkspace: React.FC = () => {
+  const { isPrivileged } = useAuth();
+  const { notify, confirm } = useNotifications();
+
+  const [section, setSection] = useState<SectionKey>('backups');
+  const [backups, setBackups] = useState<BackupList | null>(null);
+  // The form is separate from what the server last said, so the Save button can tell an edit from
+  // an untouched screen, and a reload does not discard something half-typed.
+  const [schedule, setSchedule] = useState<ScheduleForm>(EMPTY_SCHEDULE);
+  const [tables, setTables] = useState<ExportableTable[]>([]);
+  const [chosen, setChosen] = useState<string[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [check, setCheck] = useState<ImportCheck | null>(null);
+  /* The files as they were read, not a parsed object. CSV is parsed on the server, so that a file
+     good enough to open in a spreadsheet and a file good enough to write back are the same file
+     rather than two parsers' opinions of one. */
+  const [files, setFiles] = useState<UploadedFile[]>([]);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const dumpInput = useRef<HTMLInputElement>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const [backupList, tableList] = await Promise.all([loadBackups(), loadExportableTables()]);
+      setBackups(backupList);
+      setSchedule({
+        enabled: backupList.schedule.enabled,
+        runAt: backupList.schedule.runAt,
+        timezone: backupList.schedule.timezone,
+        keepLast: backupList.schedule.keepLast,
+      });
+      setTables(tableList.tables);
+    } catch (err) {
+      notify.error('Could not load this screen', err instanceof Error ? err.message : undefined);
+    }
+  }, [notify]);
+
+  useEffect(() => {
+    if (isPrivileged) void refresh();
+  }, [isPrivileged, refresh]);
+
+  const scheduleChanged =
+    !backups ||
+    schedule.enabled !== backups.schedule.enabled ||
+    schedule.runAt !== backups.schedule.runAt ||
+    schedule.timezone !== backups.schedule.timezone ||
+    schedule.keepLast !== backups.schedule.keepLast;
+
+  const run = async (label: string, work: () => Promise<void>) => {
+    setBusy(label);
+    try {
+      await work();
+    } catch (err) {
+      notify.error(`${label} failed`, err instanceof Error ? err.message : undefined);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (!isPrivileged) {
+    return (
+      <AccessDenied
+        title="Not available to your role"
+        message="A backup or an export is every student record in one file, so this screen is for the head teacher, the administrator, and whoever keeps the books."
+      />
+    );
+  }
+
+  /**
+   * Send a `.dump` taken somewhere else up to this server.
+   *
+   * Base64 rather than a multipart upload, because every other call on this screen is JSON through
+   * the same shim and one binary path would be the only thing here that is not. Read in chunks:
+   * `String.fromCharCode(...bytes)` on a whole dump blows the argument limit and throws on any file
+   * big enough to be a real backup, which is all of them.
+   */
+  const onDump = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    await run('Uploading the backup', async () => {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let binary = '';
+      for (let index = 0; index < bytes.length; index += 8192) {
+        binary += String.fromCharCode(...bytes.subarray(index, index + 8192));
+      }
+
+      setBackups(await uploadBackup(file.name, btoa(binary)));
+      notify.success('Backup uploaded', `${file.name} is on the list and can be restored.`);
+    });
+  };
+
+  /**
+   * Read the chosen files and ask the server what importing them would do.
+   *
+   * Several at once, because an export is one file per table and a school putting its roll back
+   * has students.csv beside guardians.csv. The file's *name* is what says which table it holds, so
+   * they are sent as they were named rather than concatenated.
+   */
+  const onFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const chosen = Array.from(event.target.files ?? []);
+    event.target.value = '';
+    if (chosen.length === 0) return;
+
+    try {
+      const read = await Promise.all(
+        chosen.map(
+          (file) =>
+            new Promise<UploadedFile>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve({ name: file.name, content: String(reader.result) });
+              reader.onerror = () => reject(new Error(`${file.name} could not be read.`));
+              reader.readAsText(file);
+            }),
+        ),
+      );
+      setFiles(read);
+      setCheck(await checkFileImport(read));
+    } catch (err) {
+      setFiles([]);
+      setCheck(null);
+      notify.error('That file could not be read', err instanceof Error ? err.message : undefined);
+    }
+  };
+
+  return (
+    <div className={styles.screen}>
+      <PageHeader title="School data" illustration={<DataBase size={32} />} />
+
+      <div className={styles.controls}>
+        <div className={styles.tabs}>
+          <Tabs
+            selectedIndex={SECTIONS.findIndex((entry) => entry.key === section)}
+            onChange={({ selectedIndex }) => setSection(SECTIONS[selectedIndex].key)}
+          >
+            <TabList aria-label="School data sections" contained>
+              {SECTIONS.map(({ key, label, icon: Icon }) => (
+                <Tab key={key} renderIcon={Icon}>
+                  {label}
+                </Tab>
+              ))}
+            </TabList>
+          </Tabs>
+        </div>
+      </div>
+
+      <div className={styles.body}>
+        {section === 'backups' && backups && (
+          <WidgetCard>
+            <CardHeader title="Automatic backups" />
+            <div className={styles.section}>
+              <p className={styles.note}>
+                One backup a day, taken without anyone remembering to. It appears in the list below
+                like any other and is downloaded the same way.
+              </p>
+
+              {backups.schedule.enabled && !backups.schedule.runnerActive && (
+                <InlineNotification
+                  kind="warning"
+                  title="Nothing is running this schedule"
+                  subtitle="The times below are saved, but this server was started without its backup scheduler. Until it is turned on, no automatic backup will be taken."
+                  lowContrast
+                  hideCloseButton
+                />
+              )}
+
+              {backups.schedule.lastError && (
+                <InlineNotification
+                  kind="error"
+                  title="The last automatic backup failed"
+                  subtitle={backups.schedule.lastError}
+                  lowContrast
+                  hideCloseButton
+                />
+              )}
+
+              <div className={styles.scheduleRow}>
+                <Toggle
+                  id="backup-schedule-enabled"
+                  size="sm"
+                  labelText="Take a backup every day"
+                  labelA="Off"
+                  labelB="On"
+                  toggled={schedule.enabled}
+                  onToggle={(enabled) => setSchedule((current) => ({ ...current, enabled }))}
+                />
+                <TextInput
+                  id="backup-schedule-time"
+                  labelText="At"
+                  type="time"
+                  size="sm"
+                  value={schedule.runAt}
+                  disabled={!schedule.enabled}
+                  onChange={(event) => setSchedule((current) => ({ ...current, runAt: event.target.value }))}
+                />
+                <TextInput
+                  id="backup-schedule-timezone"
+                  labelText="Timezone"
+                  size="sm"
+                  placeholder={serverZoneLabel}
+                  helperText="Leave blank to use the server's clock."
+                  value={schedule.timezone}
+                  disabled={!schedule.enabled}
+                  onChange={(event) => setSchedule((current) => ({ ...current, timezone: event.target.value }))}
+                />
+                <NumberInput
+                  id="backup-schedule-keep"
+                  label="Keep the last"
+                  size="sm"
+                  min={1}
+                  max={365}
+                  value={schedule.keepLast}
+                  disabled={!schedule.enabled}
+                  helperText="Older automatic backups are deleted. Manual ones are never touched."
+                  onChange={(_event, { value }) =>
+                    setSchedule((current) => ({ ...current, keepLast: Number(value) || 1 }))
+                  }
+                />
+                <Button
+                  kind="tertiary"
+                  size="sm"
+                  disabled={Boolean(busy) || !scheduleChanged}
+                  onClick={() =>
+                    run('Saving the backup schedule', async () => {
+                      setBackups(await saveBackupSchedule(schedule));
+                      notify.success(
+                        'Schedule saved',
+                        schedule.enabled
+                          ? `A backup will be taken each day at ${schedule.runAt}.`
+                          : 'Automatic backups are off.',
+                      );
+                    })
+                  }
+                >
+                  {busy === 'Saving the backup schedule' ? 'Saving…' : 'Save schedule'}
+                </Button>
+              </div>
+
+              {backups.schedule.lastRunAt && (
+                <p className={styles.meta}>Last automatic backup: {formatDateTime(backups.schedule.lastRunAt)}</p>
+              )}
+            </div>
+          </WidgetCard>
+        )}
+
+        {section === 'backups' && (
+          <WidgetCard>
+            <CardHeader title="Backups">
+              <Button
+                kind="primary"
+                size="sm"
+                renderIcon={Archive}
+                disabled={Boolean(busy) || !backups?.available}
+                onClick={() =>
+                  run('Taking a backup', async () => {
+                    setBackups(await createBackup());
+                    notify.success('Backup taken', 'It is listed below and can be downloaded.');
+                  })
+                }
+              >
+                {busy === 'Taking a backup' ? 'Taking…' : 'Back up now'}
+              </Button>
+              {/* A school moving in has a dump and nowhere to put it: this list only ever held what
+                  this server had taken itself. */}
+              <input
+                ref={dumpInput}
+                type="file"
+                accept=".dump,application/octet-stream"
+                onChange={onDump}
+                hidden
+              />
+              <Button
+                kind="tertiary"
+                size="sm"
+                renderIcon={Upload}
+                disabled={Boolean(busy)}
+                onClick={() => dumpInput.current?.click()}
+              >
+                {busy === 'Uploading the backup' ? 'Uploading…' : 'Upload a .dump'}
+              </Button>
+            </CardHeader>
+
+            <div className={styles.section}>
+              {backups && !backups.available && (
+                <InlineNotification
+                  kind="info"
+                  title="Backups cannot be taken on this server"
+                  subtitle="It is running on an in-memory database, or without the PostgreSQL client tools installed."
+                  lowContrast
+                  hideCloseButton
+                />
+              )}
+              <p className={styles.note}>
+                A backup is a complete copy of this school — every student record, every payment, and
+                the accounts staff sign in with. Downloading one takes all of that off the server, so
+                keep it somewhere you would keep the paper register.
+              </p>
+            </div>
+
+            {!backups ? (
+              <div className={styles.loading}>
+                <InlineLoading description="Loading…" />
+              </div>
+            ) : backups.backups.length === 0 ? (
+              <EmptyState
+                headerTitle="Backups"
+                displayText="backups yet"
+                helperText="Take one before a term rolls over, or before importing anything."
+              />
+            ) : (
+              backups.backups.map((backup) => (
+                <div key={backup.id} className={styles.row}>
+                  <div className={styles.rowMain}>
+                    <p className={styles.filename}>{backup.filename}</p>
+                    <p className={styles.meta}>
+                      {formatDateTime(backup.created_at)} · {readableSize(backup.size_bytes)}
+                      {backup.created_by ? ` · ${backup.created_by}` : ' · automatic'}
+                    </p>
+                  </div>
+                  <div className={styles.actions}>
+                    {backup.status !== 'complete' && (
+                      <Tag type={backup.status === 'failed' ? 'red' : 'cool-gray'} size="sm">
+                        {backup.status === 'failed' ? backup.error || 'Failed' : 'In progress'}
+                      </Tag>
+                    )}
+                    {backup.status === 'complete' && (
+                      <Button
+                        kind="ghost"
+                        size="sm"
+                        renderIcon={Download}
+                        onClick={() =>
+                          run('Downloading the backup', () =>
+                            downloadFromUrl(backupDownloadUrl(backup.id), backup.filename),
+                          )
+                        }
+                      >
+                        Download
+                      </Button>
+                    )}
+                    {backup.status === 'complete' && backups?.available && (
+                      <Button
+                        kind="danger--tertiary"
+                        size="sm"
+                        renderIcon={Restart}
+                        disabled={Boolean(busy)}
+                        onClick={async () => {
+                          const ok = await confirm({
+                            title: 'Restore this backup?',
+                            message: `Everything currently in the database is replaced by what ${backup.filename} holds. Every record entered since it was taken is lost. This cannot be undone.`,
+                            confirmLabel: 'Replace everything',
+                            danger: true,
+                          });
+                          if (!ok) return;
+                          await run('Restoring', async () => {
+                            const result = await restoreBackup(backup.id);
+                            // pg_restore's grumbles are usually harmless, but somebody who has just
+                            // replaced their database deserves to see them rather than a bare tick.
+                            notify.success(
+                              'Restored',
+                              result.warnings || `The school is back to ${result.filename}.`,
+                            );
+                            await refresh();
+                          });
+                        }}
+                      >
+                        Restore
+                      </Button>
+                    )}
+                    <Button
+                      hasIconOnly
+                      kind="danger--ghost"
+                      size="sm"
+                      renderIcon={TrashCan}
+                      iconDescription={`Delete ${backup.filename}`}
+                      tooltipPosition="left"
+                      onClick={async () => {
+                        const ok = await confirm({
+                          title: 'Delete this backup?',
+                          message: `${backup.filename} is removed from the server permanently. Any copy you have already downloaded is unaffected.`,
+                          confirmLabel: 'Delete',
+                          danger: true,
+                        });
+                        if (ok) await run('Deleting the backup', async () => setBackups(await deleteBackup(backup.id)));
+                      }}
+                    />
+                  </div>
+                </div>
+              ))
+            )}
+          </WidgetCard>
+        )}
+
+        {section === 'export' && (
+          <WidgetCard>
+            <CardHeader title="Export">
+              <span className={styles.note}>
+                {chosen.length ? `${chosen.length} selected` : 'everything'}
+              </span>
+            </CardHeader>
+            <div className={styles.section}>
+              <p className={styles.blurb}>
+                A readable copy, for a spreadsheet or another system. Credentials are never included —
+                no password hashes, and no keys for the services this school is connected to.
+              </p>
+
+              <div className={styles.tableGrid}>
+                {tables.map((table) => (
+                  <Checkbox
+                    key={table.name}
+                    id={`table-${table.name}`}
+                    labelText={table.name.replace(/_/g, ' ')}
+                    checked={chosen.includes(table.name)}
+                    onChange={(_event, { checked }) =>
+                      setChosen((current) =>
+                        checked ? [...current, table.name] : current.filter((n) => n !== table.name),
+                      )
+                    }
+                  />
+                ))}
+              </div>
+
+              <div className={styles.actions}>
+                {(['csv', 'json'] as const).map((format) => (
+                  <Button
+                    key={format}
+                    kind={format === 'csv' ? 'primary' : 'tertiary'}
+                    size="md"
+                    renderIcon={Document}
+                    disabled={Boolean(busy)}
+                    onClick={() =>
+                      run('Exporting', async () => {
+                        const result = await exportSchoolData(chosen, format);
+                        // Each table comes back as its own file, which is what a spreadsheet wants.
+                        for (const file of result.files) {
+                          const blob = new Blob([file.content], {
+                            type: format === 'csv' ? 'text/csv' : 'application/json',
+                          });
+                          const url = URL.createObjectURL(blob);
+                          const link = document.createElement('a');
+                          link.href = url;
+                          link.download = file.name;
+                          link.click();
+                          URL.revokeObjectURL(url);
+                        }
+                        notify.success(
+                          `Exported ${result.rowCount} rows`,
+                          `${result.files.length} file(s) downloaded.`,
+                        );
+                      })
+                    }
+                  >
+                    {format === 'csv' ? 'Download CSV' : 'Download JSON'}
+                  </Button>
+                ))}
+                {chosen.length > 0 && (
+                  <Button kind="ghost" size="md" onClick={() => setChosen([])}>
+                    Clear selection
+                  </Button>
+                )}
+              </div>
+            </div>
+          </WidgetCard>
+        )}
+
+        {section === 'import' && (
+          <WidgetCard>
+            <CardHeader title="Import" />
+            <div className={styles.section}>
+              <p className={styles.blurb}>
+                Reads a JSON export back in. A row that is already here is updated rather than
+                duplicated, matched on its id.
+              </p>
+              <InlineNotification
+                kind="warning"
+                title="Take a backup first"
+                subtitle="An import writes over existing records. It is the one thing on this screen that cannot be undone."
+                lowContrast
+                hideCloseButton
+              />
+
+              <div className={styles.dropZone}>
+                <input
+                  ref={fileInput}
+                  type="file"
+                  accept="text/csv,.csv,application/json,.json"
+                  multiple
+                  onChange={onFile}
+                  hidden
+                />
+                <Button kind="tertiary" renderIcon={Upload} onClick={() => fileInput.current?.click()}>
+                  Choose CSV or JSON files
+                </Button>
+                {files.length > 0 && (
+                  <p className={styles.blurb}>{files.map((file) => file.name).join(' · ')}</p>
+                )}
+              </div>
+
+              {check && (
+                <>
+                  {check.summary.length > 0 && (
+                    <p className={styles.blurb}>
+                      {check.summary.map((entry) => `${entry.rows} × ${entry.table}`).join(' · ')}
+                    </p>
+                  )}
+                  {check.problems.length > 0 && (
+                    <ul className={styles.problems}>
+                      {check.problems.map((problem) => (
+                        <li key={`${problem.table}-${problem.problem}`}>
+                          {problem.table}: {problem.problem}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+
+                  <div className={styles.actions}>
+                    <Button
+                      kind="danger"
+                      disabled={!check.token || Boolean(busy)}
+                      onClick={async () => {
+                        const ok = await confirm({
+                          title: 'Import this file?',
+                          message: 'Rows already here are overwritten. This cannot be undone — make sure you have a backup.',
+                          confirmLabel: 'Import',
+                          danger: true,
+                        });
+                        if (!ok) return;
+                        await run('Importing', async () => {
+                          const result = await runFileImport(files, check.token);
+                          notify.success('Import finished', `${result.rowsWritten} rows written.`);
+                          setCheck(null);
+                          setFiles([]);
+                          await refresh();
+                        });
+                      }}
+                    >
+                      {check.token ? 'Import' : 'Fix the problems above first'}
+                    </Button>
+                  </div>
+                </>
+              )}
+            </div>
+          </WidgetCard>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default SchoolDataWorkspace;

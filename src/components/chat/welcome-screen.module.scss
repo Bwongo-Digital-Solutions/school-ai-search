@@ -1,0 +1,146 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+// The screen behind the first question. Sits on the page grey so the suggestion tiles read as white
+// cards on it, rather than as outlines drawn on the same surface.
+.screen {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: layout.$spacing-09 layout.$spacing-06;
+  overflow: auto;
+  background-color: $ui-01;
+}
+
+// The school's colour, once, at the top — the only strong block of colour on the screen.
+.mark {
+  inline-size: layout.$spacing-10;
+  block-size: layout.$spacing-10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--brand-01, #{$brand-01-fallback});
+  color: var(--brand-contrast, #ffffff);
+  margin-block-end: layout.$spacing-06;
+
+  svg {
+    fill: currentColor;
+  }
+}
+
+.title {
+  @include type.type-style('heading-05');
+  color: $text-01;
+  margin: 0 0 layout.$spacing-03;
+}
+
+.lede {
+  @include type.type-style('body-01');
+  color: $text-02;
+  text-align: center;
+  max-inline-size: 32rem;
+  margin: 0 0 layout.$spacing-06;
+}
+
+.capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: layout.$spacing-03;
+  margin-block-end: layout.$spacing-08;
+}
+
+.suggestions {
+  display: grid;
+  gap: layout.$spacing-03;
+  inline-size: 100%;
+  max-inline-size: 52rem;
+
+  @media (min-width: 42rem) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  @media (min-width: 66rem) {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+// Carbon's ClickableTile brings its own hover and focus treatment; this only lays the contents out
+// and gives the tile the same hairline every other card in the app has.
+.tile {
+  border: 1px solid $ui-03;
+  block-size: 100%;
+}
+
+.suggestion {
+  @include type.type-style('body-compact-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  min-block-size: 100%;
+  color: $text-01;
+
+  svg {
+    fill: $text-02;
+    flex-shrink: 0;
+  }
+}
+
+.stats {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: layout.$spacing-07;
+  margin: layout.$spacing-08 0 0;
+  padding: layout.$spacing-05 layout.$spacing-06;
+  border: 1px solid $ui-03;
+  background: $ui-02;
+}
+
+.stat {
+  text-align: center;
+
+  > dt {
+    @include type.type-style('label-01');
+    color: $text-03;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+  }
+
+  > dd {
+    @include type.type-style('heading-03');
+    margin: 0 0 layout.$spacing-02;
+    color: $text-01;
+  }
+}
+
+:global(.cds--g100) {
+  .screen {
+    background-color: $ui-01-dark;
+  }
+
+  .title,
+  .suggestion,
+  .stat > dd {
+    color: #f4f4f4;
+  }
+
+  .lede,
+  .suggestion svg {
+    color: $text-02-dark;
+    fill: $text-02-dark;
+  }
+
+  .stats,
+  .tile {
+    background: $ui-02-dark;
+    border-color: $ui-03-dark;
+  }
+
+  .stat > dt {
+    color: $text-03-dark;
+  }
+}

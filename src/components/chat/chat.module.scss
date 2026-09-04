@@ -1,0 +1,247 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+// ---------------------------------------------------------------------------
+// The conversation
+// ---------------------------------------------------------------------------
+
+.window {
+  display: flex;
+  flex-direction: column;
+  block-size: 100%;
+  overflow: hidden;
+  background-color: $ui-01;
+}
+
+.scroller {
+  flex: 1;
+  min-block-size: 0;
+  overflow-y: auto;
+}
+
+.thread {
+  max-inline-size: 52rem;
+  margin: 0 auto;
+  padding: layout.$spacing-05 0;
+}
+
+.composer {
+  max-inline-size: 52rem;
+  inline-size: 100%;
+  margin: 0 auto;
+}
+
+// A gate: not signed in, or signed in as someone this screen is not for.
+.gate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  block-size: 100%;
+  padding: layout.$spacing-09 layout.$spacing-06;
+  text-align: center;
+  background-color: $ui-01;
+}
+
+.gateTitle {
+  @include type.type-style('heading-04');
+  color: $text-01;
+  margin: layout.$spacing-05 0 layout.$spacing-03;
+}
+
+.gateCopy {
+  @include type.type-style('body-01');
+  color: $text-02;
+  max-inline-size: 28rem;
+  margin: 0 0 layout.$spacing-06;
+}
+
+.checking {
+  @include type.type-style('body-compact-01');
+  display: flex;
+  block-size: 100%;
+  align-items: center;
+  justify-content: center;
+  color: $text-02;
+  background-color: $ui-01;
+}
+
+// ---------------------------------------------------------------------------
+// A message
+// ---------------------------------------------------------------------------
+
+.message {
+  display: flex;
+  gap: layout.$spacing-04;
+  padding: layout.$spacing-04 layout.$spacing-05;
+  align-items: flex-start;
+}
+
+.fromUser {
+  justify-content: flex-end;
+}
+
+// Square, in the school's colour. Marks who is speaking without a border or a shadow.
+.avatar {
+  inline-size: layout.$spacing-08;
+  block-size: layout.$spacing-08;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--brand-01, #{$brand-01-fallback});
+  color: var(--brand-contrast, #ffffff);
+
+  svg {
+    fill: currentColor;
+  }
+}
+
+.avatarAssistant {
+  background: $ui-05;
+  color: #ffffff;
+}
+
+.column {
+  max-inline-size: 75%;
+  min-inline-size: 0;
+}
+
+.columnUser {
+  order: -1;
+}
+
+// The bubble. A filled block for the person, a bordered white one for the assistant — the same
+// figure/ground rule as everything else, so the two are told apart by weight rather than by colour
+// alone.
+.bubble {
+  padding: layout.$spacing-04 layout.$spacing-05;
+  overflow-wrap: anywhere;
+}
+
+.bubbleUser {
+  background: var(--brand-01, #{$brand-01-fallback});
+  color: var(--brand-contrast, #ffffff);
+}
+
+.bubbleAssistant {
+  background: $ui-02;
+  border: 1px solid $ui-03;
+  color: $text-01;
+}
+
+.text {
+  @include type.type-style('body-01');
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.body {
+  @include type.type-style('body-01');
+}
+
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: layout.$spacing-03;
+  margin-bottom: layout.$spacing-03;
+}
+
+.attachmentImage {
+  max-inline-size: 12.5rem;
+  max-block-size: 9.375rem;
+  object-fit: cover;
+  border: 1px solid $ui-03;
+}
+
+.attachmentVoice {
+  @include type.type-style('label-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  padding: layout.$spacing-02 layout.$spacing-04;
+  background: rgb(255 255 255 / 15%);
+}
+
+// Time and the copy button. The copy button appears on hover on a pointer device and is always
+// present on touch, where there is no hover to reveal it.
+.meta {
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  margin-top: layout.$spacing-02;
+  min-block-size: layout.$spacing-06;
+}
+
+.metaUser {
+  justify-content: flex-end;
+}
+
+.time {
+  @include type.type-style('label-01');
+  color: $text-03;
+}
+
+.copyButton {
+  opacity: 0;
+  transition: opacity 70ms cubic-bezier(0.2, 0, 0.38, 0.9);
+
+  .message:hover &,
+  &:focus-within {
+    opacity: 1;
+  }
+
+  @media (hover: none) {
+    opacity: 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The assistant, thinking
+// ---------------------------------------------------------------------------
+
+.typing {
+  @include type.type-style('body-compact-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-04;
+  color: $text-02;
+}
+
+:global(.cds--g100) {
+  .window,
+  .gate,
+  .checking {
+    background-color: $ui-01-dark;
+  }
+
+  .gateTitle {
+    color: #f4f4f4;
+  }
+
+  .gateCopy,
+  .checking,
+  .typing {
+    color: $text-02-dark;
+  }
+
+  .bubbleAssistant {
+    background: $ui-02-dark;
+    border-color: $ui-03-dark;
+    color: #f4f4f4;
+  }
+
+  .avatarAssistant {
+    background: $ui-03-dark;
+    color: #f4f4f4;
+  }
+
+  .time {
+    color: $text-03-dark;
+  }
+
+  .attachmentImage {
+    border-color: $ui-03-dark;
+  }
+}

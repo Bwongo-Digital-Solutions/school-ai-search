@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { ClipboardCheck, FileText, Layers, Library, Loader2, Shield, Sparkles, X } from 'lucide-react';
+import { InlineLoading, InlineNotification, Tab, TabList, Tabs, Tag } from '@carbon/react';
+import { Ai, Catalog, Document, Layers, TaskComplete } from '@carbon/react/icons';
 import { useAuth } from '@/contexts/AuthContext';
 import { callDigitalExaminer, loadCurriculumFrameworks } from '@/lib/teaching';
-import StatTile from '@/components/common/StatTile';
+import { AccessDenied, PageHeader, StatRow, StatTile, StatTileSkeleton } from '@/components/common';
+import styles from './workspace.module.scss';
 import BlueprintTab from './examiner/BlueprintTab';
 import GenerateTab from './examiner/GenerateTab';
 import QuestionBankTab from './examiner/QuestionBankTab';
@@ -11,9 +13,9 @@ import type { CurriculumFramework, ExamBlueprint, ExamQuestion, GeneratedPaper }
 
 const SECTIONS = [
   { key: 'blueprint', label: 'Blueprints', icon: Layers },
-  { key: 'generate', label: 'Generate', icon: Sparkles },
-  { key: 'bank', label: 'Question Bank', icon: Library },
-  { key: 'papers', label: 'Papers', icon: FileText },
+  { key: 'generate', label: 'Generate', icon: Ai },
+  { key: 'bank', label: 'Question bank', icon: Catalog },
+  { key: 'papers', label: 'Papers', icon: Document },
 ] as const;
 
 type SectionKey = (typeof SECTIONS)[number]['key'];
@@ -29,6 +31,8 @@ const DigitalExaminerWorkspace: React.FC = () => {
   const [refreshKey, setRefreshKey] = useState(0);
 
   const [questions, setQuestions] = useState<ExamQuestion[]>([]);
+  // Four zeroes at first paint read as an empty question bank rather than an uncounted one.
+  const [countsLoading, setCountsLoading] = useState(true);
   const [papers, setPapers] = useState<GeneratedPaper[]>([]);
   const [activeBlueprint, setActiveBlueprint] = useState<ExamBlueprint | null>(null);
   // Questions ticked in the bank, carried to the Papers tab for assembly.
@@ -39,7 +43,10 @@ const DigitalExaminerWorkspace: React.FC = () => {
   }, []);
 
   const loadCounts = useCallback(async () => {
-    if (!isTeachingStaff) return;
+    if (!isTeachingStaff) {
+      setCountsLoading(false);
+      return;
+    }
     try {
       const [questionResult, paperResult] = await Promise.all([
         callDigitalExaminer<{ questions: ExamQuestion[] }>('list_questions', {}, user),
@@ -49,6 +56,8 @@ const DigitalExaminerWorkspace: React.FC = () => {
       setPapers(paperResult.papers);
     } catch (err) {
       console.error('Failed to load examiner data:', err);
+    } finally {
+      setCountsLoading(false);
     }
   }, [isTeachingStaff, user]);
 
@@ -93,17 +102,10 @@ const DigitalExaminerWorkspace: React.FC = () => {
   // Defence in depth, matching the Lesson Planner and fees workspaces.
   if (!isTeachingStaff) {
     return (
-      <div className="flex flex-col items-center justify-center h-full bg-gradient-to-b from-gray-50/50 to-white dark:from-gray-900/50 dark:to-gray-900 p-8">
-        <div className="max-w-md text-center">
-          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-purple-100 to-indigo-100 dark:from-purple-900/30 dark:to-indigo-900/30 flex items-center justify-center mx-auto mb-4">
-            <Shield className="w-8 h-8 text-purple-500" />
-          </div>
-          <h2 className="text-xl font-bold text-gray-800 dark:text-white mb-2">Teaching Staff Only</h2>
-          <p className="text-sm text-gray-500 dark:text-gray-400">
-            The Digital Examiner is available to teachers and administrators.
-          </p>
-        </div>
-      </div>
+      <AccessDenied
+        title="Teaching staff only"
+        message="The digital examiner is available to teachers and administrators."
+      />
     );
   }
 
@@ -112,78 +114,71 @@ const DigitalExaminerWorkspace: React.FC = () => {
   const published = papers.filter(paper => paper.status === 'published').length;
 
   return (
-    <div className="flex flex-col h-full bg-gradient-to-b from-gray-50/50 to-white dark:from-gray-900/50 dark:to-gray-900">
-      <div className="px-6 pt-6 pb-4 border-b border-gray-100 dark:border-gray-800">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h2 className="text-xl font-bold text-gray-800 dark:text-white flex items-center gap-2">
-              <ClipboardCheck className="w-6 h-6 text-indigo-500" />
-              Digital Examiner
-            </h2>
-            <p className="text-xs text-gray-400 mt-0.5">
-              Questions, assignments and exams written against the Uganda syllabus and International GCSE
-              standards.
-            </p>
-          </div>
-          {busy && (
-            <span className="inline-flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-              <Loader2 className="w-3.5 h-3.5 animate-spin" /> {busy}…
-            </span>
+    <div className={styles.screen}>
+      <PageHeader title="Digital examiner" illustration={<TaskComplete size={32} />}>
+        {busy && (
+          <span className={styles.busy}>
+            <InlineLoading description={`${busy}…`} />
+          </span>
+        )}
+      </PageHeader>
+
+      <div className={styles.controls}>
+        <StatRow>
+          {countsLoading && questions.length === 0 && papers.length === 0 ? (
+            <>
+              <StatTileSkeleton />
+              <StatTileSkeleton />
+              <StatTileSkeleton />
+              <StatTileSkeleton />
+            </>
+          ) : (
+            <>
+              <StatTile label="Questions banked" value={String(questions.length)} icon={Catalog} />
+              <StatTile
+                label="Awaiting review"
+                value={String(awaitingReview)}
+                icon={Ai}
+                tone={awaitingReview > 0 ? 'warning' : 'default'}
+              />
+              <StatTile label="Approved" value={String(approved)} icon={TaskComplete} tone="success" />
+              <StatTile label="Papers published" value={String(published)} icon={Document} />
+            </>
           )}
-        </div>
+        </StatRow>
 
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mt-4">
-          <StatTile label="Questions banked" value={String(questions.length)} icon={Library} />
-          <StatTile
-            label="Awaiting review"
-            value={String(awaitingReview)}
-            icon={Sparkles}
-            tone={awaitingReview > 0 ? 'warning' : 'default'}
-          />
-          <StatTile label="Approved" value={String(approved)} icon={ClipboardCheck} tone="success" />
-          <StatTile label="Papers published" value={String(published)} icon={FileText} />
-        </div>
-
-        <div className="flex flex-wrap gap-1.5 mt-4">
-          {SECTIONS.map(({ key, label, icon: Icon }) => (
-            <button
-              key={key}
-              onClick={() => setSection(key)}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                section === key
-                  ? 'bg-indigo-600 text-white'
-                  : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'
-              }`}
-            >
-              <Icon className="w-3.5 h-3.5" />
-              {label}
-              {key === 'bank' && selectedIds.length > 0 && (
-                <span className="ml-0.5 px-1.5 rounded-full bg-white/20 text-[10px]">{selectedIds.length}</span>
-              )}
-            </button>
-          ))}
+        <div className={styles.tabs}>
+          <Tabs
+            selectedIndex={SECTIONS.findIndex(entry => entry.key === section)}
+            onChange={({ selectedIndex }) => setSection(SECTIONS[selectedIndex].key)}
+          >
+            <TabList aria-label="Digital examiner sections" contained>
+              {SECTIONS.map(({ key, label, icon: Icon }) => (
+                <Tab key={key} renderIcon={Icon}>
+                  {label}
+                  {/* How many questions are selected for a paper, on the tab that holds them —
+                      so the count is visible from whichever section you are working in. */}
+                  {key === 'bank' && selectedIds.length > 0 && (
+                    <Tag type="blue" size="sm">
+                      {selectedIds.length}
+                    </Tag>
+                  )}
+                </Tab>
+              ))}
+            </TabList>
+          </Tabs>
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto px-6 py-4">
+      <div className={styles.body}>
         {error && (
-          <div className="mb-4 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-4 py-3">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="text-sm font-medium text-amber-800 dark:text-amber-300">{error.label} failed</p>
-                <p className="text-xs text-amber-700 dark:text-amber-400 mt-0.5 whitespace-pre-wrap">
-                  {error.message}
-                </p>
-              </div>
-              <button
-                onClick={() => setError(null)}
-                className="shrink-0 p-1 rounded hover:bg-amber-100 dark:hover:bg-amber-900/40"
-                aria-label="Dismiss"
-              >
-                <X className="w-3.5 h-3.5 text-amber-600" />
-              </button>
-            </div>
-          </div>
+          <InlineNotification
+            kind="warning"
+            title={`${error.label} failed`}
+            subtitle={error.message}
+            onCloseButtonClick={() => setError(null)}
+            lowContrast
+          />
         )}
 
         {section === 'blueprint' && (

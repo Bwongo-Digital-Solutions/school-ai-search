@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { CheckCircle2, Plug, PlugZap, Trash2, XCircle } from 'lucide-react';
-import Field from '@/components/common/Field';
+import { Button, Checkbox, InlineNotification, Tag } from '@carbon/react';
+import { Plug, TrashCan } from '@carbon/react/icons';
+import { CardHeader, EmptyState, ErrorState, Field, ListSkeleton, WidgetCard } from '@/components/common';
 import { useAuth } from '@/contexts/AuthContext';
+import { useNotifications } from '@/contexts/NotificationContext';
 import { callMcp } from '@/lib/teaching';
-import { EmptyState, Panel, PrimaryButton, SecondaryButton, zebra } from './fees/shared';
+import styles from './panels.module.scss';
 import type { McpServer, McpToolSummary } from '@/types/agent';
 
 const emptyForm = () => ({ id: '', name: '', url: '', authToken: '', enabled: true });
@@ -20,18 +22,31 @@ const emptyForm = () => ({ id: '', name: '', url: '', authToken: '', enabled: tr
  */
 const McpServersPanel: React.FC = () => {
   const { user, isAdmin } = useAuth();
+  const { confirm, notify } = useNotifications();
   const [servers, setServers] = useState<McpServer[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<unknown>(null);
   const [form, setForm] = useState(emptyForm());
   const [busy, setBusy] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ id: string; ok: boolean; message: string; tools?: McpToolSummary[] } | null>(null);
 
   const load = useCallback(async () => {
-    if (!isAdmin) return;
+    // Nothing will ever be asked for, so nothing is pending. Without this the panel would sit on a
+    // skeleton for a reader who is simply not allowed to see the list.
+    if (!isAdmin) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
     try {
       const result = await callMcp<{ servers: McpServer[] }>('list', {}, user);
       setServers(result.servers);
+      setError(null);
     } catch (err) {
       console.error('Failed to load MCP servers:', err);
+      setError(err);
+    } finally {
+      setLoading(false);
     }
   }, [isAdmin, user]);
 
@@ -44,7 +59,7 @@ const McpServersPanel: React.FC = () => {
     try {
       await handler();
     } catch (err: unknown) {
-      alert(`${label} failed: ${err instanceof Error ? err.message : 'Unexpected error'}`);
+      notify.error(`${label} failed`, err instanceof Error ? err.message : 'Unexpected error');
     } finally {
       setBusy(null);
     }
@@ -94,143 +109,169 @@ const McpServersPanel: React.FC = () => {
   if (!isAdmin) return null;
 
   return (
-    <div className="space-y-4">
-      <Panel className="p-4">
-        <h3 className="text-sm font-semibold text-gray-800 dark:text-white mb-1 flex items-center gap-2">
-          <Plug className="w-4 h-4 text-indigo-500" />
-          {form.id ? 'Edit MCP server' : 'Connect an MCP server'}
-        </h3>
-        <p className="text-[11px] text-gray-400 mb-3">
-          Tools from a connected server become available to teachers in the chat composer. Only connect servers
-          you trust — their tool output reaches the assistant.
-        </p>
+    <div className={styles.stack}>
+      <WidgetCard>
+        <CardHeader title={form.id ? 'Edit MCP server' : 'Connect an MCP server'} />
+        <div className={styles.section}>
+          <p className={styles.note}>
+            Tools from a connected server become available to teachers in the chat composer. Only
+            connect servers you trust — their tool output reaches the assistant.
+          </p>
 
-        <div className="grid gap-2 sm:grid-cols-2">
-          <Field
-            label="Name"
-            value={form.name}
-            onChange={value => setForm({ ...form, name: String(value ?? '') })}
-            placeholder="ncdc-syllabus"
-          />
-          <Field
-            label="Server URL"
-            value={form.url}
-            onChange={value => setForm({ ...form, url: String(value ?? '') })}
-            placeholder="https://mcp.example.org/rpc"
-          />
-          <Field
-            label="Auth token"
-            type="password"
-            value={form.authToken}
-            onChange={value => setForm({ ...form, authToken: String(value ?? '') })}
-            hint={form.id ? 'Leave blank to keep the stored token.' : 'Sent as a bearer token. Optional.'}
-          />
-          <label className="flex items-center gap-2 pt-6">
-            <input
-              type="checkbox"
-              checked={form.enabled}
-              onChange={event => setForm({ ...form, enabled: event.target.checked })}
-              className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+          <div className={styles.grid2}>
+            <Field
+              label="Name"
+              value={form.name}
+              onChange={value => setForm({ ...form, name: value })}
+              placeholder="ncdc-syllabus"
             />
-            <span className="text-xs text-gray-600 dark:text-gray-400">Enabled</span>
-          </label>
-        </div>
+            <Field
+              label="Server URL"
+              value={form.url}
+              onChange={value => setForm({ ...form, url: value })}
+              placeholder="https://mcp.example.org/rpc"
+            />
+            <Field
+              label="Auth token"
+              type="password"
+              value={form.authToken}
+              onChange={value => setForm({ ...form, authToken: value })}
+              hint={form.id ? 'Leave blank to keep the stored token.' : 'Sent as a bearer token. Optional.'}
+            />
+            <Checkbox
+              id="mcp-enabled"
+              labelText="Enabled"
+              checked={form.enabled}
+              onChange={(_event, { checked }) => setForm({ ...form, enabled: checked })}
+            />
+          </div>
 
-        <div className="flex gap-2 mt-3">
-          <PrimaryButton onClick={save} disabled={Boolean(busy) || !form.name.trim() || !form.url.trim()}>
-            {form.id ? 'Update server' : 'Add server'}
-          </PrimaryButton>
-          {form.id && (
-            <SecondaryButton onClick={() => setForm(emptyForm())} disabled={Boolean(busy)}>
-              Cancel
-            </SecondaryButton>
-          )}
+          <div className={styles.actions}>
+            <Button
+              kind="primary"
+              size="sm"
+              onClick={save}
+              disabled={Boolean(busy) || !form.name.trim() || !form.url.trim()}
+            >
+              {form.id ? 'Update server' : 'Add server'}
+            </Button>
+            {form.id && (
+              <Button kind="tertiary" size="sm" onClick={() => setForm(emptyForm())} disabled={Boolean(busy)}>
+                Cancel
+              </Button>
+            )}
+          </div>
         </div>
-      </Panel>
+      </WidgetCard>
 
-      <Panel>
-        {servers.length === 0 ? (
-          <EmptyState message="No MCP servers connected. SchoolBot's own tools work without any of these — an MCP server only adds tools from elsewhere." />
+      <WidgetCard>
+        <CardHeader title="Connected servers">
+          <Tag type="cool-gray" size="sm">{servers.length}</Tag>
+        </CardHeader>
+        {loading && servers.length === 0 ? (
+          <ListSkeleton rowCount={3} />
+        ) : error ? (
+          <ErrorState headerTitle="MCP servers" error={error} onRetry={load} />
+        ) : servers.length === 0 ? (
+          <EmptyState
+            headerTitle="MCP servers"
+            displayText="connected servers"
+            helperText="SchoolBot's own tools work without any of these — an MCP server only adds tools from elsewhere."
+          />
         ) : (
-          <div className="divide-y divide-gray-100 dark:divide-gray-700">
-            {servers.map(server => (
-              <div key={server.id} className={`px-4 py-3 ${zebra}`}>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-gray-800 dark:text-white truncate flex items-center gap-2">
-                      {server.name}
-                      {!server.enabled && (
-                        <span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-100 dark:bg-gray-700 text-gray-500">
-                          disabled
-                        </span>
-                      )}
-                    </p>
-                    <p className="text-[11px] text-gray-400 truncate">
-                      {server.url}
-                      {server.hasAuthToken ? ' · authenticated' : ' · no token'}
-                      {server.discovered_tools.length > 0 && ` · ${server.discovered_tools.length} tools`}
-                    </p>
-                    {server.last_error && (
-                      <p className="text-[11px] text-red-500 mt-0.5 flex items-center gap-1">
-                        <XCircle className="w-3 h-3 shrink-0" /> {server.last_error}
-                      </p>
+          servers.map(server => (
+            <div key={server.id} className={styles.serverRow}>
+              <div className={styles.entryHead}>
+                <div>
+                  <p className={styles.entryTitle}>
+                    {server.name}
+                    {!server.enabled && (
+                      <Tag type="cool-gray" size="sm">
+                        Disabled
+                      </Tag>
                     )}
-                  </div>
-
-                  <div className="flex gap-2">
-                    <SecondaryButton onClick={() => test(server)} disabled={Boolean(busy)}>
-                      <PlugZap className="w-4 h-4" /> Test
-                    </SecondaryButton>
-                    <SecondaryButton
-                      onClick={() =>
-                        setForm({ id: server.id, name: server.name, url: server.url, authToken: '', enabled: server.enabled })
-                      }
-                      disabled={Boolean(busy)}
-                    >
-                      Edit
-                    </SecondaryButton>
-                    <SecondaryButton
-                      onClick={() => {
-                        if (!window.confirm(`Disconnect “${server.name}”?`)) return;
-                        runAction('Removing the MCP server', async () => {
-                          await callMcp('delete', { id: server.id }, user);
-                          await load();
-                        });
-                      }}
-                      disabled={Boolean(busy)}
-                      className="text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </SecondaryButton>
-                  </div>
+                  </p>
+                  <p className={styles.entrySub}>
+                    {server.url}
+                    {server.hasAuthToken ? ' · authenticated' : ' · no token'}
+                    {server.discovered_tools.length > 0 && ` · ${server.discovered_tools.length} tools`}
+                  </p>
+                  {server.last_error && <p className={styles.failure}>{server.last_error}</p>}
                 </div>
 
-                {testResult?.id === server.id && (
-                  <div
-                    className={`mt-2 text-[11px] flex items-start gap-1.5 ${
-                      testResult.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'
-                    }`}
+                <div className={styles.actions}>
+                  <Button
+                    kind="tertiary"
+                    size="sm"
+                    renderIcon={Plug}
+                    onClick={() => test(server)}
+                    disabled={Boolean(busy)}
                   >
-                    {testResult.ok ? (
-                      <CheckCircle2 className="w-3 h-3 mt-0.5 shrink-0" />
-                    ) : (
-                      <XCircle className="w-3 h-3 mt-0.5 shrink-0" />
-                    )}
-                    <span>
-                      {testResult.message}
-                      {testResult.tools && testResult.tools.length > 0 && (
-                        <span className="block text-gray-400">
-                          {testResult.tools.map(tool => tool.remoteName).join(', ')}
-                        </span>
-                      )}
-                    </span>
-                  </div>
-                )}
+                    Test
+                  </Button>
+                  <Button
+                    kind="ghost"
+                    size="sm"
+                    onClick={() =>
+                      setForm({
+                        id: server.id,
+                        name: server.name,
+                        url: server.url,
+                        authToken: '',
+                        enabled: server.enabled,
+                      })
+                    }
+                    disabled={Boolean(busy)}
+                  >
+                    Edit
+                  </Button>
+                  <Button
+                    hasIconOnly
+                    kind="danger--ghost"
+                    size="sm"
+                    renderIcon={TrashCan}
+                    iconDescription={`Disconnect ${server.name}`}
+                    tooltipPosition="left"
+                    disabled={Boolean(busy)}
+                    onClick={async () => {
+                      if (
+                        !(await confirm({
+                          title: 'Disconnect this server?',
+                          message: `“${server.name}” will stop providing tools to the assistant. Nothing else changes, and you can connect it again.`,
+                          confirmLabel: 'Disconnect',
+                          danger: true,
+                        }))
+                      ) {
+                        return;
+                      }
+                      runAction('Removing the MCP server', async () => {
+                        await callMcp('delete', { id: server.id }, user);
+                        await load();
+                      });
+                    }}
+                  />
+                </div>
               </div>
-            ))}
-          </div>
+
+              {testResult?.id === server.id && (
+                <div className={styles.entryBody}>
+                  <InlineNotification
+                    kind={testResult.ok ? 'success' : 'error'}
+                    title={testResult.message}
+                    subtitle={
+                      testResult.tools && testResult.tools.length > 0
+                        ? testResult.tools.map(tool => tool.remoteName).join(', ')
+                        : undefined
+                    }
+                    lowContrast
+                    hideCloseButton
+                  />
+                </div>
+              )}
+            </div>
+          ))
         )}
-      </Panel>
+      </WidgetCard>
     </div>
   );
 };

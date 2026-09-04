@@ -24,6 +24,12 @@ import { createAgentContext, runAgent } from '../agent/loop.mjs';
 import { resolveModelSelection } from './llm-models.mjs';
 import { retrieveCurriculum, toStoredCitations } from '../rag/retriever.mjs';
 import {
+  extractQuestions,
+  extractQuestionsFromJsonBlocks,
+  markdownToQuestions,
+  questionsToMarkdown,
+} from './question-parse.mjs';
+import {
   ASSESSMENT_TYPES,
   BLOOM_LEVELS,
   DIFFICULTY_LEVELS,
@@ -31,6 +37,7 @@ import {
   resolveFramework,
   yearLabelFor,
 } from './curriculum-frameworks.mjs';
+import { requireRole, resolveActor } from '../auth/actor.mjs';
 
 const TEACHING_ROLES = ['admin', 'teacher'];
 
@@ -277,18 +284,11 @@ export const salvageQuestionsFromText = (text) => {
   const source = String(text || '');
   if (!source.trim()) return [];
 
-  // A fenced JSON array or a {questions:[...]} object is the cleanest case.
-  for (const block of [...source.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map((m) => m[1])) {
-    try {
-      const parsed = JSON.parse(block.trim());
-      const list = Array.isArray(parsed) ? parsed : parsed.questions;
-      if (Array.isArray(list) && list.length > 0 && list.some((entry) => entry?.stem || entry?.question)) {
-        return list.map((entry) => ({ ...entry, stem: entry.stem || entry.question }));
-      }
-    } catch {
-      // Not JSON; fall through to the prose reader.
-    }
-  }
+  // JSON first, via the shared parser, which recognises a question by its shape rather than by the
+  // wrapper it arrived in — `{name: "<topic>", arguments: {...}}` included, which is the shape that
+  // used to be rejected outright.
+  const fromJson = extractQuestionsFromJsonBlocks(source);
+  if (fromJson.length > 0) return fromJson;
 
   // Numbered prose: "1. Describe ... [5 marks]" or "**Question 2:** ...", one block each.
   const blocks = source
@@ -304,10 +304,19 @@ export const salvageQuestionsFromText = (text) => {
     // first numbered item and is not a question.
     if (!NUMBERED.test(block)) continue;
 
-    const cleaned = block
+    const withoutNumber = block
       .replace(NUMBERED, '')
       .replace(/\*\*/g, '')
       .trim();
+    if (!withoutNumber) continue;
+
+    // A question and its answer, options and mark scheme sit on consecutive lines; a blank line
+    // after them marks the model moving on ("Let me know if you want these adapted..."). Split
+    // there so closing prose is not glued onto the last question's stem — it is kept as a note
+    // rather than dropped.
+    const [core, ...trailing] = withoutNumber.split(/\n\s*\n/);
+    const cleaned = core.trim();
+    const trailingNote = trailing.join('\n\n').trim();
     if (!cleaned) continue;
 
     const lines = cleaned.split(/\n/).map((line) => line.trim()).filter(Boolean);
@@ -351,6 +360,8 @@ export const salvageQuestionsFromText = (text) => {
           marks: marks ? Number(marks[1]) : 1,
         };
       }),
+      // Kept so nothing the model wrote is lost; it surfaces as a review note on the question.
+      reviewNotes: trailingNote,
       citationIndexes: [],
     });
   }
@@ -578,6 +589,9 @@ const generateQuestions = async ({ database, body, actor, httpClient }) => {
       // Returned so the UI can show what the model actually said, and let the teacher keep it,
       // rather than discarding the response inside an error dialog.
       rawReply: result.message || '',
+      // The editor opens on this. Nothing here parsed as a question, so the model's own words are
+      // the starting text: the teacher shapes them and saves, rather than losing the reply.
+      markdown: result.message || '',
       steps: result.steps,
     };
   }
@@ -608,10 +622,10 @@ const generateQuestions = async ({ database, body, actor, httpClient }) => {
           id, blueprint_id, curriculum, subject_id, subject_name, grade_level, topic, subtopic,
           question_type, difficulty, bloom_level, command_word, stem, options, correct_answer,
           marking_scheme, marks, expected_time_minutes, assessment_objective, source_references,
-          status, generated_by, created_by
+          review_notes, status, generated_by, created_by
         ) VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
-          $20, 'draft', $21, $22
+          $20, $21, 'draft', $22, $23
         )
         RETURNING ${QUESTION_COLUMNS}
       `,
@@ -636,6 +650,8 @@ const generateQuestions = async ({ database, body, actor, httpClient }) => {
         asInteger(question.expectedTimeMinutes, 2),
         trimmed(question.assessmentObjective),
         JSON.stringify(references),
+        // Anything the model wrote around the question, so it is visible rather than lost.
+        trimmed(question.reviewNotes),
         JSON.stringify(generatedBy),
         actor.email || actor.name,
       ],
@@ -646,6 +662,9 @@ const generateQuestions = async ({ database, body, actor, httpClient }) => {
 
   return {
     questions: saved,
+    // The same questions as the Markdown the editor shows, rendered server-side so the editor and
+    // the save path are reading and writing one format.
+    markdown: questionsToMarkdown(extractQuestions(saved)),
     steps: result.steps,
     // Flagged so the UI can say these were read out of prose rather than returned structurally,
     // and therefore deserve a closer read before approval.
@@ -758,6 +777,123 @@ const saveQuestion = async ({ database, body, actor }) => {
   );
 
   return { question: rows[0] };
+};
+
+// A teacher reviewing a freshly generated paper edits a dozen questions at once, so the editor saves
+// them in one call rather than one request each.
+const MAX_QUESTIONS_PER_SAVE = 200;
+
+/** Turns a question shape into the ordered value list both the update and the insert below use. */
+const questionContentValues = (question) => [
+  trimmed(question.topic),
+  trimmed(question.subtopic),
+  trimmed(question.questionType) || 'short_answer',
+  DIFFICULTY_LEVELS.includes(question.difficulty) ? question.difficulty : 'moderate',
+  trimmed(question.bloomLevel) || 'understand',
+  trimmed(question.commandWord),
+  trimmed(question.stem),
+  JSON.stringify(Array.isArray(question.options) ? question.options : []),
+  trimmed(question.correctAnswer),
+  JSON.stringify(Array.isArray(question.markingScheme) ? question.markingScheme : []),
+  asInteger(question.marks, 1),
+  asInteger(question.expectedTimeMinutes, 2),
+  trimmed(question.assessmentObjective),
+  trimmed(question.reviewNotes),
+];
+
+/**
+ * Saves a whole edited draft in one call — what the Markdown editor posts when the teacher presses
+ * Save.
+ *
+ * Takes either `markdown` (the edited text) or `questions` (an array), and parses both through the
+ * shared reader, so the editor and the model recovery path agree on what counts as a question.
+ *
+ * A block that still carries its id updates that row; one without — a question the teacher typed, or
+ * whose trailing marker they deleted — is inserted as a new draft. An id that no longer exists is
+ * inserted rather than dropped, because a save should never lose the teacher's work.
+ */
+const saveQuestions = async ({ database, body, actor }) => {
+  const parsed =
+    Array.isArray(body.questions) && body.questions.length > 0
+      ? extractQuestions(body.questions)
+      : markdownToQuestions(body.markdown);
+
+  const questions = parsed.filter((question) => trimmed(question.stem));
+  if (questions.length === 0) {
+    return { error: 'Nothing in the editor could be read as a question. Each one needs a number and a stem.' };
+  }
+  if (questions.length > MAX_QUESTIONS_PER_SAVE) {
+    return { error: `That is ${questions.length} questions; save at most ${MAX_QUESTIONS_PER_SAVE} at a time.` };
+  }
+
+  const saved = [];
+  let created = 0;
+  let updated = 0;
+
+  for (const question of questions) {
+    const values = questionContentValues(question);
+    const id = trimmed(question.id);
+
+    if (id) {
+      const { rows } = await database.query(
+        `
+          UPDATE exam_questions SET
+            topic = $1, subtopic = $2, question_type = $3, difficulty = $4, bloom_level = $5,
+            command_word = $6, stem = $7, options = $8, correct_answer = $9, marking_scheme = $10,
+            marks = $11, expected_time_minutes = $12, assessment_objective = $13, review_notes = $14,
+            updated_at = NOW()
+          WHERE id = $15
+          RETURNING ${QUESTION_COLUMNS}
+        `,
+        [...values, id],
+      );
+
+      if (rows[0]) {
+        saved.push(rows[0]);
+        updated += 1;
+        continue;
+      }
+      // Fall through: the row is gone, so keep the edit as a new question.
+    }
+
+    const { rows } = await database.query(
+      `
+        INSERT INTO exam_questions (
+          id, blueprint_id, curriculum, subject_id, subject_name, grade_level, topic, subtopic,
+          question_type, difficulty, bloom_level, command_word, stem, options, correct_answer,
+          marking_scheme, marks, expected_time_minutes, assessment_objective, review_notes,
+          status, created_by
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
+          $20, 'draft', $21
+        )
+        RETURNING ${QUESTION_COLUMNS}
+      `,
+      [
+        randomUUID(),
+        trimmed(body.blueprintId) || null,
+        trimmed(body.curriculum),
+        trimmed(body.subjectId) || null,
+        trimmed(body.subjectName),
+        body.gradeLevel == null || body.gradeLevel === '' ? null : Number(body.gradeLevel),
+        ...values,
+        actor.email || actor.name,
+      ],
+    );
+
+    saved.push(rows[0]);
+    created += 1;
+  }
+
+  // The saved rows re-rendered as Markdown: every question now carries an id, so the editor can
+  // adopt this text and a second Save updates the same rows instead of inserting duplicates.
+  return {
+    questions: saved,
+    markdown: questionsToMarkdown(extractQuestions(saved)),
+    saved: saved.length,
+    created,
+    updated,
+  };
 };
 
 const setQuestionStatus = async ({ database, body }) => {
@@ -1013,6 +1149,7 @@ const ACTIONS = {
   generate_questions: generateQuestions,
   list_questions: listQuestions,
   save_question: saveQuestion,
+  save_questions: saveQuestions,
   set_question_status: setQuestionStatus,
   delete_question: deleteQuestion,
   assemble_paper: assemblePaper,
@@ -1024,19 +1161,15 @@ const ACTIONS = {
 
 export const EXAMINER_ACTIONS = Object.keys(ACTIONS);
 
-export const handleDigitalExaminerFunction = async (database, body = {}, httpClient = fetch) => {
-  if (!TEACHING_ROLES.includes(body.requesterRole)) {
-    return { error: 'Unauthorized' };
-  }
+export const handleDigitalExaminerFunction = async (database, body = {}, httpClient = fetch, { actor: authenticated, tenantId } = {}) => {
+  // The actor comes from the request's session when there was a request to authenticate, and from
+  // the body only for an internal call that never had one. See resolveActor.
+  const actor = resolveActor(authenticated, body);
+  const refusal = requireRole(actor, TEACHING_ROLES);
+  if (refusal) return refusal;
 
   const handler = ACTIONS[body.action];
   if (!handler) return { error: `Unsupported digital examiner action: ${body.action}` };
 
-  const actor = {
-    email: trimmed(body.actorEmail),
-    name: trimmed(body.actorName),
-    role: body.requesterRole,
-  };
-
-  return handler({ database, body, actor, httpClient });
+  return handler({ database, body, actor, httpClient, tenantId });
 };

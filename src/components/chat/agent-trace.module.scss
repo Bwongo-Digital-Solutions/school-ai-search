@@ -1,0 +1,171 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+// What the assistant did, under its reply. Everything here is deliberately quieter than the answer
+// itself — it is evidence, available when wanted, never competing with the thing it supports.
+.trace {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-03;
+  margin-block-start: layout.$spacing-05;
+  padding-block-start: layout.$spacing-03;
+  border-block-start: 1px solid $ui-03;
+}
+
+.warning {
+  @include type.type-style('label-01');
+  display: flex;
+  align-items: flex-start;
+  gap: layout.$spacing-03;
+  color: $caution-text;
+  margin: 0;
+
+  svg {
+    fill: currentColor;
+    flex-shrink: 0;
+    margin-block-start: 0.1em;
+  }
+}
+
+.failure {
+  @include type.type-style('label-01');
+  display: flex;
+  align-items: flex-start;
+  gap: layout.$spacing-03;
+  color: $support-error;
+  margin: 0;
+
+  svg {
+    fill: currentColor;
+    flex-shrink: 0;
+    margin-block-start: 0.1em;
+  }
+}
+
+.sectionLabel {
+  @include type.type-style('label-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-02;
+  color: $text-03;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin: 0 0 layout.$spacing-02;
+
+  svg {
+    fill: currentColor;
+  }
+}
+
+.citations {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-02;
+}
+
+.citation {
+  @include type.type-style('label-01');
+  display: flex;
+  gap: layout.$spacing-03;
+  color: $text-02;
+}
+
+.citationIndex {
+  color: var(--brand-01, #{$brand-01-fallback});
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.citationTitle {
+  font-weight: 600;
+  color: $text-01;
+}
+
+// The tool calls, down a rule so the list reads as a sequence.
+.steps {
+  margin: layout.$spacing-03 0 0;
+  padding: 0 0 0 layout.$spacing-05;
+  list-style: none;
+  border-inline-start: 2px solid $ui-03;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-03;
+}
+
+.step {
+  @include type.type-style('label-01');
+  color: $text-02;
+}
+
+.stepHead {
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+}
+
+.stepTool {
+  @include type.type-style('code-01');
+  color: var(--brand-01, #{$brand-01-fallback});
+}
+
+.stepToolError {
+  color: $support-error;
+}
+
+.stepTime {
+  color: $text-03;
+}
+
+.stepInput {
+  @include type.type-style('code-01');
+  color: $text-03;
+  margin: layout.$spacing-01 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stepOutput {
+  color: $text-02;
+  margin: layout.$spacing-01 0 0;
+  white-space: pre-wrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.stepOutputError {
+  color: $support-error;
+}
+
+:global(.cds--g100) {
+  .trace,
+  .steps {
+    border-color: $ui-03-dark;
+  }
+
+  .warning {
+    color: $support-warning;
+  }
+
+  .citation,
+  .step,
+  .stepOutput {
+    color: $text-02-dark;
+  }
+
+  .citationTitle {
+    color: #f4f4f4;
+  }
+
+  .sectionLabel,
+  .stepTime,
+  .stepInput {
+    color: $text-03-dark;
+  }
+}

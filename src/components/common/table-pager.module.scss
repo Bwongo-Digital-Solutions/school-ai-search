@@ -1,0 +1,23 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+.pager {
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-02;
+  flex-wrap: wrap;
+}
+
+.range,
+.position {
+  @include type.type-style('label-01');
+  color: $text-02;
+  white-space: nowrap;
+}
+
+// The range is the fact; the position is navigation. Keeping them apart lets the count sit with the
+// title while the controls stay on the right.
+.range {
+  margin-inline-end: layout.$spacing-03;
+}

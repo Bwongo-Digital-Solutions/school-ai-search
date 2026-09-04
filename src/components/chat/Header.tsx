@@ -1,39 +1,85 @@
 import React, { useState } from 'react';
 import {
-  Menu, Download, Settings, HelpCircle,
-  Moon, Sun, X, ChevronDown, LogOut, User, Shield, HardHat,
-  MessageSquare, Users, Clock, ClipboardList, UserCog, Wallet, Landmark,
-  ClipboardCheck, GraduationCap, NotebookPen, FileText, Loader2,
-  Mail, Printer
-} from 'lucide-react';
+  Header as CarbonHeader,
+  HeaderGlobalAction,
+  HeaderGlobalBar,
+  HeaderMenuButton,
+  HeaderName,
+  InlineLoading,
+  Modal,
+  OverflowMenu,
+  OverflowMenuItem,
+  SkipToContent,
+  Tag,
+  TextArea,
+  TextInput,
+  Theme,
+} from '@carbon/react';
+import {
+  Asleep,
+  Download,
+  Email,
+  Help,
+  Light,
+  User as UserIcon,
+  UserAdmin,
+} from '@carbon/react/icons';
 import { downloadFromUrl, printFromUrl } from '@/lib/download';
 import { callChatReport, teachingDocumentUrl } from '@/lib/teaching';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useAuth } from '@/contexts/AuthContext';
-import { getRoleLabel, getRoleShortLabel } from '@/lib/roles';
+import { useLive } from '@/contexts/LiveContext';
+import { useNotifications } from '@/contexts/NotificationContext';
+import { useTheme } from '@/components/theme-provider';
+import { getRoleLabel } from '@/lib/roles';
 import AuthModal from './AuthModal';
 import GlobalSearch from './GlobalSearch';
+import AppSideNav from './AppSideNav';
+import styles from './header.module.scss';
 
+/**
+ * The app header, on Carbon's UI Shell.
+ *
+ * The shell is the part of Carbon most worth adopting: it already knows what a product header is —
+ * a brand slot, a navigation row that collapses on small screens, a global action bar on the right.
+ * The sections, the export menu and the account menu stop being hand-rolled dropdowns with their
+ * own click-outside handling and become `HeaderNavigation`, `OverflowMenu` and `HeaderGlobalAction`.
+ *
+ * Flat, not raised: no gradients, no drop shadows, no pill corners. Separation comes from borders
+ * and from Carbon's layer tokens, which is how the design system distinguishes surfaces.
+ *
+ * Every role gate is unchanged — support staff still see only fees, administrators still see
+ * everything, and the same views are reachable from the account menu as before.
+ */
 const Header: React.FC = () => {
-  const { toggleSidebar, messages, activeView, setActiveView, currentConversationId } = useChatContext();
-  const { user, isAuthenticated, isAdmin, isSupportStaff, signOut } = useAuth();
+  const { messages, activeView, setActiveView, currentConversationId } = useChatContext();
+  const { user, isAuthenticated, isAdmin, isSupportStaff, isPrivileged, canSeeStudents, canSeeFinance, signOut } =
+    useAuth();
+  const { unread } = useLive();
+  const { theme, setTheme, isDark } = useTheme();
+  const { notify } = useNotifications();
+
   const [buildingReport, setBuildingReport] = useState(false);
-  const [showExportMenu, setShowExportMenu] = useState(false);
   const [showSendDialog, setShowSendDialog] = useState(false);
   const [sendTo, setSendTo] = useState('');
   const [sendNote, setSendNote] = useState('');
   const [sending, setSending] = useState(false);
-  const [showUserMenu, setShowUserMenu] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
-  // The two teaching tools share one nav entry: the bar already carries seven buttons, and adding
-  // them individually overflows on a laptop.
-  const [showTeachingMenu, setShowTeachingMenu] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [isDark, setIsDark] = useState(false);
+  // The rail is persistent on wide screens and overlays on narrow ones; this is only the small
+  // screen's open state, which the header's menu button drives.
+  const [navExpanded, setNavExpanded] = useState(false);
+
+
+  // The dropdowns these closed are now OverflowMenus, which close themselves. Kept as no-ops so the
+  // export and report handlers below are the same code they were, rather than a careful rewrite of
+  // logic that was working.
+  const setShowExportMenu = (_open: boolean) => undefined;
+  const setShowUserMenu = (_open: boolean) => undefined;
 
   const handleExport = (format: 'txt' | 'json' | 'csv') => {
     if (messages.length === 0) {
-      alert('No messages to export.');
+      notify.info('Nothing to export', 'Ask something first — this conversation is empty.');
       setShowExportMenu(false);
       return;
     }
@@ -76,7 +122,7 @@ const Header: React.FC = () => {
    */
   const handleReportDownload = async () => {
     if (!currentConversationId) {
-      alert('Send a message first — there is no saved conversation to report on yet.');
+      notify.info('Nothing to report on yet', 'Send a message first, so there is a saved conversation.');
       setShowExportMenu(false);
       return;
     }
@@ -89,7 +135,7 @@ const Header: React.FC = () => {
       );
       setShowExportMenu(false);
     } catch (err) {
-      alert(`Could not build the report: ${err instanceof Error ? err.message : 'Unexpected error'}`);
+      notify.error('Could not build the report', err instanceof Error ? err.message : 'Unexpected error');
     } finally {
       setBuildingReport(false);
     }
@@ -98,7 +144,7 @@ const Header: React.FC = () => {
   /** Same report, straight to the printer, without losing the conversation on screen. */
   const handleReportPrint = async () => {
     if (!currentConversationId) {
-      alert('Send a message first — there is no saved conversation to report on yet.');
+      notify.info('Nothing to report on yet', 'Send a message first, so there is a saved conversation.');
       setShowExportMenu(false);
       return;
     }
@@ -108,7 +154,7 @@ const Header: React.FC = () => {
       await printFromUrl(teachingDocumentUrl(`/api/chat-reports/${currentConversationId}.pdf`, user));
       setShowExportMenu(false);
     } catch (err) {
-      alert(`Could not print the report: ${err instanceof Error ? err.message : 'Unexpected error'}`);
+      notify.error('Could not print the report', err instanceof Error ? err.message : 'Unexpected error');
     } finally {
       setBuildingReport(false);
     }
@@ -116,7 +162,7 @@ const Header: React.FC = () => {
 
   const openSendDialog = () => {
     if (!currentConversationId) {
-      alert('Send a message first — there is no saved conversation to report on yet.');
+      notify.info('Nothing to report on yet', 'Send a message first, so there is a saved conversation.');
       setShowExportMenu(false);
       return;
     }
@@ -137,18 +183,17 @@ const Header: React.FC = () => {
         note: sendNote,
       }, user);
       setShowSendDialog(false);
-      alert(`Report sent to ${sendTo}.`);
+      notify.success('Report sent', `Delivered to ${sendTo}.`);
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Could not send the report.');
+      notify.error('Could not send the report', err instanceof Error ? err.message : undefined);
     } finally {
       setSending(false);
     }
   };
 
-  const toggleTheme = () => {
-    setIsDark(!isDark);
-    document.documentElement.classList.toggle('dark');
-  };
+  // What the theme control currently reads as. "System" is a real choice, not the absence of one,
+  // so it says so rather than showing whichever of light or dark it happens to resolve to.
+  const themeLabel = theme === 'system' ? 'System' : theme === 'dark' ? 'Dark' : 'Light';
 
   const handleSignOut = () => {
     signOut();
@@ -156,506 +201,195 @@ const Header: React.FC = () => {
     setActiveView('chat');
   };
 
-  const getUserInitials = () => {
-    if (!user) return '?';
-    const parts = user.display_name.split(' ');
-    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-    return user.display_name.substring(0, 2).toUpperCase();
-  };
+  const go = (view: Parameters<typeof setActiveView>[0]) => () => setActiveView(view);
 
   return (
     <>
-      <header className="h-14 bg-white/80 dark:bg-gray-900/80 backdrop-blur-xl border-b border-gray-100 dark:border-gray-800 flex items-center justify-between px-4 z-20 relative">
-        {/* Left */}
-        <div className="flex items-center gap-3">
-          <button
-            onClick={toggleSidebar}
-            className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 transition-colors"
-            title="Toggle sidebar"
-          >
-            <Menu className="w-5 h-5" />
-          </button>
+      <Theme theme="g100">
+        <CarbonHeader aria-label="e-School" className={styles.header}>
+          <SkipToContent />
+          <HeaderMenuButton
+            aria-label={navExpanded ? 'Close navigation' : 'Open navigation'}
+            onClick={() => setNavExpanded((open) => !open)}
+            isActive={navExpanded}
+            isCollapsible
+          />
+          <HeaderName prefix="">SchoolBot&nbsp;AI</HeaderName>
 
-          <div className="hidden sm:flex items-center gap-2">
-            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-indigo-600 to-purple-700 flex items-center justify-center">
-              <svg className="w-3.5 h-3.5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M12 14l9-5-9-5-9 5 9 5z" />
-                <path d="M12 14l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14z" />
-              </svg>
-            </div>
-            <div>
-              <h1 className="text-sm font-bold text-gray-800 dark:text-white leading-none">SchoolBot AI</h1>
-              <p className="text-[10px] text-gray-400 leading-none mt-0.5">Student Information Assistant</p>
-            </div>
-          </div>
+          <HeaderGlobalBar>
+            {isAuthenticated && <GlobalSearch />}
 
-          {/* View Toggle */}
-          <div className="flex items-center bg-gray-100 dark:bg-gray-800 rounded-lg p-0.5 ml-2">
-            {!isSupportStaff && (
-              <button
-                onClick={() => setActiveView('chat')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                  activeView === 'chat'
-                    ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
-                    : 'text-gray-500 hover:text-gray-700'
-                }`}
+            {isAuthenticated && !isSupportStaff && (
+              <HeaderGlobalAction
+                aria-label={unread > 0 ? `Messages, ${unread} unread` : 'Messages'}
+                onClick={go('messages')}
+                isActive={activeView === 'messages'}
+                tooltipAlignment="end"
               >
-                <MessageSquare className="w-3.5 h-3.5" /> Chat
-              </button>
-            )}
-            {!isSupportStaff && (
-              <button
-                onClick={() => setActiveView('students')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                  activeView === 'students'
-                    ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
-                    : 'text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                <Users className="w-3.5 h-3.5" /> Students
-              </button>
-            )}
-            {!isSupportStaff && (
-              <button
-                onClick={() => setActiveView('records')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                  activeView === 'records'
-                    ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
-                    : 'text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                <ClipboardList className="w-3.5 h-3.5" /> Records
-              </button>
-            )}
-            {!isSupportStaff && (
-              <div className="relative">
-                <button
-                  onClick={() => setShowTeachingMenu(prev => !prev)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                    activeView === 'lessons' || activeView === 'examiner'
-                      ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
-                      : 'text-gray-500 hover:text-gray-700'
-                  }`}
-                >
-                  <GraduationCap className="w-3.5 h-3.5" /> Teaching
-                  <ChevronDown className="w-3 h-3" />
-                </button>
-
-                {showTeachingMenu && (
-                  <>
-                    <div className="fixed inset-0 z-40" onClick={() => setShowTeachingMenu(false)} />
-                    <div className="absolute left-0 top-full mt-1 w-56 bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-100 dark:border-gray-700 py-1 z-50">
-                      <button
-                        onClick={() => { setActiveView('lessons'); setShowTeachingMenu(false); }}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
-                      >
-                        <NotebookPen className="w-3.5 h-3.5" /> Lesson Planner
-                      </button>
-                      <button
-                        onClick={() => { setActiveView('examiner'); setShowTeachingMenu(false); }}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
-                      >
-                        <ClipboardCheck className="w-3.5 h-3.5" /> Digital Examiner
-                      </button>
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
-            <button
-              onClick={() => setActiveView('fees')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                activeView === 'fees'
-                  ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
-                  : 'text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              <Wallet className="w-3.5 h-3.5" /> Fees
-            </button>
-            {isAdmin && (
-              <button
-                onClick={() => setActiveView('finance')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                  activeView === 'finance'
-                    ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
-                    : 'text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                <Landmark className="w-3.5 h-3.5" /> Finance
-              </button>
-            )}
-            {isAdmin && (
-              <button
-                onClick={() => setActiveView('users')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                  activeView === 'users'
-                    ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
-                    : 'text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                <UserCog className="w-3.5 h-3.5" /> Staff
-              </button>
-            )}
-            {isAdmin && (
-              <button
-                onClick={() => setActiveView('audit')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                  activeView === 'audit'
-                    ? 'bg-white dark:bg-gray-700 text-indigo-600 shadow-sm'
-                    : 'text-gray-500 hover:text-gray-700'
-                }`}
-
-              >
-                <Clock className="w-3.5 h-3.5" /> Audit
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Center - Status */}
-        <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-emerald-50 dark:bg-emerald-900/20 rounded-full border border-emerald-200 dark:border-emerald-800">
-          <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" />
-          <span className="text-[11px] text-emerald-600 dark:text-emerald-400 font-medium">
-            Connected to Student Database
-          </span>
-        </div>
-
-        {/* Right */}
-        <div className="flex items-center gap-1">
-          {isAuthenticated && <GlobalSearch />}
-
-          {/* Export */}
-          <div className="relative">
-            <button
-              onClick={() => setShowExportMenu(!showExportMenu)}
-              className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 transition-colors"
-              title="Export conversation"
-            >
-              <Download className="w-4 h-4" />
-            </button>
-            {showExportMenu && (
-              <>
-                <div className="fixed inset-0 z-40" onClick={() => setShowExportMenu(false)} />
-                <div className="absolute right-0 top-full mt-1 w-48 bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-100 dark:border-gray-700 py-1 z-50">
-                  <p className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Export As</p>
-                  <button
-                    onClick={handleReportDownload}
-                    disabled={buildingReport}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
-                  >
-                    {buildingReport ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileText className="w-3.5 h-3.5 text-indigo-500" />}
-                    {buildingReport ? 'Building report…' : 'Printable Report (.pdf)'}
-                  </button>
-                  <button
-                    onClick={handleReportPrint}
-                    disabled={buildingReport}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
-                  >
-                    <Printer className="w-3.5 h-3.5 text-indigo-500" /> Print Report
-                  </button>
-                  <button
-                    onClick={openSendDialog}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
-                  >
-                    <Mail className="w-3.5 h-3.5 text-indigo-500" /> Email Report…
-                  </button>
-                  <div className="my-1 border-t border-gray-100 dark:border-gray-700" />
-                  <button onClick={() => handleExport('txt')} className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">
-                    <Download className="w-3.5 h-3.5" /> Text File (.txt)
-                  </button>
-                  <button onClick={() => handleExport('json')} className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">
-                    <Download className="w-3.5 h-3.5" /> JSON (.json)
-                  </button>
-                  <button onClick={() => handleExport('csv')} className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">
-                    <Download className="w-3.5 h-3.5" /> CSV (.csv)
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-
-          {/* Theme toggle */}
-          <button
-            onClick={toggleTheme}
-            className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 transition-colors"
-            title="Toggle theme"
-          >
-            {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-          </button>
-
-          {/* Help */}
-          <div className="relative">
-            <button
-              onClick={() => setShowHelp(!showHelp)}
-              className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 transition-colors"
-              title="Help"
-            >
-              <HelpCircle className="w-4 h-4" />
-            </button>
-            {showHelp && (
-              <>
-                <div className="fixed inset-0 z-40" onClick={() => setShowHelp(false)} />
-                <div className="absolute right-0 top-full mt-1 w-72 bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-100 dark:border-gray-700 p-4 z-50">
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="font-semibold text-sm text-gray-800 dark:text-white">How to Use SchoolBot</h3>
-                    <button onClick={() => setShowHelp(false)} className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700">
-                      <X className="w-3.5 h-3.5 text-gray-400" />
-                    </button>
-                  </div>
-                  <div className="space-y-2.5 text-xs text-gray-600 dark:text-gray-400">
-                    {isSupportStaff ? (
-                      <div className="flex gap-2">
-                        <span className="w-5 h-5 rounded bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center flex-shrink-0 text-indigo-600 font-bold text-[10px]">1</span>
-                        <span>Your account shows school fees payment status only. Ask an administrator for anything else about a student.</span>
-                      </div>
-                    ) : (
-                      <>
-                    <div className="flex gap-2">
-                      <span className="w-5 h-5 rounded bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center flex-shrink-0 text-indigo-600 font-bold text-[10px]">1</span>
-                      <span>Type any question about students in the chat box</span>
-                    </div>
-                    <div className="flex gap-2">
-                      <span className="w-5 h-5 rounded bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center flex-shrink-0 text-indigo-600 font-bold text-[10px]">2</span>
-                      <span>Use voice recording for hands-free queries</span>
-                    </div>
-                    <div className="flex gap-2">
-                      <span className="w-5 h-5 rounded bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center flex-shrink-0 text-indigo-600 font-bold text-[10px]">3</span>
-                      <span>Upload images of documents for AI analysis</span>
-                    </div>
-                    <div className="flex gap-2">
-                      <span className="w-5 h-5 rounded bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center flex-shrink-0 text-indigo-600 font-bold text-[10px]">4</span>
-                      <span>Switch to Students tab to manage records directly</span>
-                    </div>
-                    <div className="flex gap-2">
-                      <span className="w-5 h-5 rounded bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center flex-shrink-0 text-indigo-600 font-bold text-[10px]">5</span>
-                      <span>Admins can use Staff to assign administrator, teacher, and support staff roles</span>
-                    </div>
-                      </>
-                    )}
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-
-          {/* User avatar / Auth button */}
-          <div className="relative ml-1">
-            {isAuthenticated && user ? (
-              <>
-                <button
-                  onClick={() => setShowUserMenu(!showUserMenu)}
-                  className="flex items-center gap-2 p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
-                >
-                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
-                    isAdmin
-                      ? 'bg-gradient-to-br from-purple-500 to-indigo-600'
-                      : isSupportStaff
-                        ? 'bg-gradient-to-br from-emerald-500 to-teal-600'
-                        : 'bg-gradient-to-br from-blue-500 to-cyan-600'
-                  }`}>
-                    <span className="text-white text-xs font-bold">{getUserInitials()}</span>
-                  </div>
-                  <div className="hidden sm:block text-left">
-                    <p className="text-xs font-medium text-gray-800 dark:text-white leading-none">
-                      {user.display_name}
-                    </p>
-                    <p className="text-[10px] text-gray-400 leading-none mt-0.5 flex items-center gap-1">
-                      {isAdmin ? (
-                        <span className="flex items-center gap-0.5">
-                          <Shield className="w-2.5 h-2.5 text-purple-500" /> Admin
-                        </span>
-                      ) : (
-                        <span>{getRoleShortLabel(user.role)}</span>
-                      )}
-                    </p>
-                  </div>
-                  <ChevronDown className="w-3 h-3 text-gray-400 hidden sm:block" />
-                </button>
-                {showUserMenu && (
-                  <>
-                    <div className="fixed inset-0 z-40" onClick={() => setShowUserMenu(false)} />
-                    <div className="absolute right-0 top-full mt-1 w-56 bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-100 dark:border-gray-700 py-1 z-50">
-                      <div className="px-3 py-2.5 border-b border-gray-100 dark:border-gray-700">
-                        <p className="text-sm font-medium text-gray-800 dark:text-white">{user.display_name}</p>
-                        <p className="text-[11px] text-gray-400">{user.auth_email}</p>
-                        <div className="mt-1.5">
-                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium ${
-                            isAdmin
-                              ? 'bg-purple-100 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400'
-                              : isSupportStaff
-                                ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400'
-                                : 'bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400'
-                          }`}>
-                            {isAdmin ? <Shield className="w-2.5 h-2.5" /> : isSupportStaff ? <HardHat className="w-2.5 h-2.5" /> : <User className="w-2.5 h-2.5" />}
-                            {getRoleLabel(user.role)}
-                          </span>
-                        </div>
-                      </div>
-                      {!isSupportStaff && (
-                        <button
-                          onClick={() => { setActiveView('students'); setShowUserMenu(false); }}
-                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
-                        >
-                          <Users className="w-3.5 h-3.5" /> Student Management
-                        </button>
-                      )}
-                      {!isSupportStaff && (
-                        <button
-                          onClick={() => { setActiveView('records'); setShowUserMenu(false); }}
-                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
-                        >
-                          <ClipboardList className="w-3.5 h-3.5" /> Student Records
-                        </button>
-                      )}
-                      {!isSupportStaff && (
-                        <button
-                          onClick={() => { setActiveView('lessons'); setShowUserMenu(false); }}
-                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
-                        >
-                          <NotebookPen className="w-3.5 h-3.5" /> Lesson Planner
-                        </button>
-                      )}
-                      {!isSupportStaff && (
-                        <button
-                          onClick={() => { setActiveView('examiner'); setShowUserMenu(false); }}
-                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
-                        >
-                          <ClipboardCheck className="w-3.5 h-3.5" /> Digital Examiner
-                        </button>
-                      )}
-                      <button
-                        onClick={() => { setActiveView('fees'); setShowUserMenu(false); }}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
-                      >
-                        <Wallet className="w-3.5 h-3.5" /> School Fees Status
-                      </button>
-                      {isAdmin && (
-                        <button
-                          onClick={() => { setActiveView('finance'); setShowUserMenu(false); }}
-                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
-                        >
-                          <Landmark className="w-3.5 h-3.5" /> Fee Management
-                        </button>
-                      )}
-                      {isAdmin && (
-                        <button
-                          onClick={() => { setActiveView('users'); setShowUserMenu(false); }}
-                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
-                        >
-                          <UserCog className="w-3.5 h-3.5" /> Staff Access
-                        </button>
-                      )}
-                      {isAdmin && (
-                        <button
-                          onClick={() => { setActiveView('audit'); setShowUserMenu(false); }}
-
-                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
-                        >
-                          <Clock className="w-3.5 h-3.5" /> Audit Log
-                        </button>
-                      )}
-                      {isAdmin && (
-                        <button
-                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
-                          onClick={() => { setActiveView('settings'); setShowUserMenu(false); }}
-                        >
-                          <Settings className="w-3.5 h-3.5" /> Settings
-                        </button>
-                      )}
-                      <div className="border-t border-gray-100 dark:border-gray-700 mt-1 pt-1">
-                        <button
-                          onClick={handleSignOut}
-                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20"
-                        >
-                          <LogOut className="w-3.5 h-3.5" /> Sign Out
-                        </button>
-                      </div>
-                    </div>
-                  </>
-                )}
-              </>
-            ) : (
-              <button
-                onClick={() => setShowAuthModal(true)}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 text-white text-xs font-medium hover:shadow-lg hover:shadow-indigo-200 dark:hover:shadow-indigo-900/30 transition-all"
-              >
-                <User className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Sign In</span>
-              </button>
-            )}
-          </div>
-        </div>
-      </header>
-
-      {/* Email the report */}
-      {showSendDialog && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-md rounded-xl bg-white dark:bg-gray-800 shadow-xl border border-gray-100 dark:border-gray-700">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 dark:border-gray-700">
-              <h3 className="text-sm font-semibold text-gray-800 dark:text-white flex items-center gap-2">
-                <Mail className="w-4 h-4 text-indigo-500" /> Email this report
-              </h3>
-              <button
-                onClick={() => setShowSendDialog(false)}
-                className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
-                aria-label="Close"
-              >
-                <X className="w-3.5 h-3.5 text-gray-400" />
-              </button>
-            </div>
-
-            <div className="px-4 py-4 space-y-3">
-              <label className="block">
-                <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Send to</span>
-                <input
-                  type="email"
-                  value={sendTo}
-                  onChange={event => setSendTo(event.target.value)}
-                  placeholder="name@school.ac.ug"
-                  className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
-                />
-              </label>
-
-              <label className="block">
-                <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">
-                  Message (optional)
+                <span className={styles.badgeWrap}>
+                  <Email size={20} />
+                  {unread > 0 && <span className={styles.badge}>{unread > 99 ? '99+' : unread}</span>}
                 </span>
-                <textarea
-                  value={sendNote}
-                  onChange={event => setSendNote(event.target.value)}
-                  rows={3}
-                  placeholder="A short note to go above the report…"
-                  className="w-full resize-none bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+              </HeaderGlobalAction>
+            )}
+
+            <OverflowMenu
+              aria-label="Export conversation"
+              renderIcon={Download}
+              flipped
+              size="lg"
+              menuOptionsClass={styles.menu}
+            >
+              <OverflowMenuItem
+                itemText={buildingReport ? 'Building report…' : 'Printable report (.pdf)'}
+                onClick={handleReportDownload}
+                disabled={buildingReport}
+              />
+              <OverflowMenuItem itemText="Print report" onClick={handleReportPrint} disabled={buildingReport} />
+              <OverflowMenuItem itemText="Email report…" onClick={openSendDialog} hasDivider />
+              <OverflowMenuItem itemText="Text file (.txt)" onClick={() => handleExport('txt')} hasDivider />
+              <OverflowMenuItem itemText="JSON (.json)" onClick={() => handleExport('json')} />
+              <OverflowMenuItem itemText="CSV (.csv)" onClick={() => handleExport('csv')} />
+            </OverflowMenu>
+
+            {/* Three choices, not a toggle. "System" is what most people want and what the app
+                defaults to, but a toggle can only express the two it resolves to — so someone who
+                wanted dark on a light laptop had no way to say so, and no way back afterwards. */}
+            <OverflowMenu
+              aria-label={`Appearance: ${themeLabel}`}
+              renderIcon={isDark ? Light : Asleep}
+              size="lg"
+              flipped
+              menuOptionsClass={styles.themeMenu}
+            >
+              {/* Carbon's OverflowMenuItem has no selected state, so the current choice is marked
+                  in the text. Without it the menu cannot say whether "System" is in force. */}
+              {(['system', 'light', 'dark'] as const).map((option) => (
+                <OverflowMenuItem
+                  key={option}
+                  itemText={`${option === 'system' ? 'System' : option === 'light' ? 'Light' : 'Dark'}${
+                    theme === option ? '  ✓' : ''
+                  }`}
+                  onClick={() => setTheme(option)}
                 />
-              </label>
+              ))}
+            </OverflowMenu>
 
-              <p className="text-[11px] text-gray-400">
-                The report is attached as a PDF, so the recipient does not need an account to read it. It
-                contains whatever student data was discussed — check the address before sending.
-              </p>
-            </div>
+            <HeaderGlobalAction
+              aria-label="Help"
+              onClick={() => setShowHelp(true)}
+              isActive={showHelp}
+              tooltipAlignment="end"
+            >
+              <Help size={20} />
+            </HeaderGlobalAction>
 
-            <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-100 dark:border-gray-700">
-              <button
-                onClick={() => setShowSendDialog(false)}
-                className="px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
+            {isAuthenticated && user ? (
+              <OverflowMenu
+                aria-label={`Account: ${user.display_name}`}
+                renderIcon={isAdmin ? UserAdmin : UserIcon}
+                flipped
+                size="lg"
+                menuOptionsClass={styles.menu}
               >
-                Cancel
-              </button>
-              <button
-                onClick={handleReportSend}
-                disabled={sending || !sendTo.trim()}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 text-white text-sm font-medium hover:shadow-lg transition-all disabled:opacity-50"
+                <OverflowMenuItem itemText={`${user.display_name} — ${getRoleLabel(user.role)}`} disabled />
+                {canSeeStudents && (
+                  <OverflowMenuItem itemText="Student Management" onClick={go('students')} hasDivider />
+                )}
+                {canSeeStudents && <OverflowMenuItem itemText="Student Records" onClick={go('records')} />}
+                {!isSupportStaff && <OverflowMenuItem itemText="Messages" onClick={go('messages')} />}
+                {canSeeStudents && <OverflowMenuItem itemText="Lesson Planner" onClick={go('lessons')} />}
+                {canSeeStudents && <OverflowMenuItem itemText="Digital Examiner" onClick={go('examiner')} />}
+                <OverflowMenuItem itemText="School Fees Status" onClick={go('fees')} />
+                {canSeeFinance && <OverflowMenuItem itemText="Fee Management" onClick={go('finance')} />}
+                {isPrivileged && <OverflowMenuItem itemText="School Data" onClick={go('data')} hasDivider />}
+                {isPrivileged && <OverflowMenuItem itemText="Monitoring" onClick={go('monitoring')} />}
+                {isPrivileged && <OverflowMenuItem itemText="Audit Log" onClick={go('audit')} />}
+                {isAdmin && <OverflowMenuItem itemText="Staff Access" onClick={go('users')} hasDivider />}
+                {isAdmin && <OverflowMenuItem itemText="Settings" onClick={go('settings')} />}
+                <OverflowMenuItem itemText="Sign out" onClick={handleSignOut} isDelete hasDivider />
+              </OverflowMenu>
+            ) : (
+              <HeaderGlobalAction
+                aria-label="Sign in"
+                onClick={() => setShowAuthModal(true)}
+                tooltipAlignment="end"
               >
-                {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
-                {sending ? 'Sending…' : 'Send report'}
-              </button>
-            </div>
-          </div>
+                <UserIcon size={20} />
+              </HeaderGlobalAction>
+            )}
+          </HeaderGlobalBar>
+
+          {/* The bar above is deliberately dark — it carries the school's colour and white text.
+              The rail is not: OpenMRS's is a light surface, and this file's stylesheet is written
+              for one, down to the near-black text on the current item. So it steps back out of the
+              header's g100 and follows whichever theme the app is actually in. */}
+          <Theme theme={isDark ? 'g100' : 'g10'} style={{ display: 'contents' }}>
+            <AppSideNav expanded={navExpanded} onOverlayClick={() => setNavExpanded(false)} />
+          </Theme>
+        </CarbonHeader>
+      </Theme>
+
+      <Modal
+        open={showHelp}
+        modalHeading="How to use SchoolBot"
+        passiveModal
+        onRequestClose={() => setShowHelp(false)}
+        size="sm"
+      >
+        <ol className={styles.helpList}>
+          {(isSupportStaff
+            ? [
+                'Your account shows school fees payment status only. Ask an administrator for anything else about a student.',
+              ]
+            : [
+                'Type any question about students in the chat box.',
+                'Use voice recording for hands-free queries.',
+                'Upload images of documents for AI analysis.',
+                'Switch to Students to manage records directly.',
+                'Administrators can use Staff to assign administrator, teacher and support staff roles.',
+              ]
+          ).map((step) => (
+            <li key={step}>{step}</li>
+          ))}
+        </ol>
+      </Modal>
+
+      <Modal
+        open={showSendDialog}
+        modalHeading="Email this report"
+        primaryButtonText={sending ? 'Sending…' : 'Send report'}
+        secondaryButtonText="Cancel"
+        primaryButtonDisabled={sending || !sendTo.trim()}
+        onRequestSubmit={handleReportSend}
+        onRequestClose={() => setShowSendDialog(false)}
+        size="sm"
+      >
+        <div className={styles.sendFields}>
+          <TextInput
+            id="report-to"
+            type="email"
+            labelText="Send to"
+            placeholder="name@school.ac.ug"
+            value={sendTo}
+            onChange={(event) => setSendTo(event.target.value)}
+          />
+          <TextArea
+            id="report-note"
+            labelText="Message (optional)"
+            placeholder="A short note to go above the report…"
+            rows={3}
+            value={sendNote}
+            onChange={(event) => setSendNote(event.target.value)}
+          />
+          <p className={styles.fieldNote}>
+            The report is attached as a PDF, so the recipient does not need an account to read it. It
+            contains whatever student data was discussed — check the address before sending.
+          </p>
+          {sending && <InlineLoading description="Sending…" />}
         </div>
-      )}
+      </Modal>
 
-      {/* Auth Modal */}
       <AuthModal isOpen={showAuthModal} onClose={() => setShowAuthModal(false)} />
     </>
   );

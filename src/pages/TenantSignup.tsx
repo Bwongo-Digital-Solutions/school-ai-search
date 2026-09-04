@@ -1,22 +1,47 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, CheckCircle2, GraduationCap, Loader2, Phone, Landmark as Bank, Building2 } from 'lucide-react';
+import { Button, InlineLoading, InlineNotification, TextInput } from '@carbon/react';
+import {
+  Finance,
+  Building,
+  CheckmarkFilled,
+  Education,
+  Mobile,
+  WarningFilled,
+} from '@carbon/react/icons';
 import { callProvision, type AvailabilityResult, type SignupResult, type TenantStatus } from '@/lib/provision';
+import styles from './public-pages.module.scss';
 
 const APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0';
 
-// The root domain schools get a subdomain under. Set VITE_TENANT_ROOT_DOMAIN in production.
-const ROOT_DOMAIN = (import.meta.env.VITE_TENANT_ROOT_DOMAIN as string) || 'eschool.app';
+/**
+ * The root domain schools get a subdomain under.
+ *
+ * VITE_TENANT_ROOT_DOMAIN is a build-time substitution, so a value baked into an old bundle would
+ * go on advertising the wrong domain long after the deployment moved. The browser's own hostname is
+ * the more trustworthy source, so it is used whenever the page is served from a real domain, and
+ * the build-time value only fills in for localhost.
+ */
+const rootDomainFromHost = () => {
+  if (typeof window === 'undefined') return '';
+
+  const hostname = window.location.hostname;
+  if (!hostname || hostname === 'localhost' || /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname)) return '';
+
+  const parts = hostname.split('.');
+  // apply.eschool.ink -> eschool.ink; eschool.ink -> eschool.ink.
+  return parts.length > 2 ? parts.slice(1).join('.') : hostname;
+};
+
+const ROOT_DOMAIN =
+  rootDomainFromHost() || (import.meta.env.VITE_TENANT_ROOT_DOMAIN as string) || 'eschool.ink';
 
 const PROVIDERS = [
-  { value: 'mtn_momo', label: 'MTN MoMo', icon: Phone },
-  { value: 'airtel_money', label: 'Airtel Money', icon: Phone },
-  { value: 'bank', label: 'Bank', icon: Bank },
+  { value: 'mtn_momo', label: 'MTN MoMo', icon: Mobile },
+  { value: 'airtel_money', label: 'Airtel Money', icon: Mobile },
+  { value: 'bank', label: 'Bank', icon: Finance },
 ];
 
 type Stage = 'form' | 'pending' | 'active';
-
-const inputClass =
-  'w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-indigo-400';
 
 const TenantSignup: React.FC = () => {
   const [stage, setStage] = useState<Stage>('form');
@@ -99,69 +124,87 @@ const TenantSignup: React.FC = () => {
   }, [stage, poll]);
 
   return (
-    <div className="min-h-screen flex flex-col bg-gradient-to-b from-indigo-50 to-white dark:from-gray-900 dark:to-gray-950">
-      <div className="flex-1 flex items-center justify-center p-4">
-        <div className="w-full max-w-lg">
-          <div className="flex items-center gap-2 justify-center mb-6">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-600 to-purple-600 flex items-center justify-center">
-              <GraduationCap className="w-5 h-5 text-white" />
-            </div>
-            <span className="text-xl font-bold text-gray-800 dark:text-white">e-School</span>
+    <div className={styles.page}>
+      <div className={styles.centred}>
+        <div>
+          <div className={styles.brand}>
+            <span className={styles.brandMark}>
+              <Education size={20} />
+            </span>
+            <span className={styles.brandName}>e-School</span>
           </div>
 
-          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700 overflow-hidden">
+          <div className={styles.card}>
             {stage === 'form' && (
-              <div className="p-6 space-y-4">
+              <div className={styles.section}>
                 <div>
-                  <h1 className="text-lg font-bold text-gray-800 dark:text-white">Start your school</h1>
-                  <p className="text-sm text-gray-500 dark:text-gray-400">Create your school's private, subscription-based space.</p>
+                  <h1 className={styles.title}>Start your school</h1>
+                  <p className={styles.lede}>
+                    Create your school's own space, on its own address.
+                  </p>
                 </div>
 
-                <label className="block">
-                  <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">School name</span>
-                  <input value={schoolName} onChange={e => setSchoolName(e.target.value)} placeholder="Kampala High School" className={inputClass} />
-                </label>
-
-                <label className="block">
-                  <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Choose your web address</span>
-                  <div className="flex items-center gap-1">
-                    <input
-                      value={subdomain}
-                      onChange={e => setSubdomain(e.target.value.replace(/[^a-zA-Z0-9-]/g, '').toLowerCase())}
-                      placeholder="kampala-high"
-                      className={`${inputClass} rounded-r-none`}
-                    />
-                    <span className="px-3 py-2.5 text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 border border-l-0 border-gray-200 dark:border-gray-600 rounded-lg rounded-l-none whitespace-nowrap">
-                      .{ROOT_DOMAIN}
-                    </span>
-                  </div>
-                  <div className="h-4 mt-1 text-xs">
-                    {checking && <span className="text-gray-400 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> checking…</span>}
-                    {!checking && availability?.available && <span className="text-emerald-600 flex items-center gap-1"><CheckCircle2 className="w-3 h-3" /> {fullHost} is available</span>}
-                    {!checking && availability && !availability.available && <span className="text-red-500 flex items-center gap-1"><AlertCircle className="w-3 h-3" /> {availability.reason}</span>}
-                  </div>
-                </label>
-
-                <label className="block">
-                  <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Admin email</span>
-                  <input type="email" value={contactEmail} onChange={e => setContactEmail(e.target.value)} placeholder="admin@school.ac.ug" className={inputClass} />
-                </label>
+                <TextInput
+                  id="school-name"
+                  labelText="School name"
+                  placeholder="Kampala High School"
+                  value={schoolName}
+                  onChange={e => setSchoolName(e.target.value)}
+                />
 
                 <div>
-                  <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Payment method</span>
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className={styles.hostRow}>
+                    <TextInput
+                      id="subdomain"
+                      className={styles.hostField}
+                      labelText="Choose your web address"
+                      placeholder="kampala-high"
+                      value={subdomain}
+                      onChange={e =>
+                        setSubdomain(e.target.value.replace(/[^a-zA-Z0-9-]/g, '').toLowerCase())
+                      }
+                    />
+                    <span className={styles.hostSuffix}>.{ROOT_DOMAIN}</span>
+                  </div>
+
+                  {/* Availability, live. Checked as they type rather than on submit, because a taken
+                      name is the one thing that will send them back to this field. */}
+                  <p className={styles.availability}>
+                    {checking && <span className={styles.checking}>Checking…</span>}
+                    {!checking && availability?.available && (
+                      <span className={styles.available}>
+                        <CheckmarkFilled size={16} /> {fullHost} is available
+                      </span>
+                    )}
+                    {!checking && availability && !availability.available && (
+                      <span className={styles.unavailable}>
+                        <WarningFilled size={16} /> {availability.reason}
+                      </span>
+                    )}
+                  </p>
+                </div>
+
+                <TextInput
+                  id="contact-email"
+                  type="email"
+                  labelText="Administrator email"
+                  placeholder="admin@school.ac.ug"
+                  value={contactEmail}
+                  onChange={e => setContactEmail(e.target.value)}
+                />
+
+                <div>
+                  <p className={styles.note}>How you will pay</p>
+                  <div className={styles.providers}>
                     {PROVIDERS.map(({ value, label, icon: Icon }) => (
                       <button
                         key={value}
                         type="button"
                         onClick={() => setProvider(value)}
-                        className={`flex flex-col items-center gap-1 py-2.5 rounded-lg border text-xs font-medium transition-colors ${
-                          provider === value
-                            ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400'
-                            : 'border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-300'
-                        }`}
+                        className={`${styles.provider} ${provider === value ? styles.providerChosen : ''}`}
+                        aria-pressed={provider === value}
                       >
-                        <Icon className="w-4 h-4" />
+                        <Icon size={20} />
                         {label}
                       </button>
                     ))}
@@ -169,67 +212,79 @@ const TenantSignup: React.FC = () => {
                 </div>
 
                 {provider === 'bank' ? (
-                  <label className="block">
-                    <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Bank code</span>
-                    <input value={bankCode} onChange={e => setBankCode(e.target.value)} placeholder="e.g. STANBIC" className={inputClass} />
-                  </label>
+                  <TextInput
+                    id="bank-code"
+                    labelText="Bank code"
+                    placeholder="e.g. STANBIC"
+                    value={bankCode}
+                    onChange={e => setBankCode(e.target.value)}
+                  />
                 ) : (
-                  <label className="block">
-                    <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Mobile money number</span>
-                    <input value={phoneNumber} onChange={e => setPhoneNumber(e.target.value)} placeholder="+256 7XX XXX XXX" className={inputClass} />
-                  </label>
+                  <TextInput
+                    id="phone"
+                    labelText="Mobile money number"
+                    placeholder="+256 7XX XXX XXX"
+                    value={phoneNumber}
+                    onChange={e => setPhoneNumber(e.target.value)}
+                  />
                 )}
 
                 {error && (
-                  <div className="flex items-start gap-2 text-sm text-red-600 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg px-3 py-2">
-                    <AlertCircle className="w-4 h-4 mt-0.5" /> {error}
-                  </div>
+                  <InlineNotification
+                    kind="error"
+                    title="Could not continue"
+                    subtitle={error}
+                    onCloseButtonClick={() => setError('')}
+                    lowContrast
+                  />
                 )}
 
-                <button
+                <Button
+                  kind="primary"
+                  renderIcon={Building}
                   onClick={submit}
                   disabled={!canSubmit || submitting}
-                  className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 text-white text-sm font-medium hover:shadow-lg transition-all disabled:opacity-50"
                 >
-                  {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Building2 className="w-4 h-4" />}
                   {submitting ? 'Starting…' : 'Continue to payment'}
-                </button>
+                </Button>
               </div>
             )}
 
             {stage === 'pending' && signup && (
-              <div className="p-6 text-center space-y-3">
-                <Loader2 className="w-10 h-10 text-indigo-500 mx-auto animate-spin" />
-                <h1 className="text-lg font-bold text-gray-800 dark:text-white">Complete your payment</h1>
-                <p className="text-sm text-gray-500 dark:text-gray-400">{signup.instructions || 'Approve the payment prompt on your phone.'}</p>
-                <div className="text-xs text-gray-400 bg-gray-50 dark:bg-gray-700/40 rounded-lg px-3 py-2">
-                  Reference: <span className="font-mono">{signup.reference}</span>
+              <div className={`${styles.section} ${styles.centredText}`}>
+                <div className={styles.spinner}>
+                  <InlineLoading description="Waiting for your payment…" />
                 </div>
-                <p className="text-xs text-gray-400">
-                  This page activates automatically once your payment is confirmed. Your school will be at{' '}
-                  <span className="font-medium text-gray-600 dark:text-gray-300">{signup.subdomain}.{ROOT_DOMAIN}</span>.
+                <h1 className={styles.title}>Complete your payment</h1>
+                <p className={styles.lede}>
+                  {signup.instructions || 'Approve the payment prompt on your phone.'}
+                </p>
+                <p className={styles.reference}>Reference: {signup.reference}</p>
+                <p className={styles.note}>
+                  This page opens your school automatically once the payment is confirmed. It will be at{' '}
+                  {signup.subdomain}.{ROOT_DOMAIN}.
                 </p>
               </div>
             )}
 
             {stage === 'active' && signup && (
-              <div className="p-6 text-center space-y-3">
-                <CheckCircle2 className="w-12 h-12 text-emerald-500 mx-auto" />
-                <h1 className="text-lg font-bold text-gray-800 dark:text-white">Your school is ready!</h1>
-                <p className="text-sm text-gray-500 dark:text-gray-400">Open your school and create the first (admin) account.</p>
-                <a
-                  href={`https://${signup.subdomain}.${ROOT_DOMAIN}`}
-                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 text-white text-sm font-medium hover:shadow-lg"
-                >
-                  Go to {signup.subdomain}.{ROOT_DOMAIN}
-                </a>
+              <div className={`${styles.section} ${styles.centredText}`}>
+                <h1 className={styles.title}>Your school is ready</h1>
+                <p className={styles.lede}>
+                  Open it and create the first account — that one becomes the administrator.
+                </p>
+                <div>
+                  <Button kind="primary" href={`https://${signup.subdomain}.${ROOT_DOMAIN}`}>
+                    Go to {signup.subdomain}.{ROOT_DOMAIN}
+                  </Button>
+                </div>
               </div>
             )}
           </div>
         </div>
       </div>
 
-      <footer className="text-center text-[11px] text-gray-400 py-3">Powered by e-School · v{APP_VERSION}</footer>
+      <footer className={styles.footer}>Powered by e-School · v{APP_VERSION}</footer>
     </div>
   );
 };

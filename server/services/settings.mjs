@@ -8,6 +8,12 @@
 import { randomUUID } from 'node:crypto';
 
 import { SCHOOL_LEVEL_VALUES } from '../reports/grading-config.mjs';
+import { requireRole, resolveActor } from '../auth/actor.mjs';
+import {
+  deleteProviderCredential,
+  listProviderCredentials,
+  saveProviderCredential,
+} from './provider-credentials.mjs';
 
 const DEFAULT_THEME = '#2952a3';
 
@@ -90,7 +96,11 @@ const getSettings = async ({ database }) => {
   return { settings: row || (await loadSchoolSettings(database)) };
 };
 
-const updateSettings = async ({ database, body }) => {
+const updateSettings = async ({ database, body, actor }) => {
+  // Who is recorded as having changed the school's details comes from their session, not from two
+  // fields the same request could have written itself.
+  const author = { email: trimmed(actor?.email), name: trimmed(actor?.name), role: actor?.role || 'admin' };
+
   const values = [
     trimmed(body.schoolName),
     trimmed(body.tagline),
@@ -101,7 +111,7 @@ const updateSettings = async ({ database, body }) => {
     trimmed(body.contactEmail),
     normalizeSchoolLevel(body.schoolLevel),
     normalizeGradingCountry(body.gradingCountry),
-    trimmed(body.actorName) || trimmed(body.actorEmail),
+    author.name || author.email,
   ];
 
   // Upsert: the seed guarantees the row exists, but ON CONFLICT keeps this correct even on a
@@ -133,12 +143,12 @@ const updateSettings = async ({ database, body }) => {
     `
       INSERT INTO audit_logs (
         id, user_email, user_name, user_role, action, entity_type, entity_id, entity_name, changes
-      ) VALUES ($1, $2, $3, 'admin', 'settings_updated', 'settings', 'default', $4, $5)
+      ) VALUES ($1, $2, $3, $6, 'settings_updated', 'settings', 'default', $4, $5)
     `,
     [
       randomUUID(),
-      trimmed(body.actorEmail),
-      trimmed(body.actorName),
+      author.email,
+      author.name,
       rows[0]?.school_name || 'School settings',
       JSON.stringify({
         school_name: rows[0]?.school_name,
@@ -146,28 +156,57 @@ const updateSettings = async ({ database, body }) => {
         school_level: rows[0]?.school_level,
         grading_country: rows[0]?.grading_country,
       }),
+      author.role,
     ],
   );
 
   return { settings: rows[0] };
 };
 
+/* ------------------------------------------------------- the school's own AI keys ------------- */
+
+const listProviderKeys = async ({ database }) => listProviderCredentials(database);
+
+const saveProviderKey = async ({ database, body, actor }) =>
+  saveProviderCredential({
+    database,
+    provider: body.provider,
+    apiKey: body.apiKey,
+    baseUrl: body.baseUrl,
+    actor,
+  });
+
+const deleteProviderKey = async ({ database, body }) =>
+  deleteProviderCredential({ database, provider: body.provider });
+
 const ACTIONS = {
   get: getSettings,
   update: updateSettings,
+  list_provider_keys: listProviderKeys,
+  save_provider_key: saveProviderKey,
+  delete_provider_key: deleteProviderKey,
 };
+
+// Reading the school's name and logo is open to every role, because the app cannot render without
+// it. Everything else here — changing the school, and its AI provider keys — is an administrator's.
+const ADMIN_ACTIONS = ['update', 'list_provider_keys', 'save_provider_key', 'delete_provider_key'];
 
 /**
  * Reads are open to any signed-in role (the header and documents need branding); writes are
  * admin-only, matching the trust-the-client model used by the auth endpoint's update_role.
  */
-export const handleSettingsFunction = async (database, body = {}) => {
+export const handleSettingsFunction = async (database, body = {}, { actor: authenticated, tenantId } = {}) => {
   const action = body?.action || 'get';
-  if (action === 'update' && body.requesterRole !== 'admin') {
-    return { error: 'Unauthorized' };
+  const actor = resolveActor(authenticated, body);
+
+  // Unlike the other services the gate is per action, because every role needs to read the school's
+  // name and logo to render the app at all — only changing them is an administrator's business.
+  if (ADMIN_ACTIONS.includes(action)) {
+    const refusal = requireRole(actor, ['admin']);
+    if (refusal) return refusal;
   }
 
   const handler = ACTIONS[action];
   if (!handler) return { error: `Unsupported settings action: ${action}` };
-  return handler({ database, body });
+  return handler({ database, body, actor, tenantId });
 };

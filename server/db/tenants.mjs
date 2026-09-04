@@ -37,11 +37,23 @@ export const parseTenantRegistry = (raw = process.env.TENANTS) => {
 };
 
 /**
+ * Is the X-Tenant header allowed to override the Host?
+ *
+ * Off unless ALLOW_TENANT_HEADER is set. It is a local-testing convenience — with it on, and CORS
+ * permitting the header, any page on the internet could name whichever school it wanted and read
+ * that school's data. The Host header is set by the browser from the address bar and cannot be
+ * forged cross-origin, which is why it is the one that decides in production.
+ *
+ * Read at call time, not import time, so tests and runtime config both take effect.
+ */
+const tenantHeaderAllowed = () => process.env.ALLOW_TENANT_HEADER === 'true';
+
+/**
  * Derive the tenant id from the Host header, with an X-Tenant header override for local testing.
  * Pure and side-effect free. Apex domains, www, localhost and bare IPs map to the default tenant.
  */
 export const resolveTenantId = (host, headerTenant) => {
-  const override = normalizeTenantId(headerTenant);
+  const override = tenantHeaderAllowed() ? normalizeTenantId(headerTenant) : '';
   if (override) return override;
 
   const hostname = String(host ?? '').split(':')[0].trim().toLowerCase();
@@ -50,7 +62,7 @@ export const resolveTenantId = (host, headerTenant) => {
   }
 
   const parts = hostname.split('.');
-  // A subdomain needs at least sub.domain.tld; an apex like `eschool.app` has no tenant subdomain.
+  // A subdomain needs at least sub.domain.tld; an apex like `eschool.ink` has no tenant subdomain.
   if (parts.length < 3) return DEFAULT_TENANT;
 
   const sub = parts[0];
@@ -113,6 +125,27 @@ export const createTenantRegistry = ({
 
       const database = await getConnection(tenantId, entry.url, entry.ssl);
       return { tenantId, database, status: entry.status };
+    },
+    /**
+     * The same resolution by tenant id directly, for work that has no request to derive one from.
+     *
+     * Separate from resolve() rather than folded into it, because resolve() deliberately reads the
+     * tenant from the Host header and treats the X-Tenant header as a testing-only override. A
+     * background job is not a request and has no host to parse; letting it name its own tenant is
+     * safe for exactly the reason letting a browser do so is not.
+     */
+    async open(tenantId, defaultDatabase) {
+      const id = normalizeTenantId(tenantId) || DEFAULT_TENANT;
+      if (!enabled || (id === DEFAULT_TENANT && !registry.has(DEFAULT_TENANT))) {
+        return { tenantId: id, database: defaultDatabase, status: 'active' };
+      }
+
+      const entry = await findEntry(id);
+      if (!entry) return { tenantId: id, database: null, status: 'unknown' };
+      if (entry.status === 'suspended' || entry.status === 'pending') {
+        return { tenantId: id, database: null, status: entry.status };
+      }
+      return { tenantId: id, database: await getConnection(id, entry.url, entry.ssl), status: entry.status };
     },
     // Drop a cached pool after a status change or (re)provision so the next request re-resolves.
     invalidate(tenantId) {

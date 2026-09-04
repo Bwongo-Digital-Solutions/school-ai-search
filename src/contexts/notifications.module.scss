@@ -1,0 +1,35 @@
+@use '@carbon/layout';
+@use '../styles/vars' as *;
+
+// The toast stack. Bottom-right on a desktop, where it is out of the way of both the header's
+// actions and whatever was just clicked; full-width along the bottom on a phone, where a corner
+// toast would either cover the thing that triggered it or be too narrow to read.
+.stack {
+  position: fixed;
+  z-index: 9100;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-03;
+  inset-block-end: layout.$spacing-05;
+  inset-inline: layout.$spacing-05;
+  pointer-events: none;
+
+  @media (min-width: 42rem) {
+    inset-inline: auto layout.$spacing-05;
+    max-inline-size: 24rem;
+  }
+}
+
+// The stack itself ignores clicks so it never blocks the page underneath; each toast takes them
+// back, so its close button still works.
+.toast {
+  pointer-events: auto;
+  inline-size: 100%;
+  max-inline-size: none;
+}
+
+.confirmBody {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-04;
+}

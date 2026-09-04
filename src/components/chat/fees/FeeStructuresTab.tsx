@@ -1,12 +1,18 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Archive, Layers, Pencil, Plus, Trash2 } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
+import { useNotifications } from '@/contexts/NotificationContext';
+import { useSettings } from '@/contexts/SettingsContext';
 import { callFees } from '@/lib/fees';
 import { academicYear, formatAmount, formatDate, TERMS } from '@/lib/format';
+import { classLabel } from '@/lib/classLevels';
 import Field from '@/components/common/Field';
+import { TableSkeleton } from '@/components/common';
 import ModalShell from '@/components/common/ModalShell';
 import type { FeeStructure } from '@/types/feeAdmin';
-import { EmptyState, Panel, PrimaryButton, SecondaryButton, zebra } from './shared';
+import { EmptyState, Panel, PrimaryButton, PrintButtons, SecondaryButton, zebra } from './shared';
+import styles from '../tabs.module.scss';
+import { Add, Archive, Edit, Layers, TrashCan } from '@carbon/react/icons';
+import { Button, Checkbox, Tag } from '@carbon/react';
 
 const emptyForm = () => ({
   id: '',
@@ -25,6 +31,8 @@ type FormState = ReturnType<typeof emptyForm>;
 
 const FeeStructuresTab = ({ runAction, onChanged }: { runAction: (label: string, handler: () => Promise<void>) => Promise<void>; onChanged: () => void }) => {
   const { user } = useAuth();
+  const { settings } = useSettings();
+  const { notify } = useNotifications();
   const [structures, setStructures] = useState<FeeStructure[]>([]);
   const [includeArchived, setIncludeArchived] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -65,72 +73,95 @@ const FeeStructuresTab = ({ runAction, onChanged }: { runAction: (label: string,
       await load();
       onChanged();
       if (result.archived) {
-        alert('This tier had already raised invoices, so it was archived instead of deleted. Existing invoices are unaffected.');
+        notify.info(
+          'Archived instead of deleted',
+          'This tier had already raised invoices. Those invoices are unaffected.',
+        );
       }
     });
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <label className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-          <input
-            type="checkbox"
-            checked={includeArchived}
-            onChange={event => setIncludeArchived(event.target.checked)}
-            className="h-3.5 w-3.5 rounded border-gray-300 text-indigo-600"
+    <div className={styles.stack}>
+      <div className={styles.between}>
+        <Checkbox
+          id="includeArchived"
+          labelText="Show archived tiers"
+          checked={includeArchived}
+          onChange={(_event, { checked }) => setIncludeArchived(checked)}
+        />
+        <div className={styles.toolbar}>
+          {/* Whether archived tiers are on screen decides whether they are on the paper too. */}
+          <PrintButtons
+            path="/api/fees/structures.pdf"
+            filename="fee-structures.pdf"
+            params={includeArchived ? { includeArchived: 'true' } : {}}
+            user={user}
+            runAction={runAction}
+            disabled={loading}
           />
-          Show archived tiers
-        </label>
-        <PrimaryButton onClick={() => setForm(emptyForm())}>
-          <Plus className="w-4 h-4" /> New Fee Structure
-        </PrimaryButton>
+          <PrimaryButton onClick={() => setForm(emptyForm())}>
+            <Add size={16} /> New Fee Structure
+          </PrimaryButton>
+        </div>
       </div>
 
-      <Panel className="overflow-hidden">
-        {loading ? (
-          <EmptyState message="Loading fee structures…" />
+      <Panel >
+        {loading && structures.length === 0 ? (
+          <TableSkeleton
+            rowCount={5}
+            columnLabels={['Structure', 'Applies to', 'Period', 'Amount', 'Due', 'Invoices', '']}
+          />
         ) : structures.length === 0 ? (
           <EmptyState message="No fee structures yet. Create one to start billing." />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 dark:bg-gray-900/40 text-xs text-gray-500 dark:text-gray-400">
+          <div className={styles.tableWrap}>
+            <table className={styles.table}>
+              <thead className={styles.thead}>
                 <tr>
-                  <th className="text-left font-medium px-4 py-2.5">Structure</th>
-                  <th className="text-left font-medium px-4 py-2.5">Applies to</th>
-                  <th className="text-left font-medium px-4 py-2.5">Period</th>
-                  <th className="text-right font-medium px-4 py-2.5">Amount</th>
-                  <th className="text-left font-medium px-4 py-2.5">Due</th>
-                  <th className="text-right font-medium px-4 py-2.5">Invoices</th>
-                  <th className="text-right font-medium px-4 py-2.5">Actions</th>
+                  <th>Structure</th>
+                  <th>Applies to</th>
+                  <th>Period</th>
+                  <th className={styles.numeric}>Amount</th>
+                  <th>Due</th>
+                  <th className={styles.numeric}>Invoices</th>
+                  <th className={styles.numeric}>Actions</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+              <tbody className={styles.rows}>
                 {structures.map(structure => (
                   <tr key={structure.id} className={zebra}>
-                    <td className="px-4 py-2.5">
-                      <p className="font-medium text-gray-800 dark:text-white">{structure.name}</p>
-                      {structure.description && <p className="text-xs text-gray-400">{structure.description}</p>}
+                    <td>
+                      <p className={styles.strong}>{structure.name}</p>
+                      {structure.description && <p className={styles.note}>{structure.description}</p>}
                       {structure.status !== 'active' && (
-                        <span className="inline-flex items-center gap-1 mt-1 px-2 py-0.5 rounded-full text-[10px] border bg-gray-50 dark:bg-gray-800 text-gray-500 border-gray-200 dark:border-gray-700">
-                          <Archive className="w-2.5 h-2.5" /> Archived
-                        </span>
+                        <Tag type="cool-gray" size="sm" renderIcon={Archive}>
+                          Archived
+                        </Tag>
                       )}
                     </td>
-                    <td className="px-4 py-2.5 text-gray-600 dark:text-gray-300">
-                      {structure.grade_level === null ? 'All grades' : `Grade ${structure.grade_level}`} · {structure.student_type}
+                    <td>
+                      {structure.grade_level === null
+                        ? 'All classes'
+                        : classLabel(settings.school_level, structure.grade_level)}{' '}
+                      · {structure.student_type}
                     </td>
-                    <td className="px-4 py-2.5 text-gray-600 dark:text-gray-300">
+                    <td>
                       {structure.term} {structure.academic_year}
                     </td>
-                    <td className="px-4 py-2.5 text-right font-medium text-gray-800 dark:text-white">
+                    <td className={styles.tdStrong}>
                       {formatAmount(structure.amount, structure.currency)}
                     </td>
-                    <td className="px-4 py-2.5 text-gray-600 dark:text-gray-300">{formatDate(structure.due_date)}</td>
-                    <td className="px-4 py-2.5 text-right text-gray-600 dark:text-gray-300">{structure.invoice_count}</td>
-                    <td className="px-4 py-2.5">
-                      <div className="flex items-center justify-end gap-1">
-                        <button
+                    <td>{formatDate(structure.due_date)}</td>
+                    <td className={styles.tdNumeric}>{structure.invoice_count}</td>
+                    <td>
+                      <div className={styles.actionsEnd}>
+                        <Button
+                          hasIconOnly
+                          kind="ghost"
+                          size="sm"
+                          renderIcon={Edit}
+                          iconDescription={`Edit ${structure.name}`}
+                          tooltipPosition="left"
                           onClick={() => setForm({
                             id: structure.id,
                             name: structure.name,
@@ -143,18 +174,16 @@ const FeeStructuresTab = ({ runAction, onChanged }: { runAction: (label: string,
                             dueDate: structure.due_date ? structure.due_date.slice(0, 10) : '',
                             description: structure.description,
                           })}
-                          className="p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
-                          aria-label={`Edit ${structure.name}`}
-                        >
-                          <Pencil className="w-3.5 h-3.5 text-gray-400" />
-                        </button>
-                        <button
+                        />
+                        <Button
+                          hasIconOnly
+                          kind="danger--ghost"
+                          size="sm"
+                          renderIcon={TrashCan}
+                          iconDescription={`Delete ${structure.name}`}
+                          tooltipPosition="left"
                           onClick={() => setConfirmDelete(structure)}
-                          className="p-1.5 rounded hover:bg-red-50 dark:hover:bg-red-900/20"
-                          aria-label={`Delete ${structure.name}`}
-                        >
-                          <Trash2 className="w-3.5 h-3.5 text-red-400" />
-                        </button>
+                        />
                       </div>
                     </td>
                   </tr>
@@ -178,7 +207,7 @@ const FeeStructuresTab = ({ runAction, onChanged }: { runAction: (label: string,
             </>
           }
         >
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className={styles.grid2}>
             <Field label="Name" value={form.name} onChange={set('name')} placeholder="Grade 10 Day Tuition" />
             <Field label="Amount" type="number" min={0} value={form.amount} onChange={set('amount')} />
             <Field
@@ -187,7 +216,7 @@ const FeeStructuresTab = ({ runAction, onChanged }: { runAction: (label: string,
               onChange={set('gradeLevel')}
               placeholder="Leave blank for all grades"
               hint="Blank bills every grade."
-            />
+ />
             <Field
               label="Student type"
               value={form.studentType}
@@ -196,17 +225,17 @@ const FeeStructuresTab = ({ runAction, onChanged }: { runAction: (label: string,
                 { value: 'day', label: 'Day' },
                 { value: 'boarding', label: 'Boarding' },
               ]}
-            />
+ />
             <Field label="Academic year" value={form.academicYear} onChange={set('academicYear')} />
             <Field
               label="Term"
               value={form.term}
               onChange={set('term')}
               options={TERMS.map(term => ({ value: term, label: term }))}
-            />
+ />
             <Field label="Currency" value={form.currency} onChange={set('currency')} />
             <Field label="Due date" type="date" value={form.dueDate} onChange={set('dueDate')} />
-            <div className="sm:col-span-2">
+            <div className={styles.spanAll}>
               <Field label="Description" type="textarea" value={form.description} onChange={set('description')} />
             </div>
           </div>
@@ -216,25 +245,22 @@ const FeeStructuresTab = ({ runAction, onChanged }: { runAction: (label: string,
       {confirmDelete && (
         <ModalShell
           title="Remove fee structure"
-          icon={Trash2}
+          icon={TrashCan}
           onClose={() => setConfirmDelete(null)}
           footer={
             <>
               <SecondaryButton onClick={() => setConfirmDelete(null)}>Cancel</SecondaryButton>
-              <button
-                onClick={remove}
-                className="px-4 py-2 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700"
-              >
+              <Button kind="danger" size="sm" onClick={remove}>
                 Remove
-              </button>
+              </Button>
             </>
           }
         >
-          <p className="text-sm text-gray-600 dark:text-gray-300">
-            Remove <span className="font-medium">{confirmDelete.name}</span>?
+          <p className={styles.primary}>
+            Remove <span className={styles.strong}>{confirmDelete.name}</span>?
           </p>
           {confirmDelete.invoice_count > 0 && (
-            <p className="text-xs text-amber-600 dark:text-amber-400 mt-2">
+            <p className={styles.warn}>
               {confirmDelete.invoice_count} invoice{confirmDelete.invoice_count === 1 ? '' : 's'} already reference this
               tier, so it will be archived rather than deleted. Those invoices stay exactly as they are.
             </p>

@@ -31,6 +31,8 @@ export const SCHOOL_LEVELS = [
   { value: 'pre_school', label: 'Pre-school' },
   { value: 'kindergarten', label: 'Kindergarten / Nursery' },
   { value: 'primary', label: 'Primary' },
+  { value: 'secondary_olevel', label: 'Secondary — O-Level only (UCE)' },
+  { value: 'secondary_alevel', label: 'Secondary — A-Level only (UACE)' },
   { value: 'secondary', label: 'Secondary (O-Level and A-Level)' },
   { value: 'technical', label: 'Technical / Vocational' },
   { value: 'tertiary', label: 'Tertiary / University' },
@@ -571,6 +573,14 @@ export const academicLevelFor = (schoolLevel, gradeLevel) => {
     case 'tertiary':
     case 'university':
       return 'tertiary';
+    // A school that runs only one of the two says so, and every student is marked on that scale —
+    // including one whose stored class is out of range, which is the case a combined school has to
+    // resolve from the grade instead.
+    // normalizeKey has already turned the stored 'secondary_olevel' into 'secondary-olevel'.
+    case 'secondary-olevel':
+      return 'secondary-o';
+    case 'secondary-alevel':
+      return 'secondary-a';
     case 'secondary': {
       const grade = Number(gradeLevel);
       return Number.isFinite(grade) && grade >= 12 ? 'secondary-a' : 'secondary-o';

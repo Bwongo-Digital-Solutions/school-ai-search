@@ -5,6 +5,8 @@ export type SchoolLevel =
   | 'pre_school'
   | 'kindergarten'
   | 'primary'
+  | 'secondary_olevel'
+  | 'secondary_alevel'
   | 'secondary'
   | 'technical'
   | 'tertiary';
@@ -29,11 +31,25 @@ export interface SchoolSettings {
  */
 export const SCHOOL_LEVEL_OPTIONS: { value: SchoolLevel; label: string; grades: string }[] = [
   { value: 'pre_school', label: 'Pre-school', grades: 'Development descriptors — no marks or aggregate' },
-  { value: 'kindergarten', label: 'Kindergarten / Nursery', grades: 'Development descriptors — no marks or aggregate' },
-  { value: 'primary', label: 'Primary', grades: 'PLE aggregate points (best 4 subjects) and divisions' },
+  {
+    value: 'kindergarten',
+    label: 'Kindergarten / Nursery',
+    grades: 'Development descriptors — no marks or aggregate',
+  },
+  { value: 'primary', label: 'Primary (PLE)', grades: 'PLE aggregate points (best 4 subjects) and divisions' },
+  {
+    value: 'secondary_olevel',
+    label: 'Secondary — O-Level only (UCE)',
+    grades: 'UCE aggregate points and divisions',
+  },
+  {
+    value: 'secondary_alevel',
+    label: 'Secondary — A-Level only (UACE)',
+    grades: 'UACE principal grades A–F',
+  },
   {
     value: 'secondary',
-    label: 'Secondary',
+    label: 'Secondary — O and A Level',
     grades: 'S1–S4: UCE aggregate points and divisions · S5–S6: UACE principal grades A–F',
   },
   { value: 'technical', label: 'Technical / Vocational', grades: 'Distinction / Credit / Pass' },
@@ -61,11 +77,25 @@ export const EMPTY_SETTINGS: SchoolSettings = {
   grading_country: 'uganda',
 };
 
+/**
+ * The school's own name, colours and level.
+ *
+ * Failure is reported rather than swallowed. Falling back to `EMPTY_SETTINGS` silently is what made
+ * a configured school render as an unnamed one with default branding — indistinguishable from a
+ * school that had never filled the form in, and impossible to tell was broken.
+ *
+ * The caller still decides what to do about it: `SettingsContext` keeps the empty defaults on
+ * screen, because a nameless header is a better outcome than no application at all.
+ */
 export const fetchSchoolSettings = async (): Promise<SchoolSettings> => {
   const { data, error } = await supabase.functions.invoke<{ settings: SchoolSettings }>('settings', {
     body: { action: 'get' },
   });
-  if (error || !data?.settings) return EMPTY_SETTINGS;
+  if (error || !data?.settings) {
+    throw new Error(
+      (error instanceof Error ? error.message : null) || 'The school settings could not be loaded',
+    );
+  }
   return { ...EMPTY_SETTINGS, ...data.settings };
 };
 
@@ -77,9 +107,6 @@ export const saveSchoolSettings = async (
   const { data, error } = await supabase.functions.invoke<{ settings: SchoolSettings }>('settings', {
     body: {
       action: 'update',
-      requesterRole: user?.role,
-      actorEmail: user?.auth_email,
-      actorName: user?.display_name,
       schoolName: settings.school_name,
       tagline: settings.tagline,
       address: settings.address,
@@ -97,3 +124,48 @@ export const saveSchoolSettings = async (
   }
   return { ...EMPTY_SETTINGS, ...(data?.settings || settings) };
 };
+
+/* -------------------------------------------------- the school's own AI provider keys --------- */
+
+export interface ProviderCredential {
+  provider: string;
+  /** False for Ollama, which has an address but no key. */
+  needsKey: boolean;
+  /** Whose credentials this provider currently uses. */
+  source: 'school' | 'platform';
+  /** Masked — the key itself never leaves the server. */
+  keyPreview: string;
+  /** A key stored under a SECRETS_KEY that has since changed, so it can no longer be read. */
+  keyUnreadable: boolean;
+  baseUrl: string;
+  platformHasKey: boolean;
+  platformBaseUrl: string;
+  updatedBy: string;
+  updatedAt: string | null;
+}
+
+export interface ProviderCredentials {
+  /** False when the server has no SECRETS_KEY, so a school cannot store a key at all. */
+  secretsConfigured: boolean;
+  providers: ProviderCredential[];
+}
+
+const callSettings = async <T>(body: Record<string, unknown>): Promise<T> => {
+  const { data, error } = await supabase.functions.invoke<T>('settings', { body });
+  if (error) throw error;
+  if (data && 'error' in (data as Record<string, unknown>)) {
+    throw new Error(String((data as Record<string, unknown>).error));
+  }
+  return data as T;
+};
+
+/** Admin-only. Which providers this school has overridden, and which it inherits. */
+export const loadProviderCredentials = () =>
+  callSettings<ProviderCredentials>({ action: 'list_provider_keys' });
+
+/** Admin-only. Saving returns the refreshed list, so the screen never guesses at the new state. */
+export const saveProviderCredential = (provider: string, apiKey: string, baseUrl: string) =>
+  callSettings<ProviderCredentials>({ action: 'save_provider_key', provider, apiKey, baseUrl });
+
+export const deleteProviderCredential = (provider: string) =>
+  callSettings<ProviderCredentials>({ action: 'delete_provider_key', provider });

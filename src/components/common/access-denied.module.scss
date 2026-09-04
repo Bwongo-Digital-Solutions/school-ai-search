@@ -1,0 +1,97 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  block-size: 100%;
+  padding: layout.$spacing-09 layout.$spacing-06;
+  background-color: $ui-01;
+  text-align: center;
+}
+
+.mark {
+  inline-size: layout.$spacing-10;
+  block-size: layout.$spacing-10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: $ui-03;
+  color: $text-02;
+  margin-bottom: layout.$spacing-06;
+
+  svg {
+    fill: currentColor;
+  }
+}
+
+.title {
+  @include type.type-style('heading-04');
+  color: $text-01;
+  margin: 0 0 layout.$spacing-03;
+}
+
+.copy {
+  @include type.type-style('body-01');
+  color: $text-02;
+  max-inline-size: 32rem;
+  margin: 0 0 layout.$spacing-06;
+}
+
+// What each role can see. Shown because the useful answer to "why can't I open this" is not
+// "you can't" but "here is who can, and what you can do instead".
+.roles {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-03;
+  text-align: start;
+  padding: layout.$spacing-05;
+  border: 1px solid $ui-03;
+  background: $ui-02;
+}
+
+.role {
+  @include type.type-style('body-compact-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  color: $text-02;
+
+  svg {
+    fill: $text-03;
+    flex-shrink: 0;
+  }
+
+  strong {
+    color: $text-01;
+  }
+}
+
+:global(.cds--g100) {
+  .screen {
+    background-color: $ui-01-dark;
+  }
+
+  .mark {
+    background: $ui-03-dark;
+    color: $text-02-dark;
+  }
+
+  .title,
+  .role strong {
+    color: #f4f4f4;
+  }
+
+  .copy,
+  .role {
+    color: $text-02-dark;
+  }
+
+  .roles {
+    background: $ui-02-dark;
+    border-color: $ui-03-dark;
+  }
+}

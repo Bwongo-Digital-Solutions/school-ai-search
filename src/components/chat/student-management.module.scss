@@ -1,0 +1,294 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  block-size: 100%;
+  overflow: hidden;
+  background-color: $ui-01;
+}
+
+// The band between the page header and the roster: the metric tiles, then the search and filters.
+.controls {
+  padding: layout.$spacing-05;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+  flex-shrink: 0;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: layout.$spacing-03;
+
+  // The search field takes the room the filters do not.
+  > :first-child {
+    flex: 1;
+    min-inline-size: min(14rem, 100%);
+  }
+}
+
+.grades {
+  inline-size: auto;
+  min-inline-size: min(10rem, 100%);
+}
+
+// The roster itself: a white card on the page grey, scrolling inside its own bounds so the header
+// and the metric band stay put while a long list moves.
+.tableWrap {
+  flex: 1;
+  min-block-size: 0;
+  overflow: auto;
+  margin: 0 layout.$spacing-05 layout.$spacing-05;
+  border: 1px solid $ui-03;
+  background: $ui-02;
+}
+
+.mono {
+  @include type.type-style('code-01');
+  color: $text-02;
+}
+
+.name {
+  @include type.type-style('heading-compact-01');
+  color: $text-01;
+}
+
+.sub {
+  @include type.type-style('helper-text-01');
+  color: $text-03;
+}
+
+.empty {
+  @include type.type-style('body-compact-01');
+  padding: layout.$spacing-09;
+  text-align: center;
+  color: $text-02;
+}
+
+.subjects {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: layout.$spacing-02;
+  max-inline-size: 14rem;
+}
+
+.rowActions {
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-02;
+}
+
+// GPA and attendance read as bands rather than raw numbers, so a row can be scanned without
+// comparing figures. `low` is the one that has to be unmistakable.
+.gpa {
+  @include type.type-style('heading-compact-01');
+
+  &[data-band='high'] { color: $support-success; }
+  &[data-band='good'] { color: $support-info; }
+  &[data-band='fair'] { color: $caution-text; }
+  &[data-band='low']  { color: $support-error; }
+}
+
+.meterRow {
+  @include type.type-style('body-compact-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-03;
+  color: $text-02;
+  white-space: nowrap;
+}
+
+// A flat bar, square like everything else — a rounded, shaded progress pill is exactly the
+// dimensional styling this pass exists to remove.
+.meter {
+  display: inline-block;
+  inline-size: 4rem;
+  block-size: 0.25rem;
+  background: $ui-03;
+
+  > span {
+    display: block;
+    block-size: 100%;
+  }
+
+  &[data-band='high'] > span { background: $support-success; }
+  &[data-band='good'] > span { background: $support-info; }
+  &[data-band='fair'] > span { background: $caution-text; }
+  &[data-band='low']  > span { background: $support-error; }
+}
+
+// Copy inside the add/edit and delete dialogs.
+.modalCopy {
+  @include type.type-style('body-01');
+  color: $text-02;
+  margin: 0;
+}
+
+.modalNote {
+  @include type.type-style('helper-text-01');
+  color: $text-03;
+  margin: layout.$spacing-05 0 0;
+}
+
+// The small grey rule that groups fields inside the student form.
+.formSection {
+  @include type.type-style('heading-compact-01');
+  color: $text-02;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin: 0 0 layout.$spacing-05;
+}
+
+:global(.cds--g100) {
+  .screen {
+    background-color: $ui-01-dark;
+  }
+
+  .tableWrap {
+    background: $ui-02-dark;
+    border-color: $ui-03-dark;
+  }
+
+  .name {
+    color: #f4f4f4;
+  }
+
+  .mono,
+  .empty,
+  .meterRow,
+  .modalCopy,
+  .formSection {
+    color: $text-02-dark;
+  }
+
+  .sub,
+  .modalNote {
+    color: $text-03-dark;
+  }
+
+  .meter {
+    background: $ui-03-dark;
+  }
+
+  .gpa[data-band='fair'],
+  .meter[data-band='fair'] > span {
+    color: $support-warning;
+    background-color: initial;
+  }
+
+  .meter[data-band='fair'] > span {
+    background-color: $support-warning;
+  }
+}
+
+// A stacked form inside a dialog.
+.formStack {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-06;
+}
+
+.grid2 {
+  display: grid;
+  gap: layout.$spacing-05;
+  grid-template-columns: 1fr;
+
+  @media (min-width: 34rem) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+// The ID-card preview: the QR big enough to test with a phone.
+.idCard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: layout.$spacing-05;
+  padding: layout.$spacing-05;
+  background: $ui-01;
+  border: 1px solid $ui-03;
+}
+
+/* Class, stream and the two dates. Two up where there is room, stacked where there is not. */
+.idCardFilters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: layout.$spacing-05;
+  margin-block-end: layout.$spacing-05;
+}
+
+.qr {
+  inline-size: 11rem;
+  block-size: 11rem;
+  background: #ffffff;
+}
+
+:global(.cds--g100) .idCard {
+  background: $ui-01-dark;
+  border-color: $ui-03-dark;
+}
+
+.grid3 {
+  display: grid;
+  gap: layout.$spacing-05;
+  grid-template-columns: 1fr;
+
+  @media (min-width: 34rem) {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+// Typing a subject and adding it. The field and its button on one line, so Enter and the button
+// read as the same action.
+.subjectEntry {
+  display: flex;
+  align-items: flex-end;
+  gap: layout.$spacing-03;
+  margin-block-end: layout.$spacing-04;
+
+  > :first-child {
+    flex: 1;
+    min-inline-size: 0;
+  }
+}
+
+.sortIdle {
+  fill: $text-03;
+}
+
+.sortActive {
+  fill: var(--brand-01, #{$brand-01-fallback});
+}
+
+// The count on the left, the pager on the right, wrapping to two lines on a phone rather than
+// squeezing either.
+.tableFoot {
+  @include type.type-style('label-01');
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: layout.$spacing-03;
+  color: $text-03;
+  margin: layout.$spacing-03 0 0;
+  padding-inline: layout.$spacing-02;
+}
+
+:global(.cds--g100) .tableFoot {
+  color: $text-03-dark;
+}
+
+
+// Tighter gutters on a phone. At 360px a 1rem gutter each side, plus each card's own padding, is a
+// third of the screen spent on whitespace — and these are dense, working screens.
+@media (max-width: 33.9375rem) {
+  .controls {
+    padding-inline: layout.$spacing-03;
+  }
+}

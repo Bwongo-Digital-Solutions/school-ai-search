@@ -1,12 +1,17 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { CalendarCheck, FileDown, FileText, Send, Trash2 } from 'lucide-react';
 import Field from '@/components/common/Field';
 import { useAuth } from '@/contexts/AuthContext';
+import { useNotifications } from '@/contexts/NotificationContext';
 import { callDigitalExaminer, teachingDocumentUrl } from '@/lib/teaching';
 import { downloadFromUrl } from '@/lib/download';
-import { EmptyState, Panel, PrimaryButton, SecondaryButton, zebra } from '../fees/shared';
+import { ErrorState, ListSkeleton, TablePager } from '@/components/common';
+import { usePagedRows } from '@/hooks/usePagedRows';
+import { DangerButton, EmptyState, Panel, PrimaryButton, SecondaryButton, zebra } from '../fees/shared';
 import { currentAcademicYear } from '../lessons/shared';
 import type { ExamQuestion, GeneratedPaper } from '@/types/teaching';
+import styles from '../tabs.module.scss';
+import { Calendar, Document, DocumentDownload, Send, TrashCan } from '@carbon/react/icons';
+import { Tag } from '@carbon/react';
 
 interface Props {
   runAction: (label: string, handler: () => Promise<void>) => Promise<void>;
@@ -26,8 +31,11 @@ const slugify = (value: string) => value.replace(/[^a-z0-9]+/gi, '-').toLowerCas
  * gradebook, timetable and report cards see it like any other exam.
  */
 const PapersTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey, pendingQuestionIds, onAssembled }) => {
+  const { confirm } = useNotifications();
   const { user } = useAuth();
   const [papers, setPapers] = useState<GeneratedPaper[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<unknown>(null);
   const [expanded, setExpanded] = useState<{ paper: GeneratedPaper; questions: ExamQuestion[] } | null>(null);
 
   const [assembleForm, setAssembleForm] = useState({
@@ -44,11 +52,16 @@ const PapersTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey, pe
   const [publishForm, setPublishForm] = useState({ examDate: '', startTime: '09:00', endTime: '10:30', room: '', classId: '' });
 
   const load = useCallback(async () => {
+    setLoading(true);
     try {
       const result = await callDigitalExaminer<{ papers: GeneratedPaper[] }>('list_papers', {}, user);
       setPapers(result.papers);
+      setError(null);
     } catch (err) {
       console.error('Failed to load papers:', err);
+      setError(err);
+    } finally {
+      setLoading(false);
     }
   }, [user]);
 
@@ -99,68 +112,76 @@ const PapersTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey, pe
     [load, onChanged, publishForm, runAction, user],
   );
 
+  // Papers are never retired — every test and exam a teacher has ever assembled stays here — so this
+  // is the list in the examiner that grows without end.
+  const { page, setPage, pageCount, pageRows, firstOnPage, lastOnPage } = usePagedRows(papers, 25);
+
   return (
-    <div className="space-y-4">
+    <div className={styles.stack}>
       {pendingQuestionIds.length > 0 && (
-        <Panel className="p-4 border-indigo-200 dark:border-indigo-800">
-          <h3 className="text-sm font-semibold text-gray-800 dark:text-white mb-3 flex items-center gap-2">
-            <FileText className="w-4 h-4 text-indigo-500" />
+        <Panel className={styles.padBrand}>
+          <h3 className={styles.subheading}>
+            <Document size={16} />
             Assemble {pendingQuestionIds.length} selected question{pendingQuestionIds.length === 1 ? '' : 's'}
           </h3>
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+          <div className={styles.grid4}>
             <Field
               label="Paper title"
               value={assembleForm.title}
               onChange={value => setAssembleForm({ ...assembleForm, title: String(value ?? '') })}
               placeholder="S2 Biology — Term 1 Test"
-            />
+ />
             <Field
               label="Subject"
               value={assembleForm.subjectName}
               onChange={value => setAssembleForm({ ...assembleForm, subjectName: String(value ?? '') })}
-            />
+ />
             <Field
               label="Grade level"
               type="number"
               value={assembleForm.gradeLevel}
               onChange={value => setAssembleForm({ ...assembleForm, gradeLevel: String(value ?? '') })}
-            />
+ />
             <Field
               label="Duration (minutes)"
               type="number"
               min={5}
               value={assembleForm.durationMinutes}
               onChange={value => setAssembleForm({ ...assembleForm, durationMinutes: Number(value) })}
-            />
+ />
           </div>
-          <div className="mt-2">
+          <div >
             <Field
               label="Instructions to candidates"
               type="textarea"
               value={assembleForm.instructions}
               onChange={value => setAssembleForm({ ...assembleForm, instructions: String(value ?? '') })}
-            />
+ />
           </div>
-          <PrimaryButton className="mt-3" onClick={assemble} disabled={Boolean(busy) || !assembleForm.title.trim()}>
-            <FileText className="w-4 h-4" /> Create paper
+          <PrimaryButton onClick={assemble} disabled={Boolean(busy) || !assembleForm.title.trim()}>
+            <Document size={16} /> Create paper
           </PrimaryButton>
-          <p className="text-[11px] text-gray-400 mt-2">
+          <p className={styles.note}>
             Total marks are summed from the questions themselves, so the printed total always matches the paper.
           </p>
         </Panel>
       )}
 
       <Panel>
-        {papers.length === 0 ? (
+        {loading && papers.length === 0 ? (
+          <ListSkeleton rowCount={5} />
+        ) : error ? (
+          <ErrorState headerTitle="Papers" error={error} onRetry={load} />
+        ) : papers.length === 0 ? (
           <EmptyState message="No papers yet. Select approved questions in the Question Bank and assemble them into a paper." />
         ) : (
-          <div className="divide-y divide-gray-100 dark:divide-gray-700">
-            {papers.map(paper => (
+          <div className={styles.rows}>
+            {pageRows.map(paper => (
               <div key={paper.id} className={zebra}>
-                <div className="px-4 py-3 flex flex-wrap items-center justify-between gap-2">
-                  <button type="button" onClick={() => open(paper)} className="text-left min-w-0 flex-1">
-                    <p className="text-sm font-medium text-gray-800 dark:text-white truncate">{paper.title}</p>
-                    <p className="text-[11px] text-gray-400">
+                <div className={styles.rowPadBetween}>
+                  <button type="button" onClick={() => open(paper)} className={styles.grow}>
+                    <p className={styles.strong}>{paper.title}</p>
+                    <p className={styles.note}>
                       {[
                         paper.subject_name,
                         `${paper.question_ids.length} questions`,
@@ -172,17 +193,14 @@ const PapersTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey, pe
                     </p>
                   </button>
 
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span
-                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${
-                        paper.status === 'published'
-                          ? 'bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800'
-                          : 'bg-gray-50 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border-gray-200 dark:border-gray-700'
-                      }`}
+                  <div className={styles.actions}>
+                    <Tag
+                      type={paper.status === 'published' ? 'green' : 'cool-gray'}
+                      size="sm"
+                      renderIcon={paper.status === 'published' ? Calendar : undefined}
                     >
-                      {paper.status === 'published' ? <CalendarCheck className="w-2.5 h-2.5" /> : null}
                       {paper.status === 'published' ? 'Published' : 'Draft'}
-                    </span>
+                    </Tag>
 
                     <SecondaryButton
                       onClick={() =>
@@ -195,7 +213,7 @@ const PapersTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey, pe
                       }
                       disabled={Boolean(busy)}
                     >
-                      <FileDown className="w-4 h-4" /> Paper
+                      <DocumentDownload size={16} /> Paper
                     </SecondaryButton>
                     <SecondaryButton
                       onClick={() =>
@@ -208,11 +226,20 @@ const PapersTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey, pe
                       }
                       disabled={Boolean(busy)}
                     >
-                      <FileDown className="w-4 h-4" /> Scheme
+                      <DocumentDownload size={16} /> Scheme
                     </SecondaryButton>
-                    <SecondaryButton
-                      onClick={() => {
-                        if (!window.confirm(`Delete “${paper.title}”? The questions stay in the bank.`)) return;
+                    <DangerButton
+                      onClick={async () => {
+                        if (
+                          !(await confirm({
+                            title: 'Delete this paper?',
+                            message: `“${paper.title}” will be removed. Its questions stay in the bank.`,
+                            confirmLabel: 'Delete',
+                            danger: true,
+                          }))
+                        ) {
+                          return;
+                        }
                         runAction('Deleting the paper', async () => {
                           await callDigitalExaminer('delete_paper', { id: paper.id }, user);
                           await load();
@@ -220,77 +247,91 @@ const PapersTab: React.FC<Props> = ({ runAction, onChanged, busy, refreshKey, pe
                         });
                       }}
                       disabled={Boolean(busy)}
-                      className="text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20"
+
                     >
-                      <Trash2 className="w-4 h-4" />
-                    </SecondaryButton>
+                      <TrashCan size={16} />
+                    </DangerButton>
                   </div>
                 </div>
 
                 {expanded?.paper.id === paper.id && (
-                  <div className="px-4 pb-4">
-                    <ol className="space-y-2 mb-4">
+                  <div className={styles.padBody}>
+                    <ol className={styles.stackTight}>
                       {expanded.questions.map((question, index) => (
-                        <li key={question.id} className="text-xs text-gray-600 dark:text-gray-300 flex gap-2">
-                          <span className="font-semibold text-indigo-500 shrink-0">{index + 1}.</span>
-                          <span className="flex-1">{question.stem}</span>
-                          <span className="text-gray-400 shrink-0">[{question.marks}]</span>
+                        <li key={question.id} className={styles.noteRow}>
+                          <span className={styles.index}>{index + 1}.</span>
+                          <span className={styles.grow}>{question.stem}</span>
+                          <span >[{question.marks}]</span>
                         </li>
                       ))}
                     </ol>
 
                     {paper.status === 'draft' ? (
-                      <div className="p-3 rounded-lg bg-gray-50 dark:bg-gray-900/40 border border-gray-100 dark:border-gray-700">
-                        <p className="text-xs font-medium text-gray-700 dark:text-gray-200 mb-2">
+                      <div className={styles.callout}>
+                        <p className={styles.label}>
                           Publish into the school's exam records
                         </p>
-                        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+                        <div className={styles.grid4}>
                           <Field
                             label="Exam date"
                             type="date"
                             value={publishForm.examDate}
                             onChange={value => setPublishForm({ ...publishForm, examDate: String(value ?? '') })}
-                          />
+ />
                           <Field
                             label="Class id"
                             value={publishForm.classId}
                             onChange={value => setPublishForm({ ...publishForm, classId: String(value ?? '') })}
                             hint="Optional"
-                          />
+ />
                           <Field
                             label="Start"
                             value={publishForm.startTime}
                             onChange={value => setPublishForm({ ...publishForm, startTime: String(value ?? '') })}
-                          />
+ />
                           <Field
                             label="End"
                             value={publishForm.endTime}
                             onChange={value => setPublishForm({ ...publishForm, endTime: String(value ?? '') })}
-                          />
+ />
                           <Field
                             label="Room"
                             value={publishForm.room}
                             onChange={value => setPublishForm({ ...publishForm, room: String(value ?? '') })}
-                          />
+ />
                         </div>
-                        <PrimaryButton className="mt-3" onClick={() => publish(paper)} disabled={Boolean(busy)}>
-                          <Send className="w-4 h-4" /> Publish
+                        <PrimaryButton onClick={() => publish(paper)} disabled={Boolean(busy)}>
+                          <Send size={16} /> Publish
                         </PrimaryButton>
-                        <p className="text-[11px] text-gray-400 mt-2">
+                        <p className={styles.note}>
                           Every question must be approved first. Publishing creates a real exam the gradebook and
                           timetable can see.
                         </p>
                       </div>
                     ) : (
-                      <p className="text-[11px] text-emerald-600 dark:text-emerald-400">
+                      <p className={styles.positive}>
                         Published{paper.published_at ? ` on ${String(paper.published_at).slice(0, 10)}` : ''} · exam id{' '}
-                        <code className="text-gray-500">{paper.exam_id}</code>
+                        <code className={styles.note}>{paper.exam_id}</code>
                       </p>
                     )}
                   </div>
                 )}
               </div>
             ))}
+          </div>
+        )}
+
+        {papers.length > 0 && (
+          <div className={styles.tableFoot}>
+            <TablePager
+              page={page}
+              pageCount={pageCount}
+              onPageChange={setPage}
+              firstOnPage={firstOnPage}
+              lastOnPage={lastOnPage}
+              total={papers.length}
+              noun="paper"
+            />
           </div>
         )}
       </Panel>

@@ -12,6 +12,7 @@
  * would slot in as another entry in EMBEDDING_MODELS).
  */
 import { PROVIDER_ENV, postJson } from '../services/llm-models.mjs';
+import { credentialFor } from '../services/credential-store.mjs';
 
 const EMBEDDING_MODELS = {
   openai: {
@@ -39,7 +40,7 @@ const EMBEDDING_MODELS = {
 const hasCredentials = (provider) => {
   if (provider === 'ollama') return Boolean(process.env.OLLAMA_BASE_URL || process.env.RAG_ENABLE_OLLAMA);
   const env = PROVIDER_ENV[provider];
-  return Boolean(env?.apiKey && process.env[env.apiKey]);
+  return Boolean(env?.apiKey && credentialFor(env.apiKey));
 };
 
 /**
@@ -66,13 +67,13 @@ export const isEmbeddingConfigured = () => resolveEmbeddingModel() !== null;
 
 const baseUrlFor = (provider) => {
   const env = PROVIDER_ENV[provider];
-  return (process.env[env.baseUrl] || env.defaultBaseUrl).replace(/\/$/, '');
+  return (credentialFor(env.baseUrl) || env.defaultBaseUrl).replace(/\/$/, '');
 };
 
 const embedOpenAiCompatible = async ({ model, texts, httpClient }) => {
   const env = PROVIDER_ENV[model.provider];
   const data = await postJson(httpClient, `${baseUrlFor(model.provider)}/embeddings`, {
-    headers: { Authorization: `Bearer ${process.env[env.apiKey]}` },
+    headers: { Authorization: `Bearer ${credentialFor(env.apiKey)}` },
     body: { model: model.model, input: texts },
   });
 
@@ -88,7 +89,7 @@ const embedGoogle = async ({ model, texts, httpClient }) => {
     httpClient,
     `${baseUrlFor('google')}/models/${encodeURIComponent(model.model)}:batchEmbedContents`,
     {
-      headers: { 'x-goog-api-key': process.env[PROVIDER_ENV.google.apiKey] },
+      headers: { 'x-goog-api-key': credentialFor(PROVIDER_ENV.google.apiKey) },
       body: {
         requests: texts.map((text) => ({
           model: `models/${model.model}`,

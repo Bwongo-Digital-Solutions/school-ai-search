@@ -1,0 +1,85 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+// The sign-in dialog. Carbon's Modal supplies the overlay, focus trap and Escape handling; this
+// styles the band across the top and the form beneath it.
+.modal {
+  :global(.cds--modal-container) {
+    // The heading band is the school's colour and runs full width, so Carbon's own header padding
+    // is removed and re-applied inside the band.
+    :global(.cds--modal-header) {
+      padding: 0;
+      margin: 0;
+    }
+
+    :global(.cds--modal-close-button) {
+      inset-block-start: 0;
+      inset-inline-end: 0;
+    }
+
+    :global(.cds--modal-close) svg {
+      fill: var(--brand-contrast, #ffffff);
+    }
+  }
+}
+
+// The band. One block of the school's colour, which is where the app introduces itself.
+.banner {
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-05;
+  padding: layout.$spacing-06 layout.$spacing-05;
+  background: var(--brand-01, #{$brand-01-fallback});
+  color: var(--brand-contrast, #ffffff);
+}
+
+.bannerMark {
+  inline-size: layout.$spacing-08;
+  block-size: layout.$spacing-08;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: rgb(255 255 255 / 20%);
+
+  svg {
+    fill: currentColor;
+  }
+}
+
+.bannerTitle {
+  display: block;
+  @include type.type-style('heading-03');
+  margin: 0;
+  color: inherit;
+}
+
+.bannerSub {
+  display: block;
+  @include type.type-style('body-compact-01');
+  margin: layout.$spacing-01 0 0;
+  color: inherit;
+  opacity: 0.85;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-05;
+  padding: layout.$spacing-06 layout.$spacing-05 layout.$spacing-05;
+}
+
+.switcher {
+  inline-size: 100%;
+}
+
+.note {
+  @include type.type-style('label-01');
+  color: $text-02;
+  margin: 0;
+}
+
+:global(.cds--g100) .note {
+  color: $text-02-dark;
+}

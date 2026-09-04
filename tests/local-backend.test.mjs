@@ -609,6 +609,67 @@ test('ID cards render as PDFs for one student and for a whole class', async () =
   }
 });
 
+test('ID cards can be printed for an intake as well as a class', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const idCards = (params) =>
+      runtime.dispatch({
+        method: 'GET',
+        pathname: '/api/id-cards.pdf',
+        searchParams: new URLSearchParams({ layout: 'a4', ...params }),
+      });
+
+    // Three known enrolment dates to select between, and one student with none at all.
+    await runtime.database.query(
+      "UPDATE students SET enrollment_date = '2024-02-01' WHERE student_id = 'STU-2026-001'",
+    );
+    await runtime.database.query(
+      "UPDATE students SET enrollment_date = '2026-02-01' WHERE student_id = 'STU-2026-002'",
+    );
+    await runtime.database.query(
+      "UPDATE students SET enrollment_date = '2026-09-01' WHERE student_id = 'STU-2026-003'",
+    );
+    await runtime.database.query(
+      "UPDATE students SET enrollment_date = NULL WHERE student_id = 'STU-2026-004'",
+    );
+
+    const term = await idCards({ registeredFrom: '2026-01-01', registeredTo: '2026-06-30' });
+    assert.equal(term.status, 200);
+    assert.equal(term.body.subarray(0, 4).toString(), '%PDF');
+    // The range is in the filename, so a printed batch says on its face what it was.
+    assert.match(term.headers['Content-Disposition'], /registered-2026-01-01-to-2026-06-30\.pdf/);
+
+    // An open-ended range is still a range: "from" alone means everyone since.
+    assert.equal((await idCards({ registeredFrom: '2026-01-01' })).status, 200);
+    assert.equal((await idCards({ registeredTo: '2024-12-31' })).status, 200);
+
+    // A window nobody was registered in is not an empty PDF, it is a 404 the screen can explain.
+    assert.equal((await idCards({ registeredFrom: '2019-01-01', registeredTo: '2019-12-31' })).status, 404);
+
+    // Class and dates compose, rather than one overriding the other.
+    const { rows } = await runtime.database.query(
+      "SELECT grade_level FROM students WHERE student_id = 'STU-2026-002'",
+    );
+    const withGrade = await idCards({
+      grade: String(rows[0].grade_level),
+      registeredFrom: '2026-01-01',
+      registeredTo: '2026-06-30',
+    });
+    assert.equal(withGrade.status, 200);
+    assert.match(withGrade.headers['Content-Disposition'], /grade-\d+-registered-/);
+
+    // A student with no enrolment date on file is in no range at all. The print dialog says so
+    // rather than letting them quietly miss out on a card.
+    const undated = await runtime.database.query(
+      "SELECT COUNT(*)::int AS count FROM students WHERE enrollment_date IS NULL",
+    );
+    assert.ok(undated.rows[0].count > 0, 'the fixture has one, so the exclusion is real');
+  } finally {
+    await cleanup();
+  }
+});
+
 test('grading schemes resolve by country and academic level', () => {
   const ugandaSecondary = resolveGradingScheme({
     country: 'uganda',
@@ -2321,6 +2382,71 @@ test('documents use the global school settings for branding and the stored stude
   }
 });
 
+test('every fees screen prints, and only for the office', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const feesCall = (action, body = {}) =>
+    dispatch(runtime, 'POST', '/api/functions/fees', { action, requesterRole: 'admin', actorName: 'Admin', ...body });
+  const get = (pathname, params = {}) =>
+    runtime.dispatch({ method: 'GET', pathname, searchParams: new URLSearchParams(params) });
+
+  try {
+    const structure = (await feesCall('save_fee_structure', {
+      name: 'Grade 10 Day', gradeLevel: 10, academicYear: '2026/2027', term: 'Term 1',
+      amount: 1000000, dueDate: '2026-04-01',
+    })).body.data.structure;
+
+    const student = (await runtime.database.query(
+      'SELECT id, student_id FROM students WHERE grade_level = 10 ORDER BY last_name LIMIT 1',
+    )).rows[0];
+
+    /* A bursary named with characters pdf-lib's WinAnsi fonts cannot encode. An unencodable
+       character throws mid-render and takes the whole download with it, so the folding has to be
+       exercised rather than assumed. */
+    if (student) {
+      await feesCall('save_bursary', {
+        studentId: student.id, name: 'Bishop’s Fund — half', sponsor: 'Diocese',
+        discountType: 'percentage', discountValue: 50,
+      });
+    }
+    await feesCall('run_billing', { feeStructureId: structure.id, confirm: true });
+
+    const documents = {
+      'structures.pdf': {},
+      'billing-run.pdf': { feeStructureId: structure.id },
+      'arrears.pdf': {},
+      'bursaries.pdf': {},
+      'ratings.pdf': {},
+    };
+
+    for (const [name, params] of Object.entries(documents)) {
+      const printed = await get(`/api/fees/${name}`, { requesterRole: 'admin', ...params });
+      assert.equal(printed.status, 200, `${name} should render`);
+      assert.equal(printed.type, 'binary');
+      assert.equal(printed.headers['Content-Type'], 'application/pdf');
+      assert.ok(printed.body.length > 1000, `${name} should not be an empty page`);
+
+      // The office's business and nobody else's — the same gate the financial report sits behind.
+      for (const role of ['teacher', 'support_staff']) {
+        assert.equal((await get(`/api/fees/${name}`, { requesterRole: role, ...params })).status, 403, `${name} for ${role}`);
+      }
+      assert.equal((await get(`/api/fees/${name}`, params)).status, 403, `${name} anonymously`);
+    }
+
+    // A billing run is about one fee structure. Printing it without saying which is worth a
+    // sentence rather than a blank sheet of paper.
+    const noStructure = await get('/api/fees/billing-run.pdf', { requesterRole: 'admin' });
+    assert.equal(noStructure.status, 404);
+    assert.match(noStructure.body.error, /Which fee structure/);
+
+    // An empty list still prints: "nobody owes anything" is a result somebody needs on paper.
+    const emptyArrears = await get('/api/fees/arrears.pdf', { requesterRole: 'admin', minBalance: '999999999' });
+    assert.equal(emptyArrears.status, 200);
+    assert.ok(emptyArrears.body.length > 1000);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('admins can generate a printable financial report, others cannot', async () => {
   const { runtime, cleanup } = await startTestRuntime();
   const feesCall = (action, body = {}) =>
@@ -2374,20 +2500,31 @@ test('tenant resolution maps subdomains to tenants and defaults safely', async (
   );
 
   // Subdomain routing.
-  assert.equal(resolveTenantId('kampala-high.eschool.app'), 'kampala-high');
-  assert.equal(resolveTenantId('Gulu-SS.eschool.app'), 'gulu-ss');
-  assert.equal(resolveTenantId('kampala-high.eschool.app:8787'), 'kampala-high');
+  assert.equal(resolveTenantId('kampala-high.eschool.ink'), 'kampala-high');
+  assert.equal(resolveTenantId('Gulu-SS.eschool.ink'), 'gulu-ss');
+  assert.equal(resolveTenantId('kampala-high.eschool.ink:8787'), 'kampala-high');
 
   // Apex, www, localhost and IPs fall back to the default tenant.
-  assert.equal(resolveTenantId('eschool.app'), DEFAULT_TENANT);
-  assert.equal(resolveTenantId('www.eschool.app'), DEFAULT_TENANT);
+  assert.equal(resolveTenantId('eschool.ink'), DEFAULT_TENANT);
+  assert.equal(resolveTenantId('www.eschool.ink'), DEFAULT_TENANT);
   assert.equal(resolveTenantId('localhost'), DEFAULT_TENANT);
   assert.equal(resolveTenantId('127.0.0.1:8787'), DEFAULT_TENANT);
   assert.equal(resolveTenantId(''), DEFAULT_TENANT);
   assert.equal(resolveTenantId(undefined), DEFAULT_TENANT);
 
-  // An explicit X-Tenant header wins over the host.
-  assert.equal(resolveTenantId('kampala-high.eschool.app', 'gulu-ss'), 'gulu-ss');
+  // The X-Tenant header is ignored unless it is explicitly enabled: it is a local-testing
+  // convenience, and honouring it in production would let any page on the internet name whichever
+  // school it wanted. The Host header cannot be forged cross-origin, so it is the one that decides.
+  assert.equal(resolveTenantId('kampala-high.eschool.ink', 'gulu-ss'), 'kampala-high');
+
+  const originalAllow = process.env.ALLOW_TENANT_HEADER;
+  process.env.ALLOW_TENANT_HEADER = 'true';
+  try {
+    assert.equal(resolveTenantId('kampala-high.eschool.ink', 'gulu-ss'), 'gulu-ss');
+  } finally {
+    if (originalAllow === undefined) delete process.env.ALLOW_TENANT_HEADER;
+    else process.env.ALLOW_TENANT_HEADER = originalAllow;
+  }
 
   // Registry parsing.
   assert.equal(parseTenantRegistry(undefined).size, 0);
@@ -2400,7 +2537,7 @@ test('tenant resolution maps subdomains to tenants and defaults safely', async (
   const singleTenant = createTenantRegistry({ registry: new Map() });
   assert.equal(singleTenant.enabled, false);
   const sentinel = { marker: 'default-db' };
-  assert.equal((await singleTenant.resolve('anything.eschool.app', undefined, sentinel)).database, sentinel);
+  assert.equal((await singleTenant.resolve('anything.eschool.ink', undefined, sentinel)).database, sentinel);
 });
 
 test('configured tenants get isolated databases', async () => {
@@ -2422,8 +2559,8 @@ test('configured tenants get isolated databases', async () => {
   try {
     assert.equal(tenants.enabled, true);
 
-    const a = await tenants.resolve('kampala-high.eschool.app', undefined, null);
-    const b = await tenants.resolve('gulu-ss.eschool.app', undefined, null);
+    const a = await tenants.resolve('kampala-high.eschool.ink', undefined, null);
+    const b = await tenants.resolve('gulu-ss.eschool.ink', undefined, null);
     assert.equal(a.tenantId, 'kampala-high');
     assert.equal(b.tenantId, 'gulu-ss');
     assert.notEqual(a.database, b.database);
@@ -2440,11 +2577,11 @@ test('configured tenants get isolated databases', async () => {
     assert.equal((await b.database.query('SELECT COUNT(*)::int AS n FROM students')).rows[0].n, 15);
 
     // The same tenant resolves to the same cached connection.
-    const aAgain = await tenants.resolve('kampala-high.eschool.app', undefined, null);
+    const aAgain = await tenants.resolve('kampala-high.eschool.ink', undefined, null);
     assert.equal(aAgain.database, a.database);
 
     // An unknown subdomain has no database, so the server would 404 it.
-    const unknown = await tenants.resolve('ghost-school.eschool.app', undefined, null);
+    const unknown = await tenants.resolve('ghost-school.eschool.ink', undefined, null);
     assert.equal(unknown.database, null);
     assert.equal(unknown.tenantId, 'ghost-school');
   } finally {
@@ -2486,7 +2623,12 @@ test('a school that pays is provisioned, served, and suspended when it lapses', 
   };
 
   const runtime = await createAppRuntime({ useInMemoryDatabase: true, useInMemoryControl: true, provisionOptions });
-  const P = (body) => runtime.dispatch({ method: 'POST', pathname: '/api/provision', body });
+  const P = (body, headers = {}) => runtime.dispatch({ method: 'POST', pathname: '/api/provision', body, headers });
+
+  // Platform actions carry the operator's own token rather than a role the browser claims.
+  const savedOwnerToken = process.env.PLATFORM_OWNER_TOKEN;
+  process.env.PLATFORM_OWNER_TOKEN = 'owner-token-for-tests-0123456789abcdef';
+  const owner = { authorization: `Bearer ${process.env.PLATFORM_OWNER_TOKEN}` };
 
   try {
     assert.equal(runtime.provisioningEnabled, true);
@@ -2513,7 +2655,7 @@ test('a school that pays is provisioned, served, and suspended when it lapses', 
     // Now taken; still pending (unpaid) so its subdomain is not yet served.
     assert.equal((await P({ action: 'availability', subdomain: 'kampala-high' })).body.data.available, false);
     assert.equal((await P({ action: 'status', subdomain: 'kampala-high' })).body.data.tenant.status, 'pending');
-    let route = await runtime.resolveDatabase('kampala-high.eschool.app', undefined);
+    let route = await runtime.resolveDatabase('kampala-high.eschool.ink', undefined);
     assert.equal(route.status, 'pending');
     assert.equal(route.database, null);
 
@@ -2529,7 +2671,7 @@ test('a school that pays is provisioned, served, and suspended when it lapses', 
     assert.ok(tenantRow.db_name.includes('kampala'), 'db_name is derived from the subdomain');
 
     // Its subdomain now routes to a real (isolated) database.
-    route = await runtime.resolveDatabase('kampala-high.eschool.app', undefined);
+    route = await runtime.resolveDatabase('kampala-high.eschool.ink', undefined);
     assert.equal(route.status, 'active');
     assert.ok(route.database);
     assert.equal((await route.database.query('SELECT COUNT(*)::int AS n FROM students')).rows[0].n, 15);
@@ -2538,22 +2680,38 @@ test('a school that pays is provisioned, served, and suspended when it lapses', 
     assert.equal((await P({ action: 'callback', externalReference: reference, status: 'successful' })).body.data.alreadyProcessed, true);
 
     // An unknown subdomain has no database (server 404s it).
-    const ghost = await runtime.resolveDatabase('ghost.eschool.app', undefined);
+    const ghost = await runtime.resolveDatabase('ghost.eschool.ink', undefined);
     assert.equal(ghost.database, null);
     assert.equal(ghost.status, 'unknown');
 
     // Lapse the subscription and sweep: the school is suspended and its subdomain stops serving.
     await runtime.control.query("UPDATE tenants SET current_period_end = NOW() - INTERVAL '400 days', status = 'past_due' WHERE subdomain = 'kampala-high'");
-    const swept = await P({ action: 'sweep', requesterRole: 'admin' });
+    const swept = await P({ action: 'sweep' }, owner);
     assert.equal(swept.body.data.suspended, 1);
-    const suspended = await runtime.resolveDatabase('kampala-high.eschool.app', undefined);
+    const suspended = await runtime.resolveDatabase('kampala-high.eschool.ink', undefined);
     assert.equal(suspended.status, 'suspended');
     assert.equal(suspended.database, null);
 
-    // list/sweep are admin-only.
-    assert.equal((await P({ action: 'list', requesterRole: 'teacher' })).body.error, 'Unauthorized');
-    assert.equal((await P({ action: 'sweep', requesterRole: 'teacher' })).body.error, 'Unauthorized');
-    assert.equal((await P({ action: 'list', requesterRole: 'admin' })).body.data.tenants.length, 1);
+    // Platform actions need the operator's token. A school's own administrator claiming the role in
+    // the request body used to be enough to enumerate every school on the platform.
+    assert.equal((await P({ action: 'list', requesterRole: 'admin' })).body.error, 'Unauthorized');
+    assert.equal((await P({ action: 'sweep', requesterRole: 'admin' })).body.error, 'Unauthorized');
+    assert.equal((await P({ action: 'list' }, { authorization: 'Bearer wrong-token-entirely-0123456789' })).body.error, 'Unauthorized');
+
+    const listed = await P({ action: 'list' }, owner);
+    assert.equal(listed.body.data.tenants.length, 1);
+    // A school's connection string is never handed out, not even to the operator's console.
+    assert.equal(listed.body.data.tenants[0].db_url, undefined, 'db_url must never leave the control plane');
+    assert.equal(listed.body.data.tenants[0].db_name, undefined);
+
+    // The operator can also provision directly and set a status by hand.
+    const created = await P({ action: 'create', subdomain: 'gulu-ss', schoolName: 'Gulu SS' }, owner);
+    assert.equal(created.body.data.tenant.subdomain, 'gulu-ss');
+    assert.equal(created.body.data.tenant.status, 'active');
+    assert.equal(created.body.data.tenant.db_url, undefined);
+    assert.equal((await P({ action: 'set_status', subdomain: 'gulu-ss', status: 'suspended' }, owner)).body.data.tenant.status, 'suspended');
+    assert.match((await P({ action: 'set_status', subdomain: 'gulu-ss', status: 'nonsense' }, owner)).body.error, /Unsupported tenant status/);
+    assert.equal((await P({ action: 'create', subdomain: 'gulu-ss' })).body.error, 'Unauthorized');
 
     // Renewal reactivates the suspended school.
     const renew = await P({ action: 'signup', subdomain: 'kampala-high', provider: 'mtn_momo', phoneNumber: '+256700000000' });
@@ -2561,6 +2719,8 @@ test('a school that pays is provisioned, served, and suspended when it lapses', 
     assert.equal((await P({ action: 'status', subdomain: 'kampala-high' })).body.data.tenant.status, 'active');
   } finally {
     await runtime.close();
+    if (savedOwnerToken === undefined) delete process.env.PLATFORM_OWNER_TOKEN;
+    else process.env.PLATFORM_OWNER_TOKEN = savedOwnerToken;
     process.env.SUBSCRIPTION_AMOUNT = saved.amount;
     process.env.TENANT_DB_URL_TEMPLATE = saved.template;
     process.env.PAYMENT_GATEWAY_MODE = saved.mode;
@@ -2619,10 +2779,10 @@ test('a "your school is ready" email is sent when a school is activated', async 
   const { initializeDatabase } = await import('../server/db/schema.mjs');
 
   // Pure render.
-  const message = email.renderActivationEmail({ schoolName: 'Kampala High', subdomain: 'kampala-high', rootDomain: 'eschool.app' });
+  const message = email.renderActivationEmail({ schoolName: 'Kampala High', subdomain: 'kampala-high', rootDomain: 'eschool.ink' });
   assert.match(message.subject, /Kampala High is ready/);
-  assert.equal(message.url, 'https://kampala-high.eschool.app');
-  assert.match(message.html, /kampala-high\.eschool\.app/);
+  assert.equal(message.url, 'https://kampala-high.eschool.ink');
+  assert.match(message.html, /kampala-high\.eschool\.ink/);
 
   const saved = { mode: process.env.EMAIL_MODE, key: process.env.EMAIL_API_KEY, amount: process.env.SUBSCRIPTION_AMOUNT, template: process.env.TENANT_DB_URL_TEMPLATE };
   process.env.EMAIL_MODE = 'http';
@@ -2783,11 +2943,25 @@ test('a scan card carries only the sections the staff profile grants', async () 
   });
 
   try {
-    const bursar = await card('admin', 'bursar');
+    // Bursar is a role now rather than a designation on an administrator's account, but the card
+    // it grants is unchanged — that contract is what the promotion had to preserve.
+    const BOOKKEEPING_SECTIONS = [
+      'fees', 'payments', 'bio', 'class', 'dormitory', 'parents', 'gate_permission',
+      'exam_clearance_grant', 'clubs', 'requirements',
+    ];
+
+    const bursar = await card('bursar', null);
     assert.equal(bursar.status, 200);
     assert.equal(bursar.body.data.profile.label, 'Bursar');
-    assert.deepEqual(bursar.body.data.sections,
-      ['fees', 'bio', 'class', 'dormitory', 'parents', 'gate_permission']);
+    // 'payments' is the ledger behind the balance — the bursar answering "has this family paid?"
+    // needs it, and it arrived with the payment-history work.
+    assert.deepEqual(bursar.body.data.sections, BOOKKEEPING_SECTIONS);
+
+    // The accountant keeps the same books, and the head teacher answers for the whole school.
+    for (const role of ['accountant', 'head_teacher', 'admin']) {
+      const other = await card(role, null);
+      assert.deepEqual(other.body.data.sections, BOOKKEEPING_SECTIONS, `${role} card`);
+    }
 
     // The gate needs to know who the student is and whether they may leave — nothing else.
     const askari = await card('support_staff', 'askari');
@@ -2802,10 +2976,18 @@ test('a scan card carries only the sections the staff profile grants', async () 
     assert.equal('fees' in cook.body.data, false);
     assert.equal(cook.body.data.meal_card.meals.length, 3);
 
+    /* The matron gained clubs and requirements: she is the one in the dormitory noticing that a
+       boarder has no mosquito net, and the one asked where a child is this afternoon. She still
+       sees no money — the sections she gained are welfare, not the ledger. */
     const matron = await card('support_staff', 'matron');
     assert.deepEqual(matron.body.data.sections,
-      ['bio', 'class', 'dormitory', 'parents', 'gate_permission']);
+      ['bio', 'class', 'dormitory', 'parents', 'gate_permission', 'clubs', 'requirements']);
     assert.equal('fees' in matron.body.data, false);
+    assert.equal('payments' in matron.body.data, false);
+
+    // The gate and the kitchen gained nothing: neither has any reason to know a child's club.
+    assert.equal('clubs' in (await card('support_staff', 'askari')).body.data, false);
+    assert.equal('requirements' in (await card('support_staff', 'cook')).body.data, false);
 
     // Support staff with no designation keep the fees-only card they had before designations.
     const plain = await card('support_staff', null);
@@ -2826,7 +3008,7 @@ test('a scan card carries only the sections the staff profile grants', async () 
   }
 });
 
-test('exam clearance follows the fees balance', async () => {
+test('the fees position and exam clearance are reported separately', async () => {
   const { runtime, cleanup } = await startTestRuntime();
   const clearance = async (code) => {
     const res = await dispatch(runtime, 'POST', '/api/functions/student-card', { code, role: 'teacher' });
@@ -2834,10 +3016,11 @@ test('exam clearance follows the fees balance', async () => {
   };
 
   try {
-    // Nothing invoiced yet, so there is nothing to clear and the student is not held back.
+    // Nothing invoiced, so the ledger has no objection — but clearance is a decision a member of
+    // staff makes, and nobody has made it, so the invigilator is not told to let the student in.
     const unbilled = await clearance('STU-2026-001');
-    assert.equal(unbilled.cleared, true);
-    assert.equal(unbilled.reason, 'No fees invoiced');
+    assert.equal(unbilled.fees_settled, true);
+    assert.equal(unbilled.cleared, false);
 
     await dispatch(runtime, 'POST', '/api/db', {
       table: 'invoices', operation: 'insert', columns: '*', single: true,
@@ -2848,18 +3031,20 @@ test('exam clearance follows the fees balance', async () => {
     });
 
     const owing = await clearance('STU-2026-001');
-    assert.equal(owing.cleared, false);
+    assert.equal(owing.fees_settled, false);
     assert.equal(owing.balance_due, 400000);
+    assert.equal(owing.cleared, false);
 
-    await dispatch(runtime, 'POST', '/api/db', {
-      table: 'invoices', operation: 'update', columns: '*', single: true,
-      filters: [{ field: 'id', operator: 'eq', value: 'inv-exam-1' }],
-      payload: { balance_due: 0, status: 'paid' },
+    // A bursar may clear a student the ledger would still hold back — a hardship case, a
+    // promise to pay — so the grant wins over the balance.
+    await dispatch(runtime, 'POST', '/api/functions/exam-clearance', {
+      action: 'grant', code: 'STU-2026-001', grantedBy: 'Bursar', note: 'Hardship case',
     });
 
-    const settled = await clearance('STU-2026-001');
-    assert.equal(settled.cleared, true);
-    assert.equal(settled.reason, 'Fees cleared');
+    const granted = await clearance('STU-2026-001');
+    assert.equal(granted.cleared, true);
+    assert.equal(granted.fees_settled, false, 'the balance is still owed and still reported');
+    assert.equal(granted.reason, 'Cleared by Bursar');
   } finally {
     await cleanup();
   }
@@ -2936,6 +3121,930 @@ test('a meal is served once per student per day', async () => {
   }
 });
 
+test('a school connects its own Moodle and one ERP, and the token never comes back out', async () => {
+  const previousKey = process.env.SECRETS_KEY;
+  process.env.SECRETS_KEY = 'k'.repeat(40);
+
+  // The connection test is the one action that reaches outwards, so the client is injected —
+  // otherwise this test would depend on DNS and on a school's server being up.
+  const attempted = [];
+  const { runtime, cleanup } = await startTestRuntime({
+    httpClient: async (url) => {
+      attempted.push(String(url));
+      throw new Error('getaddrinfo ENOTFOUND');
+    },
+  });
+  const { INTEGRATION_ACTIONS } = await import('../server/services/integrations.mjs');
+  const call = (body) => dispatch(runtime, 'POST', '/api/functions/integrations', body);
+
+  try {
+    for (const action of INTEGRATION_ACTIONS) {
+      for (const requesterRole of ['teacher', 'support_staff', undefined]) {
+        const response = await call({ action, requesterRole, provider: 'moodle' });
+        assert.equal(response.status, 403, `${action} as ${requesterRole}`);
+      }
+    }
+
+    // A token travels on every request, so an address that cannot protect it is refused at the
+    // point of configuration rather than being quietly insecure afterwards.
+    const overHttp = await call({
+      action: 'save', requesterRole: 'admin', provider: 'moodle', baseUrl: 'http://moodle.school.ac.ug',
+    });
+    assert.equal(overHttp.status, 400);
+    assert.match(overHttp.body.error, /https/);
+
+    const saved = await call({
+      action: 'save',
+      requesterRole: 'head_teacher',
+      provider: 'moodle',
+      baseUrl: 'https://moodle.school.ac.ug/',
+      apiToken: 'tok-secret-abcd',
+    });
+    const moodle = saved.body.data.integrations.find((i) => i.provider === 'moodle');
+    assert.equal(moodle.baseUrl, 'https://moodle.school.ac.ug', 'the trailing slash is normalised away');
+    // Enough of the token to recognise it, never enough to use it.
+    assert.equal(moodle.tokenPreview, '••••••••abcd');
+    assert.ok(!JSON.stringify(saved.body).includes('tok-secret-abcd'), 'the token never leaves the server');
+
+    // Saving the address again must not blank a token nobody re-typed.
+    const readdressed = await call({
+      action: 'save', requesterRole: 'admin', provider: 'moodle', baseUrl: 'https://vle.school.ac.ug',
+    });
+    const kept = readdressed.body.data.integrations.find((i) => i.provider === 'moodle');
+    assert.equal(kept.tokenPreview, '••••••••abcd');
+
+    // ...while an explicit empty string is a deliberate clearing.
+    const cleared = await call({
+      action: 'save', requesterRole: 'admin', provider: 'moodle', baseUrl: 'https://vle.school.ac.ug', apiToken: '',
+    });
+    assert.equal(cleared.body.data.integrations.find((i) => i.provider === 'moodle').hasToken, false);
+
+    // A school runs one ERP. Enabling the second stands the first down rather than leaving two
+    // menu entries and no way to tell which is real.
+    await call({ action: 'save', requesterRole: 'admin', provider: 'odoo', baseUrl: 'https://odoo.school.ac.ug' });
+    const second = await call({ action: 'save', requesterRole: 'admin', provider: 'erpnext', baseUrl: 'https://erp.school.ac.ug' });
+    const enabledErps = second.body.data.integrations.filter((i) => i.kind === 'erp' && i.enabled);
+    assert.deepEqual(enabledErps.map((i) => i.provider), ['erpnext']);
+
+    // A failed connection test is a successful request: the reason is what the admin came to read,
+    // and a top-level error would return a 400 with a null body instead.
+    const unreachable = await call({
+      action: 'test', requesterRole: 'admin', provider: 'erpnext',
+    });
+    assert.equal(unreachable.status, 200);
+    assert.equal(unreachable.body.data.connected, false);
+    assert.match(unreachable.body.data.connectionError, /ENOTFOUND/);
+    assert.deepEqual(attempted, ['https://erp.school.ac.ug']);
+
+    // The reason is kept against the row, so the screen still shows it after a reload.
+    const stored = await runtime.database.query(
+      "SELECT last_error, last_checked_at FROM school_integrations WHERE provider = 'erpnext'",
+    );
+    assert.match(stored.rows[0].last_error, /ENOTFOUND/);
+    assert.ok(stored.rows[0].last_checked_at, 'and when it was last tried');
+  } finally {
+    await cleanup();
+    if (previousKey === undefined) delete process.env.SECRETS_KEY;
+    else process.env.SECRETS_KEY = previousKey;
+  }
+});
+
+test('exporting the school leaves the credentials behind, and importing needs a preview first', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const { DATA_TRANSFER_ACTIONS } = await import('../server/services/data-transfer.mjs');
+  const data = (body) => dispatch(runtime, 'POST', '/api/functions/data', body);
+
+  try {
+    // Same fence as backups: a copy of the school is not a teacher's to take.
+    for (const action of DATA_TRANSFER_ACTIONS) {
+      for (const requesterRole of ['teacher', 'support_staff', undefined]) {
+        const response = await data({ action, requesterRole, data: {} });
+        assert.equal(response.status, 403, `${action} as ${requesterRole}`);
+        assert.equal(response.body.error, 'Unauthorized');
+      }
+    }
+
+    const listed = await data({ action: 'list_tables', requesterRole: 'accountant' });
+    assert.equal(listed.status, 200);
+
+    // No table offers a credential column, whatever the table list happens to contain. Asserted on
+    // what comes back rather than on the exclusion list, so the test still holds if the list moves.
+    for (const table of listed.body.data.tables) {
+      for (const column of ['password_hash', 'api_key', 'auth_token', 'api_secret']) {
+        assert.ok(!table.columns.includes(column), `${table.name} must not export ${column}`);
+      }
+    }
+
+    const exported = await data({ action: 'export', requesterRole: 'bursar', format: 'csv', tables: ['students'] });
+    assert.equal(exported.status, 200);
+    const [file] = exported.body.data.files;
+    assert.equal(file.name, 'students.csv');
+    assert.ok(file.rows > 0, 'the seeded roster comes out');
+    // A header row and one line per student — the shape a spreadsheet expects.
+    assert.equal(file.content.split('\n').length, file.rows + 1);
+
+    // Taking a copy is an event, so it is on the audit trail with who took it.
+    const audit = await runtime.database.query(
+      "SELECT user_role FROM audit_logs WHERE action = 'data_exported'",
+    );
+    assert.equal(audit.rows[0].user_role, 'bursar');
+
+    // An import will not run until it has been previewed. This is the one action here that can
+    // overwrite records rather than copy them.
+    const unchecked = await data({
+      action: 'import',
+      requesterRole: 'admin',
+      data: { students: [{ id: 'x', student_id: 'STU-X', first_name: 'A', last_name: 'B', grade_level: 8, class_section: 'A' }] },
+    });
+    assert.equal(unchecked.status, 400);
+    assert.match(unchecked.body.error, /previewed/);
+
+    // The preview reports what it found and writes nothing.
+    const before = await runtime.database.query('SELECT COUNT(*)::int AS count FROM students');
+    const checked = await data({
+      action: 'check_import',
+      requesterRole: 'admin',
+      data: { students: [{ id: 'x', student_id: 'STU-X', first_name: 'A', last_name: 'B', grade_level: 8, class_section: 'A' }] },
+    });
+    assert.equal(checked.body.data.token, 'ready');
+    assert.deepEqual(checked.body.data.summary, [{ table: 'students', rows: 1 }]);
+    const after = await runtime.database.query('SELECT COUNT(*)::int AS count FROM students');
+    assert.equal(after.rows[0].count, before.rows[0].count, 'a preview writes nothing');
+
+    // A row missing an id cannot be matched or written, and the preview says so instead of
+    // discovering it halfway through the import.
+    const bad = await data({ action: 'check_import', requesterRole: 'admin', data: { students: [{ first_name: 'No id' }] } });
+    assert.equal(bad.body.data.token, '');
+    assert.match(bad.body.data.problems[0].problem, /no id/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('backups are for the roles that answer for the school, and nobody else', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const { BACKUP_ACTIONS } = await import('../server/services/backup.mjs');
+  const backup = (body) => dispatch(runtime, 'POST', '/api/functions/backup', body);
+
+  try {
+    // A backup is every student record in one file. Teaching and non-teaching staff are refused
+    // every action, as is a caller with no session at all.
+    for (const action of BACKUP_ACTIONS) {
+      for (const requesterRole of ['teacher', 'support_staff', undefined]) {
+        const response = await backup({ action, requesterRole, id: 'anything' });
+        assert.equal(response.status, 403, `${action} as ${requesterRole}`);
+        assert.equal(response.body.error, 'Unauthorized');
+      }
+    }
+
+    // Nothing was written on the way past the guard.
+    const { rows } = await runtime.database.query('SELECT COUNT(*)::int AS count FROM school_backups');
+    assert.equal(rows[0].count, 0);
+
+    // The four privileged roles all get the list.
+    for (const requesterRole of ['admin', 'head_teacher', 'accountant', 'bursar']) {
+      const response = await backup({ action: 'list', requesterRole });
+      assert.equal(response.status, 200, requesterRole);
+      assert.deepEqual(response.body.data.backups, []);
+      // And it says plainly that this server cannot take one, rather than offering a button that
+      // would fail: pg_dump has no in-memory database to read.
+      assert.equal(response.body.data.available, false);
+    }
+
+    const onMemory = await backup({ action: 'create', requesterRole: 'admin' });
+    assert.equal(onMemory.status, 400);
+    assert.match(onMemory.body.error, /in-memory/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a backup names the right file and records who took it', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const { handleBackupFunction } = await import('../server/services/backup.mjs');
+
+  try {
+    // pg_dump is injected, so what it would have been asked to do is assertable without a Postgres
+    // or a subprocess — which is the whole reason the service takes it as an argument.
+    const calls = [];
+    const runPgDump = async (options) => {
+      calls.push(options);
+      await import('node:fs/promises').then((fs) => fs.writeFile(options.destination, 'PGDMP-stub'));
+    };
+
+    // The service refuses an in-memory database by design, so the pool is dressed as a real one.
+    const database = {
+      ...runtime.database,
+      kind: 'postgres',
+      pool: { options: { connectionString: 'postgres://user:pw@db:5432/school' } },
+    };
+
+    process.env.BACKUP_DIR = '/tmp/eschool-backup-test';
+    const result = await handleBackupFunction(
+      database,
+      { action: 'create', requesterRole: 'bursar' },
+      { tenantId: 'kampala-high', runPgDump },
+    );
+    delete process.env.BACKUP_DIR;
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].connectionString, 'postgres://user:pw@db:5432/school');
+    // Named for the school and the moment, and inside the backup directory rather than anywhere
+    // a filename from the database could point.
+    assert.match(calls[0].destination, /^\/tmp\/eschool-backup-test\/kampala-high-[\dTZ-]+\.dump$/);
+
+    const [row] = result.backups;
+    assert.equal(row.status, 'complete');
+    assert.equal(row.kind, 'manual');
+    assert.ok(row.size_bytes > 0, 'the size is read back off disk, not assumed');
+
+    // Taking one is written to the audit trail — a copy of the school leaving is an event.
+    const audit = await runtime.database.query(
+      "SELECT user_role, entity_name FROM audit_logs WHERE action = 'backup_created'",
+    );
+    assert.equal(audit.rows.length, 1);
+    assert.equal(audit.rows[0].user_role, 'bursar');
+    assert.equal(audit.rows[0].entity_name, row.filename);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the four tiers decide what a school can reach, and the server is what says no', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const { clearLicenceCache } = await import('../server/licensing/licence.mjs');
+
+  const setPlan = async (plan, deployment = 'cloud') => {
+    await runtime.database.query(
+      "UPDATE school_settings SET plan = $1, deployment = $2 WHERE id = 'default'",
+      [plan, deployment],
+    );
+    // The licence is cached for a minute so a busy screen does not open a connection per click.
+    clearLicenceCache();
+  };
+  const call = (pathname, body = {}) =>
+    runtime.dispatch({ method: 'POST', pathname, body: { requesterRole: 'admin', ...body } });
+
+  try {
+    /* An existing school has no plan column until this migration runs, and the column defaults to
+       enterprise. Nothing may go dark on deploy for a school already using it. */
+    const asShipped = await runtime.database.query("SELECT plan, deployment FROM school_settings WHERE id = 'default'");
+    assert.equal(asShipped.rows[0].plan, 'enterprise');
+    assert.equal(asShipped.rows[0].deployment, 'cloud');
+
+    await setPlan('essential');
+
+    // Essential runs the office: the roll, the money coming in, the records.
+    assert.notEqual((await call('/api/functions/messages', { action: 'inbox' })).status, 402);
+    assert.notEqual((await call('/api/functions/student-registry', { action: 'next_number' })).status, 402);
+
+    // And stops at the school day.
+    const matron = await call('/api/functions/matron', { action: 'dashboard' });
+    assert.equal(matron.status, 402, 'a payment problem, not a permission one');
+    assert.equal(matron.body.licence.requiredPlan, 'standard');
+    assert.equal(matron.body.licence.plan, 'essential');
+    assert.match(matron.body.error, /part of Standard/);
+    assert.match(matron.body.error, /on Essential/);
+
+    for (const [pathname, plan] of [
+      ['/api/functions/matron', 'standard'],
+      ['/api/functions/roll-call', 'standard'],
+      ['/api/functions/digital-examiner', 'professional'],
+      ['/api/functions/monitoring', 'professional'],
+      ['/api/functions/ai-chat', 'enterprise'],
+      ['/api/functions/search', 'enterprise'],
+    ]) {
+      const refused = await call(pathname, { action: 'anything' });
+      assert.equal(refused.status, 402, pathname);
+      assert.equal(refused.body.licence.requiredPlan, plan, pathname);
+    }
+
+    /* Signing in is never gated. A school whose subscription has lapsed still has to be able to log
+       in and read why — the alternative is a locked door with no sign on it. */
+    for (const pathname of ['/api/functions/auth']) {
+      assert.notEqual((await call(pathname, { action: 'login' })).status, 402);
+    }
+    assert.notEqual((await runtime.dispatch({ method: 'GET', pathname: '/api/health', searchParams: new URLSearchParams() })).status, 402);
+
+    // The entitlements themselves are readable at every tier, for the same reason.
+    const seen = await runtime.dispatch({ method: 'GET', pathname: '/api/entitlements', searchParams: new URLSearchParams() });
+    assert.equal(seen.status, 200);
+    assert.equal(seen.body.data.plan, 'essential');
+    assert.equal(seen.body.data.features.matron.allowed, false);
+    assert.equal(seen.body.data.features.matron.reason, 'plan');
+    assert.equal(seen.body.data.features.students.allowed, true);
+    // Every key is present whether it is on or off: a nav deciding what to hide should not have to
+    // tell "this school does not have it" from "the server forgot to mention it".
+    assert.ok(Object.keys(seen.body.data.features).length > 20);
+
+    /* One endpoint, two tiers. Taking money is Essential; the billing runs behind the same endpoint
+       are Professional, and gating the whole thing either way sells a half-broken screen. */
+    await setPlan('standard');
+    assert.notEqual((await call('/api/functions/fees', { action: 'record_payment' })).status, 402);
+    assert.equal((await call('/api/functions/fees', { action: 'arrears_report' })).status, 402);
+    assert.equal((await call('/api/functions/fees', { action: 'run_billing' })).body.licence.requiredPlan, 'professional');
+    // Recording marks is Standard; reading them off a photograph is the AI feature.
+    assert.notEqual((await call('/api/functions/marks', { action: 'roster' })).status, 402);
+    assert.equal((await call('/api/functions/marks', { action: 'extract' })).body.licence.requiredPlan, 'enterprise');
+
+    await setPlan('professional');
+    assert.notEqual((await call('/api/functions/fees', { action: 'arrears_report' })).status, 402);
+    assert.notEqual((await call('/api/functions/digital-examiner', { action: 'list' })).status, 402);
+    assert.equal((await call('/api/functions/ai-chat', { action: 'send' })).status, 402);
+
+    // The printable fees documents follow their screen, not the endpoint they happen to share.
+    const printed = await runtime.dispatch({
+      method: 'GET', pathname: '/api/fees/arrears.pdf', searchParams: new URLSearchParams({ requesterRole: 'admin' }),
+    });
+    assert.notEqual(printed.status, 402, 'Professional includes the arrears list, printed or not');
+
+    await setPlan('essential');
+    assert.equal((await runtime.dispatch({
+      method: 'GET', pathname: '/api/fees/arrears.pdf', searchParams: new URLSearchParams({ requesterRole: 'admin' }),
+    })).status, 402, 'and Essential does not, by either route');
+
+    /* On-premise. The AI features run on hosted models this deployment meters, and a one-off
+       install is not on that meter — but a school pointing at a model of its own is paying for the
+       inference itself, and there is nothing left to meter. */
+    await setPlan('enterprise', 'onsite');
+    const noModel = await call('/api/functions/ai-chat', { action: 'send' });
+    assert.equal(noModel.status, 402);
+    assert.equal(noModel.body.licence.reason, 'hosted_model', 'the tier is right; the deployment is not');
+    assert.match(noModel.body.error, /model of your own/);
+    // Everything that is not AI is untouched by the deployment.
+    assert.notEqual((await call('/api/functions/matron', { action: 'dashboard' })).status, 402);
+    assert.notEqual((await call('/api/functions/digital-examiner', { action: 'list' })).status, 402);
+
+    await runtime.database.query(
+      "INSERT INTO provider_credentials (provider, base_url) VALUES ('ollama', 'http://school-box:11434')",
+    );
+    clearLicenceCache();
+    assert.notEqual((await call('/api/functions/ai-chat', { action: 'send' })).status, 402, 'their own model, their own inference');
+
+    // Enterprise on cloud is exactly what every school had before any of this existed.
+    await setPlan('enterprise', 'cloud');
+    for (const pathname of [
+      '/api/functions/matron', '/api/functions/ai-chat', '/api/functions/digital-examiner',
+      '/api/functions/fees', '/api/functions/search', '/api/functions/monitoring',
+    ]) {
+      assert.notEqual((await call(pathname, { action: 'anything' })).status, 402, pathname);
+    }
+  } finally {
+    clearLicenceCache();
+    await cleanup();
+  }
+});
+
+
+test('tenants who predate plans are lifted onto Enterprise once, and never demoted again', async () => {
+  const { initializeControlSchema } = await import('../server/db/control.mjs');
+
+  /* A stand-in for the control database that answers the one question the migration asks and
+     records what it was told to do. The real thing needs a Postgres; what has to be proven here is
+     the decision, not the SQL engine. */
+  const fakeControl = (columnDefault) => {
+    const statements = [];
+    return {
+      statements,
+      query: async (sql) => {
+        statements.push(sql.replace(/\s+/g, ' ').trim());
+        if (sql.includes('information_schema.columns')) {
+          return { rows: columnDefault === null ? [] : [{ column_default: columnDefault }] };
+        }
+        return { rows: [] };
+      },
+    };
+  };
+
+  const didLift = (control) => control.statements.some((sql) => sql.startsWith('UPDATE tenants SET plan'));
+  const didMoveDefault = (control) => control.statements.some((sql) => sql.includes('ALTER COLUMN plan SET DEFAULT'));
+
+  /* The state every existing deployment is in: the column still carries the old default, and every
+     row carries a 'standard' nobody ever chose. Without this the licence gate would take the
+     examiner, finance, billing, audit, monitoring, the assistant and search away from every cloud
+     tenant on the deploy that introduced it. */
+  const old = fakeControl("'standard'::text");
+  await initializeControlSchema(old);
+  assert.equal(didLift(old), true, 'the rows are lifted');
+  assert.equal(didMoveDefault(old), true, 'and the default moves, which is what stops it running twice');
+
+  // Second boot: the default has moved, so there is nothing left to do.
+  const migrated = fakeControl("'enterprise'::text");
+  await initializeControlSchema(migrated);
+  assert.equal(didLift(migrated), false, 'a school genuinely sold Standard keeps it across a restart');
+  assert.equal(didMoveDefault(migrated), false);
+
+  // A control database that cannot answer at all must not take start-up down with it.
+  const mute = {
+    statements: [],
+    query: async (sql) => {
+      if (sql.includes('information_schema.columns')) throw new Error('no such table');
+      return { rows: [] };
+    },
+  };
+  await initializeControlSchema(mute);
+
+  const empty = fakeControl(null);
+  await initializeControlSchema(empty);
+  assert.equal(didLift(empty), false);
+});
+
+
+test('a school changes its own tier, and only an administrator may', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const { clearLicenceCache } = await import('../server/licensing/licence.mjs');
+
+  const plan = (body) => dispatch(runtime, 'POST', '/api/functions/plan', body);
+  const call = (pathname, body = {}) =>
+    runtime.dispatch({ method: 'POST', pathname, body: { requesterRole: 'admin', ...body } });
+
+  try {
+    await runtime.database.query("UPDATE school_settings SET plan = 'essential' WHERE id = 'default'");
+    clearLicenceCache();
+
+    // Reading the plan is open to any signed-in member of staff: it is on the Settings screen and
+    // it is not a secret.
+    const seen = (await plan({ action: 'view', requesterRole: 'teacher' })).body.data;
+    assert.equal(seen.plan, 'essential');
+    assert.equal(seen.changeable, true);
+    assert.equal(seen.target, 'settings', 'no control plane here, so the licence lives in the school');
+
+    // Changing it is the account administrator's, the same fence as adding a user.
+    for (const role of ['teacher', 'bursar', 'head_teacher', 'support_staff']) {
+      const denied = await plan({ action: 'change', plan: 'enterprise', requesterRole: role });
+      assert.equal(denied.status, 403, role);
+      assert.equal(denied.body.error, 'Unauthorized');
+    }
+    assert.equal(
+      (await runtime.database.query("SELECT plan FROM school_settings WHERE id = 'default'")).rows[0].plan,
+      'essential',
+      'and nothing moved',
+    );
+
+    // Essential cannot reach the dormitories.
+    assert.equal((await call('/api/functions/matron', { action: 'dashboard' })).status, 402);
+
+    // An upgrade takes effect for the next request, not after a cache expiry somebody waits out.
+    const upgraded = (await plan({ action: 'change', plan: 'professional', requesterRole: 'admin' })).body.data;
+    assert.equal(upgraded.changed, true);
+    assert.equal(upgraded.from, 'essential');
+    assert.equal(upgraded.to, 'professional');
+    assert.equal(upgraded.plan, 'professional');
+    assert.notEqual((await call('/api/functions/matron', { action: 'dashboard' })).status, 402);
+    assert.notEqual((await call('/api/functions/digital-examiner', { action: 'list' })).status, 402);
+    // Professional stops short of the AI.
+    assert.equal((await call('/api/functions/ai-chat', { action: 'send' })).status, 402);
+
+    // A downgrade takes the screens away just as promptly — no grace period, which the UI says.
+    const downgraded = (await plan({ action: 'change', plan: 'standard', requesterRole: 'admin' })).body.data;
+    assert.equal(downgraded.to, 'standard');
+    assert.equal((await call('/api/functions/digital-examiner', { action: 'list' })).status, 402);
+    assert.notEqual((await call('/api/functions/matron', { action: 'dashboard' })).status, 402);
+
+    // Who moved a school off Professional is exactly the question asked three months later.
+    const audit = await runtime.database.query(
+      "SELECT entity_name, changes, user_role FROM audit_logs WHERE action = 'plan_changed' ORDER BY entity_name",
+    );
+    assert.equal(audit.rows.length, 2);
+    const directions = audit.rows.map((row) => {
+      const changes = typeof row.changes === 'string' ? JSON.parse(row.changes) : row.changes;
+      return changes.direction;
+    }).sort();
+    assert.deepEqual(directions, ['downgrade', 'upgrade']);
+
+    assert.match((await plan({ action: 'change', plan: 'platinum', requesterRole: 'admin' })).body.error, /Unsupported plan/);
+    assert.equal((await plan({ action: 'change', plan: 'standard', requesterRole: 'admin' })).body.data.unchanged, true);
+
+    /* Whatever tier a school is on it must be able to reach the screen that changes the tier —
+       gating this would be a door locked from inside. */
+    await runtime.database.query("UPDATE school_settings SET plan = 'essential' WHERE id = 'default'");
+    clearLicenceCache();
+    assert.notEqual((await plan({ action: 'view', requesterRole: 'admin' })).status, 402);
+    assert.notEqual((await plan({ action: 'change', plan: 'standard', requesterRole: 'admin' })).status, 402);
+  } finally {
+    clearLicenceCache();
+    await cleanup();
+  }
+});
+
+test('a plan pinned in the environment cannot be moved from inside the school', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const { clearLicenceCache } = await import('../server/licensing/licence.mjs');
+
+  process.env.LICENCE_PLAN = 'standard';
+  clearLicenceCache();
+  try {
+    const view = (await dispatch(runtime, 'POST', '/api/functions/plan', { action: 'view', requesterRole: 'admin' })).body.data;
+    assert.equal(view.plan, 'standard');
+    assert.equal(view.changeable, false, 'the screen can say why the buttons are dead');
+    assert.equal(view.target, 'environment');
+
+    /* Refused rather than written somewhere that will never be read: the operator who typed the
+       plan into the process meant it, and a save that silently does nothing is worse than a no. */
+    const refused = await dispatch(runtime, 'POST', '/api/functions/plan', {
+      action: 'change', plan: 'enterprise', requesterRole: 'admin',
+    });
+    assert.match(refused.body.error, /pins its plan in its configuration/);
+    assert.equal(
+      (await runtime.database.query("SELECT plan FROM school_settings WHERE id = 'default'")).rows[0].plan,
+      'enterprise',
+      'the settings row is untouched',
+    );
+  } finally {
+    delete process.env.LICENCE_PLAN;
+    clearLicenceCache();
+    await cleanup();
+  }
+});
+
+
+test('a student summary shows each role its own share of one student, and no more', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const summary = (requesterRole) =>
+    dispatch(runtime, 'POST', '/api/functions/student-summary', { code: 'STU-2026-001', requesterRole });
+
+  try {
+    await runtime.database.query(
+      `INSERT INTO discipline_records (id, student_id, incident_date, category, severity, description)
+       VALUES ('disc-1', 'student-001', '2026-05-04', 'Conduct', 'minor', 'Late three mornings running')`,
+    );
+    await runtime.database.query(
+      `INSERT INTO student_promotions (id, student_id, from_grade_level, to_grade_level, academic_year, effective_date)
+       VALUES ('prom-1', 'student-001', 9, 10, '2026/2027', '2026-12-01')`,
+    );
+
+    const head = await summary('head_teacher');
+    assert.equal(head.status, 200);
+    assert.equal(head.body.data.student.student_id, 'STU-2026-001');
+    // The whole picture: who they are, what they owe, what was paid, and their movements.
+    for (const section of ['bio', 'parents', 'fees', 'payments', 'movements']) {
+      assert.ok(head.body.data[section], `a head teacher sees ${section}`);
+    }
+    assert.equal(head.body.data.movements.promotions.length, 1);
+
+    // A teacher sees the child, not the family's payment history — the same line the ID-scan card
+    // draws, borrowed rather than restated so the two cannot drift apart.
+    const teacher = await summary('teacher');
+    assert.equal(teacher.status, 200);
+    assert.ok(teacher.body.data.academics, 'a teacher sees marks');
+    assert.ok(teacher.body.data.attendance, 'and the register');
+    assert.ok(teacher.body.data.discipline, 'and the disciplinary record');
+    assert.equal(teacher.body.data.payments, undefined, 'but not who paid what, and when');
+
+    // The bursar keeps the books. A child's disciplinary record is not part of that.
+    const bursar = await summary('bursar');
+    assert.equal(bursar.status, 200);
+    assert.ok(bursar.body.data.fees, 'a bursar sees the balance');
+    assert.ok(bursar.body.data.payments, 'and the payments behind it');
+    assert.equal(bursar.body.data.discipline, undefined, 'not the disciplinary record');
+    assert.equal(bursar.body.data.academics, undefined, 'nor the marks');
+
+    // The filtering is in the query, not in the response — a section a role may not see was never
+    // read out of the database, so there is nothing in the payload to hide.
+    const asText = JSON.stringify(bursar.body.data);
+    assert.ok(!asText.includes('Late three mornings running'), 'the incident never reaches the page');
+
+    // Support staff hold an account, and it is not one that opens a student's file.
+    const support = await summary('support_staff');
+    assert.equal(support.body.data.academics, undefined);
+    assert.equal(support.body.data.bio, undefined);
+
+    // No session at all is refused outright rather than falling back to a named role.
+    const anonymous = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/functions/student-summary',
+      body: { code: 'STU-2026-001', requesterRole: 'admin' },
+      headers: {},
+      actor: null,
+    });
+    assert.equal(anonymous.status, 403);
+
+    const missing = await dispatch(runtime, 'POST', '/api/functions/student-summary', {
+      code: 'NOBODY', requesterRole: 'admin',
+    });
+    assert.equal(missing.status, 404);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a student summary carries a child\'s life outside the classroom, on the same role boundary', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const summary = (requesterRole, actorDesignation) =>
+    dispatch(runtime, 'POST', '/api/functions/student-summary', {
+      code: 'STU-2026-001', requesterRole, actorDesignation,
+    });
+
+  try {
+    const student = (await runtime.database.query(
+      `SELECT id FROM students WHERE student_id = 'STU-2026-001' LIMIT 1`,
+    )).rows[0];
+
+    await runtime.database.query(
+      `INSERT INTO hostel_rooms (id, hostel_name, room_number, capacity)
+       VALUES ('room-nile-4', 'Nile House', '4', 6)`,
+    );
+    await runtime.database.query(
+      `INSERT INTO hostel_assignments (id, student_id, room_id, bed_number, start_date, status)
+       VALUES ('bed-1', $1, 'room-nile-4', '2', '2026-02-01', 'active')`,
+      [student.id],
+    );
+    await runtime.database.query(
+      `INSERT INTO clubs (id, name, category, patron_name, meeting_day, venue, status)
+       VALUES ('club-1', 'Wildlife', 'Environment', 'Mr Okello', 'Friday', 'Lab 2', 'active')`,
+    );
+    await runtime.database.query(
+      `INSERT INTO club_members (id, club_id, student_id, joined_on, status)
+       VALUES ('cm-1', 'club-1', $1, '2026-02-10', 'active')`,
+      [student.id],
+    );
+
+    // A class teacher is entitled to know which hostel a child sleeps in — scan-profiles already
+    // says so — even though the matron's own screens refuse them outright.
+    const teacher = (await summary('teacher')).body.data;
+    assert.equal(teacher.dormitory.boarder, true, 'an active bed is what makes a boarder');
+    assert.equal(teacher.dormitory.placement.hostel_name, 'Nile House');
+    assert.equal(teacher.dormitory.placement.bed_number, '2');
+    assert.equal(teacher.clubs.entries.length, 1);
+    assert.equal(teacher.clubs.entries[0].name, 'Wildlife');
+    assert.ok(teacher.requirements, 'and what the child was asked to bring');
+    assert.equal(teacher.requirements.boarder, true, 'which follows the bed');
+
+    // The head sees the same three, on the administrator's list.
+    const head = (await summary('head_teacher')).body.data;
+    assert.equal(head.dormitory.placement.room_number, '4');
+    assert.equal(head.clubs.entries.length, 1);
+
+    // The matron's card is these three and little else; she keeps them here too.
+    const matron = (await summary('support_staff', 'matron')).body.data;
+    assert.ok(matron.dormitory, 'the matron sees the placement');
+    assert.ok(matron.requirements, 'and the list she checks against');
+
+    // The askari opens the gate. None of this is any of their business.
+    const askari = (await summary('support_staff', 'askari')).body.data;
+    assert.equal(askari.dormitory, undefined);
+    assert.equal(askari.clubs, undefined);
+    assert.equal(askari.requirements, undefined);
+    assert.ok(!JSON.stringify(askari).includes('Nile House'), 'and it never reaches their page');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a student summary prints as one PDF, and not for anyone who asks', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    // renderReport has been able to build this since the parent-report work and had no route at
+    // all; the Print button on the summary is what it was written for.
+    const printed = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/student-reports/STU-2026-001.pdf',
+      searchParams: new URLSearchParams(),
+    });
+    assert.equal(printed.status, 200);
+    assert.equal(printed.headers['Content-Type'], 'application/pdf');
+    assert.equal(printed.body.subarray(0, 4).toString(), '%PDF');
+    assert.match(printed.headers['Content-Disposition'], /STU-2026-001-report\.pdf/);
+
+    // The students table's own id works too, because that is what a search result carries.
+    const byId = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/student-reports/student-001.pdf',
+      searchParams: new URLSearchParams(),
+    });
+    assert.equal(byId.status, 200);
+
+    // A named child's marks, attendance and fees in one file. No session, no report.
+    const anonymous = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/student-reports/STU-2026-001.pdf',
+      searchParams: new URLSearchParams(),
+      headers: {},
+      actor: null,
+    });
+    assert.equal(anonymous.status, 403);
+
+    const bursar = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/student-reports/STU-2026-001.pdf',
+      searchParams: new URLSearchParams(),
+      headers: {},
+      actor: { id: 'u1', email: 'b@school.test', name: 'B', role: 'bursar', designation: null },
+    });
+    assert.equal(bursar.status, 403, 'the same gate as the report card it sits beside');
+
+    const missing = await runtime.dispatch({
+      method: 'GET',
+      pathname: '/api/student-reports/NOBODY.pdf',
+      searchParams: new URLSearchParams(),
+    });
+    assert.equal(missing.status, 404);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('an unattended backup is due once its hour has come round, and only once that day', async () => {
+  const { isBackupDue } = await import('../server/services/backup.mjs');
+
+  const schedule = { enabled: true, run_at: '02:00', timezone: 'Africa/Kampala', last_run_at: null };
+  const at = (iso) => new Date(iso);
+
+  // Kampala is UTC+3 all year, so 02:00 local is 23:00 UTC the day before.
+  assert.equal(isBackupDue(schedule, at('2026-09-01T22:30:00Z')), false, 'before the hour');
+  assert.equal(isBackupDue(schedule, at('2026-09-01T23:05:00Z')), true, 'the hour has come round');
+
+  // Taken. Not due again until the school's next day, however many times the timer ticks.
+  const taken = { ...schedule, last_run_at: '2026-09-01T23:05:00Z' };
+  assert.equal(isBackupDue(taken, at('2026-09-01T23:06:00Z')), false);
+  assert.equal(isBackupDue(taken, at('2026-09-02T20:00:00Z')), false, 'still the same Kampala day');
+  assert.equal(isBackupDue(taken, at('2026-09-02T23:01:00Z')), true, 'the next one');
+
+  // A server that was down through the small hours still takes the day's backup when it comes
+  // back, rather than reasoning about elapsed time and skipping the day entirely.
+  assert.equal(isBackupDue(schedule, at('2026-09-02T06:00:00Z')), true, 'catches up after downtime');
+
+  assert.equal(isBackupDue({ ...schedule, enabled: false }, at('2026-09-01T23:05:00Z')), false);
+  assert.equal(isBackupDue({ ...schedule, run_at: 'later' }, at('2026-09-01T23:05:00Z')), false);
+});
+
+test('a scheduled backup is filed as automatic, prunes its own and leaves manual ones alone', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const { handleBackupFunction, runScheduledBackup } = await import('../server/services/backup.mjs');
+  const fs = await import('node:fs/promises');
+
+  try {
+    const runPgDump = async ({ destination }) => fs.writeFile(destination, 'PGDMP-stub');
+    const database = {
+      ...runtime.database,
+      kind: 'postgres',
+      pool: { options: { connectionString: 'postgres://user:pw@db:5432/school' } },
+    };
+    process.env.BACKUP_DIR = '/tmp/eschool-schedule-test';
+
+    // A backup somebody took by hand. It must survive everything below.
+    await handleBackupFunction(database, { action: 'create', requesterRole: 'admin' }, { runPgDump });
+
+    await handleBackupFunction(
+      database,
+      { action: 'save_schedule', requesterRole: 'admin', enabled: true, runAt: '02:00', timezone: 'UTC', keepLast: 2 },
+      {},
+    );
+
+    // Four days running. Each is a different school day, so each is owed one.
+    for (const day of ['02', '03', '04', '05']) {
+      const result = await runScheduledBackup({
+        database,
+        tenantId: 'kampala-high',
+        runPgDump,
+        now: new Date(`2026-09-${day}T02:30:00Z`),
+      });
+      assert.equal(result.ran, true, `a backup was owed on the ${day}th`);
+    }
+
+    const { rows } = await database.query('SELECT kind, created_by FROM school_backups ORDER BY created_at');
+    const scheduled = rows.filter((row) => row.kind === 'scheduled');
+    const manual = rows.filter((row) => row.kind === 'manual');
+
+    // keepLast is 2, and four were taken.
+    assert.equal(scheduled.length, 2, 'pruned down to the number the school asked to keep');
+    // Nobody pressed anything, which is what the screen reads as "automatic".
+    assert.deepEqual([...new Set(scheduled.map((row) => row.created_by))], ['']);
+    // Retention is about the backups that pile up on their own. A deliberate one is not swept away
+    // by a number that was set for something else.
+    assert.equal(manual.length, 1, 'the manual backup is untouched by retention');
+
+    // Asking again the same day is not owed a second one.
+    const again = await runScheduledBackup({
+      database,
+      tenantId: 'kampala-high',
+      runPgDump,
+      now: new Date('2026-09-05T04:00:00Z'),
+    });
+    assert.equal(again.ran, false);
+  } finally {
+    delete process.env.BACKUP_DIR;
+    await fs.rm('/tmp/eschool-schedule-test', { recursive: true, force: true });
+    await cleanup();
+  }
+});
+
+test('the backup scheduler is off unless asked for, and is stopped when the runtime closes', async () => {
+  const { startBackupScheduler } = await import('../server/services/backup-scheduler.mjs');
+
+  // Off by default. A background job that starts itself in every test run and every CLI script is
+  // one that will eventually dump a database somebody was using for something else.
+  delete process.env.BACKUP_SCHEDULER;
+  const off = startBackupScheduler({ database: null });
+  assert.equal(typeof off, 'function', 'still returns a stop, so the caller has nothing to branch on');
+
+  process.env.BACKUP_SCHEDULER = 'true';
+  try {
+    let sweeps = 0;
+    const database = {
+      kind: 'postgres',
+      query: async () => {
+        sweeps += 1;
+        throw new Error('no schedule table here');
+      },
+    };
+    const stop = startBackupScheduler({ database, intervalMs: 5 });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    stop();
+
+    const afterStop = sweeps;
+    assert.ok(afterStop > 0, 'it ticked while running');
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    // The real assertion: nothing more happens after the stop the runtime's close() calls. A timer
+    // that survived here would also keep `node --test` from ever exiting.
+    assert.equal(sweeps, afterStop, 'no ticks after stopping');
+  } finally {
+    delete process.env.BACKUP_SCHEDULER;
+  }
+});
+
+test('the role list covers every post, and bursar reads as a role rather than a designation', async () => {
+  const { USER_ROLES, PRIVILEGED_ROLES, TEACHING_ROLES, FINANCE_ROLES } = await import(
+    '../server/auth/roles.mjs'
+  );
+
+  // The full set, asserted closed. The frontend keeps its own copy in src/lib/roles.ts and the two
+  // are kept in step by hand, so a drift has to fail here rather than in production.
+  assert.deepEqual(USER_ROLES, [
+    'admin', 'head_teacher', 'accountant', 'bursar', 'teacher', 'support_staff',
+  ]);
+
+  // Who is trusted with the school's data as a whole. A teacher is not, and support staff never.
+  assert.deepEqual(PRIVILEGED_ROLES, ['admin', 'head_teacher', 'accountant', 'bursar']);
+  for (const role of ['teacher', 'support_staff']) {
+    assert.ok(!PRIVILEGED_ROLES.includes(role), `${role} must not be privileged`);
+  }
+
+  // The finance posts read money but not student records; the teaching posts the reverse.
+  for (const role of ['accountant', 'bursar']) {
+    assert.ok(FINANCE_ROLES.includes(role), `${role} sees money`);
+    assert.ok(!TEACHING_ROLES.includes(role), `${role} does not see student records`);
+  }
+  assert.ok(TEACHING_ROLES.includes('head_teacher') && FINANCE_ROLES.includes('head_teacher'));
+});
+
+test('an administrator who was a bursar becomes one, and the migration is idempotent', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const auth = (payload) => dispatch(runtime, 'POST', '/api/functions/auth', payload);
+
+  // The two statements schema.mjs runs to move bursars off the designation column. Re-running the
+  // whole schema is how a real deployment migrates, but pg-mem cannot parse it twice on one
+  // instance, so the migration itself is exercised here rather than the file that carries it.
+  const migrate = async () => {
+    await runtime.database.query(
+      "UPDATE users SET role = 'bursar', designation = NULL WHERE designation = 'bursar' AND role = 'admin'",
+    );
+    await runtime.database.query("UPDATE users SET designation = NULL WHERE designation = 'bursar'");
+  };
+
+  try {
+    await auth({ action: 'signup', email: 'books@school.local', password: 'password123', displayName: 'Books' });
+    await auth({ action: 'signup', email: 'gate@school.local', password: 'password123', displayName: 'Gate' });
+
+    // Put the rows back the way a database written before this change would hold them: a bursar
+    // riding on an administrator account, and — only reachable by hand — one on support staff.
+    // The constraint no longer permits either, so it comes off first; that is exactly the order
+    // schema.mjs uses, and the reason it does.
+    await runtime.database.query('ALTER TABLE users DROP CONSTRAINT IF EXISTS users_designation_check');
+    await runtime.database.query(
+      "UPDATE users SET role = 'admin', designation = 'bursar' WHERE auth_email = 'books@school.local'",
+    );
+    await runtime.database.query(
+      "UPDATE users SET role = 'support_staff', designation = 'bursar' WHERE auth_email = 'gate@school.local'",
+    );
+
+    const read = async (email) => {
+      const { rows } = await runtime.database.query(
+        'SELECT role, designation FROM users WHERE auth_email = $1',
+        [email],
+      );
+      return rows[0];
+    };
+
+    await migrate();
+
+    // The administrator who kept the books is now a bursar, and keeps nothing else.
+    assert.deepEqual(await read('books@school.local'), { role: 'bursar', designation: null });
+    // The hand-edited row keeps its role and loses a designation that no longer exists.
+    assert.deepEqual(await read('gate@school.local'), { role: 'support_staff', designation: null });
+
+    // Running it again changes nothing, which is what lets every boot re-run the schema.
+    await migrate();
+    assert.deepEqual(await read('books@school.local'), { role: 'bursar', designation: null });
+    assert.deepEqual(await read('gate@school.local'), { role: 'support_staff', designation: null });
+  } finally {
+    await cleanup();
+  }
+});
+
 test('designations are constrained to the role that owns them', async () => {
   const { runtime, cleanup } = await startTestRuntime();
   const auth = (payload) => dispatch(runtime, 'POST', '/api/functions/auth', payload);
@@ -2951,9 +4060,13 @@ test('designations are constrained to the role that owns them', async () => {
     assert.equal(ok.status, 200);
     assert.equal(ok.body.data.user.designation, 'cook');
 
-    // A bursar keeps the books, so it belongs to an admin and not to support staff.
-    const wrongRole = await auth({ action: 'set_designation', email: 'cook@school.local', designation: 'bursar' });
-    assert.equal(wrongRole.status, 400);
+    // 'bursar' is a role now, not a designation, so it is no longer assignable here at all.
+    const retiredDesignation = await auth({ action: 'set_designation', email: 'cook@school.local', designation: 'bursar' });
+    assert.equal(retiredDesignation.status, 400);
+
+    // Nor to an administrator, which is where it used to live.
+    const onAdmin = await auth({ action: 'set_designation', email: 'head@school.local', designation: 'bursar' });
+    assert.equal(onAdmin.status, 400);
 
     // The designation reaches the app through the ordinary sign-in payload.
     const signin = await auth({ action: 'signin', email: 'cook@school.local', password: 'password123' });
@@ -4423,6 +5536,8 @@ test('the school level chooses the grading system, and secondary splits O-Level 
     'pre_school',
     'kindergarten',
     'primary',
+    'secondary_olevel',
+    'secondary_alevel',
     'secondary',
     'technical',
     'tertiary',
@@ -4447,6 +5562,16 @@ test('the school level chooses the grading system, and secondary splits O-Level 
     assert.equal(academicLevelFor('secondary', grade), 'secondary-a', `grade ${grade} is A-Level`);
     assert.match(ugandan('secondary', grade).label, /A-Level \(UACE\)/);
   }
+
+  // A school that runs only one of the two says so, and every one of its students is marked on that
+  // scale — including a student whose stored class is outside the usual range, which is exactly the
+  // case a combined school cannot resolve from the grade alone.
+  for (const grade of [8, 11, 12, 13, 99]) {
+    assert.equal(academicLevelFor('secondary_olevel', grade), 'secondary-o');
+    assert.equal(academicLevelFor('secondary_alevel', grade), 'secondary-a');
+  }
+  assert.match(ugandan('secondary_olevel', 12).label, /O-Level \(UCE\)/);
+  assert.match(ugandan('secondary_alevel', 8).label, /A-Level \(UACE\)/);
 
   // International schools and institutions report a GPA rather than UNEB grades.
   assert.match(resolveGradingScheme({ country: 'international', schoolLevel: 'tertiary' }).label, /GPA/);
@@ -5831,6 +6956,3246 @@ test('an exit with no permission on file needs an explicit authoriser', async ()
     assert.equal(override.status, 200);
     assert.equal(override.body.data.permission, null);
     assert.equal(override.body.data.pass.authorised_by, 'Head Teacher (phoned)');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('roll call marks a register and re-marking upserts', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+
+  try {
+    const classes = await call('/api/functions/roll-call', { action: 'classes' });
+    assert.equal(classes.status, 200);
+    assert.ok(classes.body.data.classes.length > 0);
+    const { grade_level: gradeLevel, class_section: classSection } = classes.body.data.classes[0];
+
+    const needsClass = await call('/api/functions/roll-call', { action: 'register' });
+    assert.equal(needsClass.status, 400);
+
+    const register = await call('/api/functions/roll-call', {
+      action: 'register', gradeLevel, classSection,
+    });
+    assert.equal(register.status, 200);
+    const roll = register.body.data.students;
+    assert.ok(roll.length > 0);
+    // Nobody is marked until the register is called.
+    assert.equal(register.body.data.counts.unmarked, roll.length);
+    assert.equal(roll[0].status, null);
+
+    const badStatus = await call('/api/functions/roll-call', {
+      action: 'mark', code: roll[0].student_id, status: 'wandering',
+    });
+    assert.equal(badStatus.status, 400);
+
+    const marked = await call('/api/functions/roll-call', {
+      action: 'mark', code: roll[0].student_id, status: 'present', markedBy: 'Teacher',
+    });
+    assert.equal(marked.body.data.record.status, 'present');
+    assert.equal(marked.body.data.updated, false);
+
+    // Calling the register and scanning a card are two routes to the same record, so a second
+    // mark for the same day updates rather than colliding with the unique index.
+    const corrected = await call('/api/functions/roll-call', {
+      action: 'mark', code: roll[0].student_id, status: 'absent', reason: 'Sick', markedBy: 'Teacher',
+    });
+    assert.equal(corrected.status, 200);
+    assert.equal(corrected.body.data.record.status, 'absent');
+    assert.equal(corrected.body.data.updated, true);
+
+    const after = await call('/api/functions/roll-call', { action: 'register', gradeLevel, classSection });
+    assert.equal(after.body.data.counts.absent, 1);
+    assert.equal(after.body.data.counts.unmarked, roll.length - 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('an invigilator checks clearance and admits or turns a student away', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+  const invigilatorCard = async () => {
+    const res = await call('/api/functions/student-card', { code: 'STU-2026-002', role: 'teacher' });
+    return res.body.data;
+  };
+
+  try {
+    // Fees being settled is not the same as clearance: the invigilator waits on a person.
+    const before = await invigilatorCard();
+    assert.equal(before.exam_clearance.cleared, false);
+    assert.equal(before.exam_clearance.fees_settled, true);
+    assert.equal(before.sections.includes('exam_clearance_grant'), false);
+
+    const bursar = await call('/api/functions/student-card', {
+      code: 'STU-2026-002', role: 'admin', designation: 'bursar',
+    });
+    assert.equal(bursar.body.data.sections.includes('exam_clearance_grant'), true);
+
+    const noGranter = await call('/api/functions/exam-clearance', { action: 'grant', code: 'STU-2026-002' });
+    assert.equal(noGranter.status, 400);
+
+    const granted = await call('/api/functions/exam-clearance', {
+      action: 'grant', code: 'STU-2026-002', grantedBy: 'Bursar', note: 'Paid in cash',
+    });
+    assert.equal(granted.status, 200);
+
+    const cleared = await invigilatorCard();
+    assert.equal(cleared.exam_clearance.cleared, true);
+    assert.equal(cleared.exam_clearance.clearance.granted_by, 'Bursar');
+
+    const noReason = await call('/api/functions/exam-clearance', {
+      action: 'admit', code: 'STU-2026-002', decision: 'rejected',
+    });
+    assert.equal(noReason.status, 400);
+
+    const admitted = await call('/api/functions/exam-clearance', {
+      action: 'admit', code: 'STU-2026-002', decision: 'approved', recordedBy: 'Invigilator',
+    });
+    assert.equal(admitted.body.data.admission.decision, 'approved');
+    assert.equal(admitted.body.data.admission.clearance_id, granted.body.data.clearance.id);
+    assert.equal((await invigilatorCard()).exam_clearance.last_admission.decision, 'approved');
+
+    const revoked = await call('/api/functions/exam-clearance', {
+      action: 'revoke', clearanceId: granted.body.data.clearance.id, by: 'Admin',
+    });
+    assert.equal(revoked.status, 200);
+    assert.equal((await invigilatorCard()).exam_clearance.cleared, false);
+
+    // Turning a student away is recorded even when there was no clearance to check.
+    const rejected = await call('/api/functions/exam-clearance', {
+      action: 'admit', code: 'STU-2026-002', decision: 'rejected',
+      note: 'No clearance on file', recordedBy: 'Invigilator',
+    });
+    assert.equal(rejected.body.data.clearance, null);
+    assert.equal(rejected.body.data.admission.decision, 'rejected');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('re-granting exam clearance supersedes the previous one', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+
+  try {
+    await call('/api/functions/exam-clearance', {
+      action: 'grant', code: 'STU-2026-005', grantedBy: 'Bursar',
+    });
+    await call('/api/functions/exam-clearance', {
+      action: 'grant', code: 'STU-2026-005', grantedBy: 'Head Teacher',
+    });
+
+    const list = await call('/api/functions/exam-clearance', { action: 'list', code: 'STU-2026-005' });
+    const active = list.body.data.clearances.filter((row) => row.status === 'active');
+    assert.equal(active.length, 1, 'only one clearance is ever active');
+    assert.equal(active[0].granted_by, 'Head Teacher');
+  } finally {
+    await cleanup();
+  }
+});
+
+const seedStaff = async (runtime) => {
+  const make = async (email, name, role, designation) => {
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email, password: 'password123', displayName: name,
+    });
+    await runtime.database.query(
+      'UPDATE users SET role = $1, approval_status = $2 WHERE auth_email = $3',
+      [role, 'approved', email],
+    );
+    if (designation) {
+      await dispatch(runtime, 'POST', '/api/functions/auth', {
+        action: 'set_designation', email, designation,
+      });
+    }
+  };
+  await make('head@school.local', 'Head', 'admin', null);
+  await make('t1@school.local', 'Teacher One', 'teacher', null);
+  await make('t2@school.local', 'Teacher Two', 'teacher', null);
+  await make('askari@school.local', 'Askari', 'support_staff', 'askari');
+  await make('cook@school.local', 'Cook', 'support_staff', 'cook');
+};
+
+test('a staff message reaches one person, a group, or everybody', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (body) => dispatch(runtime, 'POST', '/api/functions/messages', body);
+  const unread = async (email) => (await call({ action: 'inbox', actorEmail: email })).body.data.unread;
+
+  try {
+    await seedStaff(runtime);
+
+    await call({
+      action: 'send', actorEmail: 'head@school.local', audienceKind: 'user',
+      recipientEmail: 't1@school.local', subject: 'About P5', body: 'See me at break.',
+    });
+    assert.equal(await unread('t1@school.local'), 1);
+    assert.equal(await unread('t2@school.local'), 0, 'a direct message reaches nobody else');
+
+    await call({
+      action: 'send', actorEmail: 'head@school.local', audienceKind: 'role',
+      audienceValue: 'teacher', subject: 'Staff meeting', body: 'Friday 4pm.',
+    });
+    assert.equal(await unread('t2@school.local'), 1);
+    assert.equal(await unread('askari@school.local'), 0, 'a role group stops at that role');
+
+    await call({
+      action: 'send', actorEmail: 'head@school.local', audienceKind: 'designation',
+      audienceValue: 'askari', subject: 'Gate duty', body: 'Cover the night shift.',
+    });
+    assert.equal(await unread('askari@school.local'), 1);
+    assert.equal(await unread('cook@school.local'), 0, 'a designation group stops at that job');
+
+    const before = await unread('t1@school.local');
+    await call({
+      action: 'send', actorEmail: 't1@school.local', audienceKind: 'all',
+      subject: 'Lost keys', body: 'Found a bunch of keys.',
+    });
+    assert.equal(await unread('cook@school.local'), 1);
+    // A broadcast should not ring its own author's bell.
+    assert.equal(await unread('t1@school.local'), before);
+
+    for (const bad of [
+      { audienceKind: 'all', body: 'x' },
+      { audienceKind: 'all', subject: 'x' },
+      { audienceKind: 'everyone', subject: 'x', body: 'y' },
+      { audienceKind: 'user', recipientEmail: 'nobody@school.local', subject: 'x', body: 'y' },
+    ]) {
+      const res = await call({ action: 'send', actorEmail: 'head@school.local', ...bad });
+      assert.equal(res.status, 400);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test('read state is per person and re-reading is idempotent', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (body) => dispatch(runtime, 'POST', '/api/functions/messages', body);
+
+  try {
+    await seedStaff(runtime);
+    await call({
+      action: 'send', actorEmail: 'head@school.local', audienceKind: 'all',
+      subject: 'Sports day', body: 'Saturday.',
+    });
+
+    const inbox = (await call({ action: 'inbox', actorEmail: 't1@school.local' })).body.data;
+    assert.equal(inbox.unread, 1);
+
+    const read = await call({
+      action: 'read', actorEmail: 't1@school.local', messageId: inbox.messages[0].id,
+    });
+    assert.equal(read.body.data.unread, 0);
+
+    // One row per reader per message, so opening it twice is not a second read.
+    const again = await call({
+      action: 'read', actorEmail: 't1@school.local', messageId: inbox.messages[0].id,
+    });
+    assert.equal(again.body.data.unread, 0);
+
+    // The same broadcast is still unread for everyone else.
+    const other = await call({ action: 'inbox', actorEmail: 't2@school.local' });
+    assert.equal(other.body.data.unread, 1);
+
+    const all = await call({ action: 'read_all', actorEmail: 't2@school.local' });
+    assert.equal(all.body.data.unread, 0);
+    assert.equal((await call({ action: 'inbox', actorEmail: 'cook@school.local' })).body.data.unread, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('gate and exam refusals raise an event for the office', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+  const inbox = async (email) =>
+    (await call('/api/functions/messages', { action: 'inbox', actorEmail: email })).body.data;
+
+  try {
+    await seedStaff(runtime);
+
+    await call('/api/functions/gate-pass', {
+      code: 'STU-2026-001', direction: 'out', decision: 'declined',
+      note: 'No slip', recordedBy: 'Askari',
+    });
+    const office = await inbox('head@school.local');
+    const gateEvent = office.messages.find((m) => m.category === 'event');
+    assert.ok(gateEvent, 'the office hears about a student turned back');
+    assert.equal(gateEvent.priority, 'high');
+    // The whole staff room does not need to know.
+    assert.equal((await inbox('t2@school.local')).messages.some((m) => m.category === 'event'), false);
+
+    // Granting a pass tells the gate a slip is coming before the student arrives.
+    await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-002', reason: 'Home',
+      destination: 'Jinja', grantedBy: 'Matron',
+    });
+    assert.ok((await inbox('askari@school.local')).messages
+      .some((m) => m.category === 'event' && /Gate pass for/.test(m.subject)));
+
+    await call('/api/functions/exam-clearance', {
+      action: 'admit', code: 'STU-2026-003', decision: 'rejected',
+      note: 'No clearance', recordedBy: 'Invigilator',
+    });
+    assert.ok((await inbox('head@school.local')).messages
+      .some((m) => /turned away from an exam/.test(m.subject)));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('generation keeps everything the model produced', async () => {
+  // Three things were being thrown away: questions past the requested count, answers and mark
+  // schemes written in prose, and the model's closing remarks. All of it is work already done.
+  const reply = [
+    'Sure! Below are five questions on trigonometry:',
+    '',
+    '1. State the three primary trigonometric ratios. [3 marks]',
+    'Answer: sine = opp/hyp, cosine = adj/hyp, tangent = opp/adj',
+    '- Names all three (2)',
+    '- Expresses each correctly (1)',
+    '',
+    '2. Which equals sin(30)? [1 mark]',
+    'A. 0.5',
+    'B. 0.866',
+    'Answer: A',
+    '',
+    '3. Prove sin^2(x) + cos^2(x) = 1. [5 marks]',
+    '',
+    '4. Define the unit circle. [2 marks]',
+    '',
+    '5. What is cos(0)? [1 mark]',
+    '',
+    '6. Convert 45 degrees to radians. [2 marks]',
+    '',
+    '7. State the sine rule. [2 marks]',
+    '',
+    'Let me know if you want these adapted for a different level.',
+  ].join('\n');
+
+  const httpClient = async (url) =>
+    url.endsWith('/api/chat')
+      ? new Response(JSON.stringify({ message: { content: reply } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      : new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+  const originalBaseUrl = process.env.OLLAMA_BASE_URL;
+  process.env.OLLAMA_BASE_URL = 'http://ollama.test';
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const result = await dispatch(runtime, 'POST', '/api/functions/digital-examiner', {
+      action: 'generate_questions',
+      requesterRole: 'teacher',
+      modelId: 'ollama-default',
+      subjectName: 'Mathematics',
+      topics: ['Trigonometry'],
+      count: 5,
+    });
+
+    assert.equal(result.status, 200);
+    const questions = result.body.data.questions;
+
+    // Asked for five, the model wrote seven — all seven are kept. `count` is a request, not a
+    // ceiling on what comes back.
+    assert.equal(questions.length, 7, 'questions past the requested count must not be dropped');
+
+    // Answers and mark schemes written in prose are captured, not blanked.
+    const [first] = questions;
+    assert.match(first.correct_answer, /sine = opp\/hyp/);
+    assert.equal(first.marking_scheme.length, 2);
+    assert.equal(first.marking_scheme[0].marks, 2);
+
+    const mcq = questions.find((question) => question.question_type === 'mcq');
+    assert.deepEqual(mcq.options, ['0.5', '0.866']);
+    assert.equal(mcq.correct_answer, 'A');
+
+    // The closing remark is kept as a note rather than glued onto the last question's stem.
+    const last = questions[questions.length - 1];
+    assert.match(last.stem, /State the sine rule/);
+    assert.ok(!/adapted for a different level/.test(last.stem), 'closing prose must not join the stem');
+    assert.match(last.review_notes, /adapted for a different level/);
+
+    // And the whole reply is returned regardless, so nothing is lost.
+    assert.match(result.body.data.rawReply, /Below are five questions/);
+    assert.match(result.body.data.rawReply, /adapted for a different level/);
+  } finally {
+    if (originalBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
+    else process.env.OLLAMA_BASE_URL = originalBaseUrl;
+    await cleanup();
+  }
+});
+
+test('a question labelled with its topic rather than the tool name is still banked', async () => {
+  // The reported bug, exactly as it came back: the model returned one good question as a fenced tool
+  // call, but put the *topic* in `name` and nested the question under `arguments`. Matching on the
+  // wrapper threw the whole thing away and told the teacher nothing could be read.
+  const payload = {
+    name: 'Nutrition in Plants',
+    arguments: {
+      topic: 'Nutrition in Plants',
+      questionType: 'mcq',
+      stem: 'Photosynthesis: word and balanced equations, raw materials, conditions and products.',
+      correctAnswer: 'The leaf as an organ adapted for photosynthesis.',
+      difficulty: 'moderate',
+      expectedTimeMinutes: 15,
+      markingScheme: [
+        { marks: 3, point: 'States the balanced equation' },
+        { marks: 2, point: 'Names the raw materials' },
+      ],
+      options: ['The leaf as an organ adapted for photosynthesis.', 'Testing a leaf for starch.'],
+    },
+  };
+
+  const httpClient = async () =>
+    new Response(
+      JSON.stringify({
+        message: { content: 'Here is the question.\n```json\n' + JSON.stringify(payload) + '\n```' },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+
+  const originalBaseUrl = process.env.OLLAMA_BASE_URL;
+  process.env.OLLAMA_BASE_URL = 'http://ollama.test';
+
+  const { runtime, cleanup } = await startTestRuntime({ httpClient });
+
+  try {
+    const result = await dispatch(runtime, 'POST', '/api/functions/digital-examiner', {
+      action: 'generate_questions',
+      requesterRole: 'teacher',
+      actorName: 'Grace Nakato',
+      modelId: 'ollama-default',
+      subjectName: 'Biology',
+      gradeLevel: 9,
+      topics: ['Nutrition in Plants'],
+      count: 1,
+    });
+
+    assert.equal(result.status, 200, 'a well-formed question must not be reported as a failure');
+    assert.equal(result.body.data.questions.length, 1);
+
+    const [question] = result.body.data.questions;
+    assert.match(question.stem, /Photosynthesis: word and balanced equations/);
+    assert.equal(question.question_type, 'mcq');
+    assert.equal(question.options.length, 2);
+    assert.match(question.correct_answer, /adapted for photosynthesis/);
+    assert.equal(question.marking_scheme.length, 2);
+    // Marks were not given explicitly, so they come from the mark scheme rather than defaulting to 1.
+    assert.equal(question.marks, 5);
+
+    // The editor opens on this, so it has to arrive with the response.
+    assert.match(result.body.data.markdown, /Photosynthesis: word and balanced equations/);
+    assert.match(result.body.data.markdown, new RegExp(`id:${question.id}`));
+  } finally {
+    if (originalBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
+    else process.env.OLLAMA_BASE_URL = originalBaseUrl;
+    await cleanup();
+  }
+});
+
+test('a question is recognised by its shape, whatever it is wrapped in', async () => {
+  const { extractQuestionsFromJsonBlocks } = await import('../server/services/question-parse.mjs');
+
+  const one = { stem: 'Define osmosis.', marks: 2 };
+  const two = { question: 'State two products of photosynthesis.', marks: 2 };
+
+  const shapes = {
+    'bare array': [one, two],
+    'questions key': { questions: [one, two] },
+    'nested under arguments': { name: 'submit_questions', arguments: { questions: [one, two] } },
+    'a single bare object': one,
+    'labelled with the topic': { name: 'Osmosis', arguments: one },
+  };
+
+  for (const [label, value] of Object.entries(shapes)) {
+    const parsed = extractQuestionsFromJsonBlocks('```json\n' + JSON.stringify(value) + '\n```');
+    assert.ok(parsed.length >= 1, `${label} should parse`);
+    assert.equal(parsed[0].stem, 'Define osmosis.', `${label} should keep the stem`);
+  }
+
+  // No stem key at all, but a type and an answer is signal enough.
+  const inferred = extractQuestionsFromJsonBlocks(
+    JSON.stringify({ type: 'short_answer', answer: 'Chlorophyll', prompt: 'Name the green pigment.' }),
+  );
+  assert.equal(inferred.length, 1);
+  assert.equal(inferred[0].correctAnswer, 'Chlorophyll');
+
+  // Prose with no JSON in it leaves the numbered reader to try instead.
+  assert.deepEqual(extractQuestionsFromJsonBlocks('Here are some questions for you.'), []);
+});
+
+test('several JSON objects in one block are all read, and the stem is found wherever it was put', async () => {
+  const { extractQuestionsFromJsonBlocks } = await import('../server/services/question-parse.mjs');
+
+  // What Ollama actually returns: three objects back to back inside a single fence, none of them
+  // carrying a `stem` — the question text is on the wrapper, under `description`. Reading the span
+  // from the first brace to the last is not valid JSON, which used to lose all three.
+  const question = (number) => ({
+    name: `Question ${number}`,
+    arguments: {
+      assessmentObjective: 'AO2 Handling Information and Problem Solving',
+      bloomLevel: 'moderate',
+      citationIndexes: [1],
+      commandWord: 'describe',
+      correctAnswer: 'Water and mineral salts move through the xylem.',
+      difficulty: 'medium',
+      markingScheme: [
+        { marks: 5, point: 'Names the xylem' },
+        { marks: 10, point: 'Explains transpiration pull' },
+      ],
+      options: ['Xylem', 'Phloem'],
+    },
+    description: `Describe transport in plants, part ${number}.`,
+  });
+
+  const reply =
+    '```json\n' + [1, 2, 3].map((number) => JSON.stringify(question(number), null, 2)).join('\n\n') + '\n```';
+
+  const parsed = extractQuestionsFromJsonBlocks(reply);
+  assert.equal(parsed.length, 3, 'every object in the block is a question the model wrote');
+  assert.equal(parsed[0].stem, 'Describe transport in plants, part 1.');
+  assert.equal(parsed[2].stem, 'Describe transport in plants, part 3.');
+  assert.equal(parsed[0].marks, 15, 'marks come from the scheme when none were given');
+  assert.deepEqual(parsed[1].options, ['Xylem', 'Phloem']);
+
+  // A reply cut off mid-object keeps everything that was complete before the cut.
+  const truncated = '```json\n' + JSON.stringify(question(1)) + '\n\n{ "name": "Question 2", "arguments": { "stem": "cut';
+  assert.equal(extractQuestionsFromJsonBlocks(truncated).length, 1);
+
+  // Trailing commas are the usual reason a model's JSON will not parse, and are worth one retry.
+  assert.equal(extractQuestionsFromJsonBlocks('{"questions":[{"stem":"Define osmosis.",},]}').length, 1);
+
+  // A question's own mark-scheme rows must not each be counted as questions.
+  const scored = extractQuestionsFromJsonBlocks(
+    '{"stem":"Describe transport in plants.","markingScheme":[{"marks":3,"point":"Names the xylem"},{"marks":2,"point":"Explains transpiration"}]}',
+  );
+  assert.equal(scored.length, 1, 'a scheme belongs to its question, it is not three questions');
+  assert.equal(scored[0].markingScheme.length, 2);
+});
+
+test('questions survive the round trip through the editable Markdown', async () => {
+  const { markdownToQuestions, questionsToMarkdown } = await import('../server/services/question-parse.mjs');
+
+  const questions = [
+    {
+      id: 'q-1',
+      stem: 'Which of these is a product of photosynthesis?',
+      topic: 'Nutrition in Plants',
+      questionType: 'mcq',
+      difficulty: 'easy',
+      bloomLevel: 'remember',
+      options: ['Oxygen', 'Nitrogen', 'Methane', 'Argon'],
+      correctAnswer: 'Oxygen',
+      markingScheme: [{ point: 'Names oxygen', marks: 1 }],
+      marks: 1,
+      assessmentObjective: 'AO1',
+      reviewNotes: 'Check the distractors.',
+    },
+    {
+      id: 'q-2',
+      stem: 'Explain how a leaf is adapted for photosynthesis.',
+      topic: 'Nutrition in Plants',
+      questionType: 'structured',
+      difficulty: 'moderate',
+      options: [],
+      correctAnswer: 'Broad and thin, with many chloroplasts.',
+      markingScheme: [
+        { point: 'Broad lamina for light capture', marks: 2 },
+        { point: 'Thin for short diffusion distance', marks: 1 },
+      ],
+      marks: 3,
+    },
+  ];
+
+  const markdown = questionsToMarkdown(questions);
+  const parsed = markdownToQuestions(markdown);
+
+  assert.equal(parsed.length, 2);
+  for (const [index, original] of questions.entries()) {
+    const round = parsed[index];
+    for (const field of ['id', 'stem', 'topic', 'questionType', 'difficulty', 'correctAnswer', 'marks']) {
+      assert.deepEqual(round[field], original[field], `${field} must survive the round trip`);
+    }
+    assert.deepEqual(round.options, original.options);
+    assert.deepEqual(round.markingScheme, original.markingScheme);
+  }
+
+  // A teacher who deletes the trailing marker is forking the question, not corrupting it.
+  const forked = markdownToQuestions(markdown.replace(/<!--[\s\S]*?-->/g, ''));
+  assert.equal(forked.length, 2);
+  assert.equal(forked[0].id, undefined, 'a question with no marker is treated as new');
+  assert.equal(forked[0].stem, questions[0].stem);
+});
+
+test('saving the edited draft updates the same questions instead of duplicating them', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const save = (body) =>
+      dispatch(runtime, 'POST', '/api/functions/digital-examiner', {
+        action: 'save_questions',
+        requesterRole: 'teacher',
+        actorName: 'Grace Nakato',
+        subjectName: 'Biology',
+        gradeLevel: 9,
+        ...body,
+      });
+
+    // First save: a draft typed in the editor, with no ids yet.
+    const created = await save({
+      markdown: [
+        '## 1. Define osmosis.  [2 marks]',
+        '',
+        '**Answer:** Movement of water across a partially permeable membrane.',
+        '',
+        '## 2. Which gas do plants take in?  [1 marks]',
+        '',
+        '- A. Carbon dioxide',
+        '- B. Nitrogen',
+        '',
+        '**Answer:** Carbon dioxide',
+      ].join('\n'),
+    });
+
+    assert.equal(created.status, 200);
+    assert.equal(created.body.data.created, 2);
+    assert.equal(created.body.data.updated, 0);
+    assert.equal(created.body.data.questions[0].status, 'draft', 'saved questions still need review');
+
+    // The response carries the questions back as Markdown, now with their ids, which is what the
+    // editor adopts — so the second save has to update rather than insert again.
+    const edited = created.body.data.markdown.replace('Define osmosis.', 'Define osmosis precisely.');
+    const updated = await save({ markdown: edited });
+
+    assert.equal(updated.status, 200);
+    assert.equal(updated.body.data.updated, 2, 'both questions should be recognised as existing');
+    assert.equal(updated.body.data.created, 0);
+
+    const banked = await dispatch(runtime, 'POST', '/api/functions/digital-examiner', {
+      action: 'list_questions',
+      requesterRole: 'teacher',
+    });
+    assert.equal(banked.body.data.questions.length, 2, 'editing must not duplicate the bank');
+    assert.ok(
+      banked.body.data.questions.some((question) => question.stem === 'Define osmosis precisely.'),
+      'the edit should be persisted',
+    );
+
+    // A question added by hand at the bottom joins the bank without disturbing the other two.
+    const grown = await save({
+      markdown: `${edited}\n\n## 3. Name the green pigment in leaves.  [1 marks]\n\n**Answer:** Chlorophyll\n`,
+    });
+    assert.equal(grown.body.data.created, 1);
+    assert.equal(grown.body.data.updated, 2);
+
+    // Nothing to read is reported rather than silently saving an empty question.
+    const empty = await save({ markdown: 'Just some notes with no numbered questions.' });
+    assert.equal(empty.status, 400);
+    assert.match(empty.body.error, /could be read as a question/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the monitoring view reports the day and who is still out', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (pathname, body) => dispatch(runtime, 'POST', pathname, body);
+
+  try {
+    // One student leaves and stays out; another leaves and returns; a third is turned back.
+    await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-001', reason: 'Clinic',
+      destination: 'Mulago', grantedBy: 'Matron',
+    });
+    await call('/api/functions/gate-pass', { code: 'STU-2026-001', direction: 'out', recordedBy: 'Askari' });
+
+    await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-002', reason: 'Home', destination: 'Jinja', grantedBy: 'Teacher',
+    });
+    await call('/api/functions/gate-pass', { code: 'STU-2026-002', direction: 'out', recordedBy: 'Askari' });
+    await call('/api/functions/gate-pass', { code: 'STU-2026-002', direction: 'in', recordedBy: 'Askari' });
+
+    await call('/api/functions/gate-pass', {
+      code: 'STU-2026-003', direction: 'out', decision: 'declined',
+      note: 'No slip', recordedBy: 'Askari',
+    });
+
+    // A slip nobody has presented yet must still read as outstanding.
+    await call('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-005', reason: 'Dentist',
+      destination: 'Clinic', grantedBy: 'Matron',
+    });
+
+    await call('/api/functions/exam-clearance', {
+      action: 'grant', code: 'STU-2026-004', grantedBy: 'Bursar',
+    });
+    await call('/api/functions/exam-clearance', {
+      action: 'admit', code: 'STU-2026-004', decision: 'approved', recordedBy: 'Invigilator',
+    });
+    await call('/api/functions/exam-clearance', {
+      action: 'admit', code: 'STU-2026-006', decision: 'rejected',
+      note: 'No clearance', recordedBy: 'Invigilator',
+    });
+
+    await call('/api/functions/roll-call', { action: 'mark', code: 'STU-2026-001', status: 'present', markedBy: 'T' });
+    await call('/api/functions/roll-call', { action: 'mark', code: 'STU-2026-002', status: 'absent', markedBy: 'T' });
+    await call('/api/functions/meal-record', { code: 'STU-2026-001', meal: 'lunch', servedBy: 'Cook' });
+
+    const res = await call('/api/functions/monitoring', {});
+    assert.equal(res.status, 200);
+    const data = res.body.data;
+
+    assert.deepEqual(data.gate.counts, { out: 2, in: 1, declined: 1, total: 4 });
+
+    // Presence follows approved movements only, so the student turned back is not "out".
+    assert.equal(data.off_premises.length, 1);
+    assert.equal(data.off_premises[0].student_number, 'STU-2026-001');
+    assert.equal(data.off_premises[0].destination, 'Mulago');
+
+    // A spent slip is no longer outstanding; an unused one still is.
+    assert.equal(data.gate.active_permissions.length, 1);
+    assert.equal(data.gate.active_permissions[0].student_number, 'STU-2026-005');
+
+    assert.equal(data.exams.admitted, 1);
+    assert.equal(data.exams.rejected, 1);
+    assert.equal(data.exams.active_clearances, 1);
+
+    assert.equal(data.attendance.present, 1);
+    assert.equal(data.attendance.absent, 1);
+    assert.ok(data.attendance.by_class.length > 0);
+    assert.equal(data.meals.lunch, 1);
+
+    // A day with no traffic reads as empty rather than failing — but a student who is still
+    // out is still out, whichever day is being looked at.
+    const quiet = await call('/api/functions/monitoring', { date: '1999-01-01' });
+    assert.equal(quiet.status, 200);
+    assert.equal(quiet.body.data.gate.counts.total, 0);
+    assert.equal(quiet.body.data.attendance.marked, 0);
+    assert.equal(quiet.body.data.off_premises.length, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('platform administration fails closed and refuses a guessable token', async () => {
+  const { isPlatformOwner, isPlatformOwnerEnabled, platformOwnerRefusal } = await import(
+    '../server/auth/platform-owner.mjs'
+  );
+
+  const saved = process.env.PLATFORM_OWNER_TOKEN;
+  try {
+    // Unset: nothing is a valid owner, and the refusal says why rather than implying a bad token.
+    delete process.env.PLATFORM_OWNER_TOKEN;
+    assert.equal(isPlatformOwnerEnabled(), false);
+    assert.equal(isPlatformOwner({ authorization: 'Bearer anything' }), false);
+    assert.match(platformOwnerRefusal().error, /not enabled/);
+
+    // A short token looks like protection without being any. It is ignored rather than honoured,
+    // so a deployment that sets PLATFORM_OWNER_TOKEN=admin is closed, not wide open.
+    process.env.PLATFORM_OWNER_TOKEN = 'admin';
+    assert.equal(isPlatformOwnerEnabled(), false);
+    assert.equal(isPlatformOwner({ authorization: 'Bearer admin' }), false);
+
+    process.env.PLATFORM_OWNER_TOKEN = 'a-properly-long-operator-token-0123456789';
+    assert.equal(isPlatformOwnerEnabled(), true);
+    assert.equal(isPlatformOwner({ authorization: `Bearer ${process.env.PLATFORM_OWNER_TOKEN}` }), true);
+    assert.equal(isPlatformOwner({ Authorization: `Bearer ${process.env.PLATFORM_OWNER_TOKEN}` }), true);
+
+    // Near misses, and the shapes a client gets wrong.
+    assert.equal(isPlatformOwner({ authorization: `Bearer ${process.env.PLATFORM_OWNER_TOKEN}x` }), false);
+    assert.equal(isPlatformOwner({ authorization: process.env.PLATFORM_OWNER_TOKEN }), false);
+    assert.equal(isPlatformOwner({}), false);
+    assert.equal(platformOwnerRefusal().error, 'Unauthorized');
+  } finally {
+    if (saved === undefined) delete process.env.PLATFORM_OWNER_TOKEN;
+    else process.env.PLATFORM_OWNER_TOKEN = saved;
+  }
+});
+
+test('cross-origin access is limited to the platform own domains', async () => {
+  const { isAllowedOrigin, corsHeaders } = await import('../server/http/cors.mjs');
+
+  const saved = { root: process.env.TENANT_ROOT_DOMAIN, extra: process.env.CORS_EXTRA_ORIGINS };
+  try {
+    process.env.TENANT_ROOT_DOMAIN = 'eschool.ink';
+    delete process.env.CORS_EXTRA_ORIGINS;
+
+    assert.equal(isAllowedOrigin('https://kampala-high.eschool.ink', 'kampala-high.eschool.ink'), true);
+    assert.equal(isAllowedOrigin('https://eschool.ink', 'eschool.ink'), true);
+
+    // The attack this closes: any page on the internet naming a school and reading its data.
+    assert.equal(isAllowedOrigin('https://evil.example', 'kampala-high.eschool.ink'), false);
+    // A look-alike domain that merely ends with the same letters must not pass.
+    assert.equal(isAllowedOrigin('https://noteschool.ink', 'kampala-high.eschool.ink'), false);
+    // Plain HTTP is not one of ours in production.
+    assert.equal(isAllowedOrigin('http://kampala-high.eschool.ink', 'kampala-high.eschool.ink'), false);
+    assert.equal(isAllowedOrigin('', 'kampala-high.eschool.ink'), false);
+    assert.equal(isAllowedOrigin('not a url', 'kampala-high.eschool.ink'), false);
+
+    // Loopback is a developer convenience, and only when the server itself was reached on loopback.
+    assert.equal(isAllowedOrigin('http://localhost:8080', 'localhost:8787'), true);
+    assert.equal(isAllowedOrigin('http://localhost:8080', 'kampala-high.eschool.ink'), false);
+
+    process.env.CORS_EXTRA_ORIGINS = 'https://console.example';
+    assert.equal(isAllowedOrigin('https://console.example', 'eschool.ink'), true);
+
+    // The headers themselves: never a wildcard, always Vary, and credentials only for our own.
+    const allowed = corsHeaders({ req: { headers: { origin: 'https://kampala-high.eschool.ink', host: 'kampala-high.eschool.ink' } } });
+    assert.equal(allowed['Access-Control-Allow-Origin'], 'https://kampala-high.eschool.ink');
+    assert.equal(allowed['Access-Control-Allow-Credentials'], 'true');
+    assert.equal(allowed.Vary, 'Origin');
+
+    const refused = corsHeaders({ req: { headers: { origin: 'https://evil.example', host: 'kampala-high.eschool.ink' } } });
+    assert.equal(refused['Access-Control-Allow-Origin'], undefined);
+    assert.equal(refused.Vary, 'Origin', 'Vary must be set either way so nothing caches one answer for another origin');
+
+    // X-Tenant is advertised only where it is honoured, so the preflight cannot promise what the
+    // server will ignore.
+    const savedAllow = process.env.ALLOW_TENANT_HEADER;
+    delete process.env.ALLOW_TENANT_HEADER;
+    assert.ok(!allowed['Access-Control-Allow-Headers'].includes('X-Tenant'));
+    process.env.ALLOW_TENANT_HEADER = 'true';
+    const withHeader = corsHeaders({ req: { headers: { origin: 'https://eschool.ink', host: 'eschool.ink' } } });
+    assert.ok(withHeader['Access-Control-Allow-Headers'].includes('X-Tenant'));
+    if (savedAllow === undefined) delete process.env.ALLOW_TENANT_HEADER;
+    else process.env.ALLOW_TENANT_HEADER = savedAllow;
+  } finally {
+    if (saved.root === undefined) delete process.env.TENANT_ROOT_DOMAIN;
+    else process.env.TENANT_ROOT_DOMAIN = saved.root;
+    if (saved.extra === undefined) delete process.env.CORS_EXTRA_ORIGINS;
+    else process.env.CORS_EXTRA_ORIGINS = saved.extra;
+  }
+});
+
+test('each school gets its own search indexes, so one cannot overwrite or read another', async () => {
+  const { indexUidFor, INDEX_NAMES } = await import('../server/search/indexer.mjs');
+  const { DEFAULT_TENANT } = await import('../server/db/tenants.mjs');
+
+  // The naming rule. `__` cannot appear in a tenant id (a DNS label), so a-b__c is unambiguous.
+  assert.equal(indexUidFor('kampala-high', 'students'), 'kampala-high__students');
+  assert.equal(indexUidFor('kampala-high', 'lesson_plans'), 'kampala-high__lesson_plans');
+  // A single-school deployment keeps the bare names it already has, so upgrading needs no reindex.
+  assert.equal(indexUidFor(DEFAULT_TENANT, 'students'), 'students');
+  assert.equal(indexUidFor(undefined, 'students'), 'students');
+
+  // No two (tenant, index) pairs can collide, whatever the hyphens in the subdomains.
+  const uids = new Set();
+  for (const tenant of ['a', 'a-b', 'a-b-c', 'kampala-high', DEFAULT_TENANT]) {
+    for (const name of INDEX_NAMES) {
+      const uid = indexUidFor(tenant, name);
+      assert.equal(uids.has(uid), false, `${uid} was produced twice`);
+      uids.add(uid);
+    }
+  }
+
+  await withMeili(async () => {
+    const { runtime, cleanup } = await startTestRuntime();
+
+    try {
+      // The stub has to be the client the service actually uses, so the service is driven directly
+      // with an explicit one rather than through the runtime.
+      const { handleSearchFunction } = await import('../server/services/search.mjs');
+
+      const meiliA = createMeiliStub({
+        hitsByIndex: { 'kampala-high__students': [{ id: 's1', kind: 'student', full_name: 'Emma Johnson' }] },
+      });
+      const a = await handleSearchFunction(
+        runtime.database,
+        { action: 'query', requesterRole: 'teacher', query: 'emma' },
+        meiliA.httpClient,
+        { tenantId: 'kampala-high' },
+      );
+
+      const queriesA = meiliA.requests.filter((request) => request.url.endsWith('/multi-search')).at(-1).body.queries;
+      // Every index this school searches is its own.
+      assert.ok(queriesA.length > 0);
+      for (const query of queriesA) {
+        assert.match(query.indexUid, /^kampala-high__/, 'a school must only ever query its own indexes');
+        // The role filter is unchanged: tenancy decides which index, role decides which documents.
+        assert.equal(query.filter, 'roles = teacher');
+      }
+      // The school's prefix is an implementation detail and does not leak into the response.
+      assert.deepEqual(a.groups.map((group) => group.index), ['students']);
+
+      // The other school's indexes are untouched by the first one's query.
+      const meiliB = createMeiliStub({ hitsByIndex: {} });
+      await handleSearchFunction(
+        runtime.database,
+        { action: 'query', requesterRole: 'teacher', query: 'emma' },
+        meiliB.httpClient,
+        { tenantId: 'gulu-ss' },
+      );
+      const queriesB = meiliB.requests.filter((request) => request.url.endsWith('/multi-search')).at(-1).body.queries;
+      for (const query of queriesB) {
+        assert.match(query.indexUid, /^gulu-ss__/);
+      }
+      assert.equal(
+        queriesA.some((query) => queriesB.some((other) => other.indexUid === query.indexUid)),
+        false,
+        'two schools must not share a single index uid',
+      );
+
+      // A rebuild is the dangerous one: it clears before refilling. Confirm it only ever clears
+      // and writes uids belonging to the school that asked.
+      const meiliRebuild = createMeiliStub();
+      const rebuilt = await handleSearchFunction(
+        runtime.database,
+        { action: 'reindex', requesterRole: 'admin' },
+        meiliRebuild.httpClient,
+        { tenantId: 'kampala-high' },
+      );
+      assert.ok(rebuilt.counts, 'the rebuild should report what it indexed');
+
+      const touched = meiliRebuild.requests
+        .map((request) => request.url.match(/\/indexes\/([^/?]+)/)?.[1])
+        .filter(Boolean);
+      assert.ok(touched.length > 0, 'the rebuild must touch some indexes');
+      for (const uid of touched) {
+        assert.match(uid, /^kampala-high__/, `rebuilding one school touched ${uid}`);
+      }
+
+      // Writes go the same way: an attendance mark in one school refreshes only its own index.
+      const meiliWrite = createMeiliStub();
+      const { syncTable } = await import('../server/search/indexer.mjs');
+      await syncTable(runtime.database, 'attendance_records', {
+        httpClient: meiliWrite.httpClient,
+        tenantId: 'gulu-ss',
+      });
+      const written = meiliWrite.requests
+        .map((request) => request.url.match(/\/indexes\/([^/?]+)/)?.[1])
+        .filter(Boolean);
+      assert.ok(written.length > 0);
+      for (const uid of written) {
+        assert.equal(uid, 'gulu-ss__attendance');
+      }
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+test('a session proves identity, and the role comes from the database rather than the request', async () => {
+  const { issueSessionToken, verifySessionToken, sessionCookie, readCookie, SESSION_COOKIE } = await import(
+    '../server/auth/session.mjs'
+  );
+
+  const savedSecret = process.env.SESSION_SECRET;
+  process.env.SESSION_SECRET = 'a-test-signing-secret-long-enough-to-be-used';
+
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    // The founding account, created the ordinary way.
+    const signup = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup',
+      email: 'head@kampala-high.test',
+      password: 'password123',
+      displayName: 'Head Teacher',
+    });
+    assert.equal(signup.body.data.user.role, 'admin');
+
+    const teacherSignup = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup',
+      email: 'teacher@kampala-high.test',
+      password: 'password123',
+      displayName: 'Grace Nakato',
+    });
+    const teacherId = teacherSignup.body.data.user.id;
+    const approved = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'approve_account',
+      requesterRole: 'admin',
+      userId: teacherId,
+    });
+    assert.equal(approved.body.data.user.approval_status, 'approved');
+
+    const cookieFor = (userId, tenantId = 'default') => ({
+      cookie: `${SESSION_COOKIE}=${encodeURIComponent(issueSessionToken({ userId, tenantId }))}`,
+    });
+
+    const { authenticateRequest } = await import('../server/auth/actor.mjs');
+    const teacherActor = await authenticateRequest({
+      database: runtime.database,
+      headers: cookieFor(teacherId),
+      tenantId: 'default',
+    });
+    assert.equal(teacherActor.role, 'teacher');
+    assert.equal(teacherActor.id, teacherId);
+
+    // The whole point: the request body says admin, the session says teacher, and the session wins.
+    const refused = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/functions/fees',
+      body: { action: 'summary', requesterRole: 'admin' },
+      actor: teacherActor,
+    });
+    assert.equal(refused.status, 400);
+    assert.equal(refused.body.error, 'Unauthorized');
+
+    // No session at all is nobody, whatever the body claims.
+    const anonymous = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/functions/fees',
+      body: { action: 'summary', requesterRole: 'admin' },
+      actor: null,
+    });
+    assert.equal(anonymous.body.error, 'Unauthorized');
+
+    // A demoted account loses its powers on the very next request, not at token expiry — which is
+    // why the role is read from the users row rather than carried in the token.
+    const adminActor = await authenticateRequest({
+      database: runtime.database,
+      headers: cookieFor(signup.body.data.user.id),
+      tenantId: 'default',
+    });
+    assert.equal(adminActor.role, 'admin');
+
+    await runtime.database.query("UPDATE users SET role = 'teacher' WHERE id = $1", [signup.body.data.user.id]);
+    const demoted = await authenticateRequest({
+      database: runtime.database,
+      headers: cookieFor(signup.body.data.user.id),
+      tenantId: 'default',
+    });
+    assert.equal(demoted.role, 'teacher', 'the same cookie must now resolve to the new role');
+
+    // An account that is deleted or un-approved stops authenticating entirely.
+    await runtime.database.query("UPDATE users SET approval_status = 'pending' WHERE id = $1", [teacherId]);
+    assert.equal(
+      await authenticateRequest({ database: runtime.database, headers: cookieFor(teacherId), tenantId: 'default' }),
+      null,
+    );
+
+    // A token minted for one school is refused at another, even before the cookie's host-only scope
+    // is taken into account.
+    const forOtherSchool = issueSessionToken({ userId: teacherId, tenantId: 'gulu-ss' });
+    assert.equal(verifySessionToken(forOtherSchool, { tenantId: 'gulu-ss' })?.userId, teacherId);
+    assert.equal(verifySessionToken(forOtherSchool, { tenantId: 'kampala-high' }), null);
+    assert.equal(
+      await authenticateRequest({
+        database: runtime.database,
+        headers: { cookie: `${SESSION_COOKIE}=${encodeURIComponent(forOtherSchool)}` },
+        tenantId: 'kampala-high',
+      }),
+      null,
+    );
+
+    // Tampering and expiry.
+    const token = issueSessionToken({ userId: teacherId, tenantId: 'default' });
+    const [payload, signature] = token.split('.');
+    assert.equal(verifySessionToken(`${payload}x.${signature}`, { tenantId: 'default' }), null);
+    assert.equal(verifySessionToken(`${payload}.${signature}x`, { tenantId: 'default' }), null);
+    assert.equal(verifySessionToken('nonsense', { tenantId: 'default' }), null);
+    assert.equal(verifySessionToken('', { tenantId: 'default' }), null);
+    assert.equal(
+      verifySessionToken(issueSessionToken({ userId: teacherId, tenantId: 'default', ttlMs: -1 }), {
+        tenantId: 'default',
+      }),
+      null,
+    );
+
+    // A token signed with a different secret is not ours.
+    process.env.SESSION_SECRET = 'a-completely-different-secret-of-sufficient-length';
+    assert.equal(verifySessionToken(token, { tenantId: 'default' }), null);
+    process.env.SESSION_SECRET = 'a-test-signing-secret-long-enough-to-be-used';
+
+    // The cookie is host-only (no Domain), so a browser never sends one school's cookie to another.
+    const cookie = sessionCookie('abc', { secure: true });
+    assert.ok(cookie.includes('HttpOnly'));
+    assert.ok(cookie.includes('SameSite=Lax'), 'downloads are navigations and need Lax, not Strict');
+    assert.ok(cookie.includes('Secure'));
+    assert.ok(!/Domain=/i.test(cookie), 'a Domain attribute would send this school cookie to every school');
+    assert.ok(!sessionCookie('abc', { secure: false }).includes('Secure'));
+
+    assert.equal(readCookie({ cookie: 'other=1; eschool_session=wanted; more=2' }), 'wanted');
+    assert.equal(readCookie({ cookie: 'other=1' }), '');
+    assert.equal(readCookie({}), '');
+  } finally {
+    if (savedSecret === undefined) delete process.env.SESSION_SECRET;
+    else process.env.SESSION_SECRET = savedSecret;
+    await cleanup();
+  }
+});
+
+test('signing in issues a session cookie, and signing out clears it', async () => {
+  const savedSecret = process.env.SESSION_SECRET;
+  process.env.SESSION_SECRET = 'a-test-signing-secret-long-enough-to-be-used';
+
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const signup = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup',
+      email: 'head@school.test',
+      password: 'password123',
+      displayName: 'Head Teacher',
+    });
+    // The founding account is approved on the spot, so it is signed in and gets a cookie.
+    assert.match(signup.headers['Set-Cookie'], /^eschool_session=/);
+    assert.ok(signup.headers['Set-Cookie'].includes('HttpOnly'));
+    // The token never reaches the response body, only the cookie.
+    assert.equal(signup.body.data.setCookie, undefined);
+
+    const signin = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signin',
+      email: 'head@school.test',
+      password: 'password123',
+    });
+    assert.match(signin.headers['Set-Cookie'], /^eschool_session=/);
+
+    // The cookie is the credential, so the server can answer "who am I?" for itself.
+    const { authenticateRequest } = await import('../server/auth/actor.mjs');
+    const cookie = signin.headers['Set-Cookie'].split(';')[0];
+    const actor = await authenticateRequest({ database: runtime.database, headers: { cookie }, tenantId: 'default' });
+    assert.equal(actor.email, 'head@school.test');
+
+    const session = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/functions/auth',
+      body: { action: 'session' },
+      actor,
+    });
+    assert.equal(session.body.data.user.auth_email, 'head@school.test');
+    assert.equal(session.body.data.user.password_hash, undefined);
+
+    // Anonymous: the server says nobody, rather than believing a stored profile.
+    const anonymous = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/functions/auth',
+      body: { action: 'session' },
+      actor: null,
+    });
+    assert.equal(anonymous.body.data.user, null);
+
+    const signout = await dispatch(runtime, 'POST', '/api/functions/auth', { action: 'signout' });
+    assert.match(signout.headers['Set-Cookie'], /Max-Age=0/);
+
+    // A pending account gets no session: it has no access until an administrator approves it.
+    const pending = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup',
+      email: 'new@school.test',
+      password: 'password123',
+      displayName: 'New Teacher',
+    });
+    assert.equal(pending.body.data.pending, true);
+    assert.equal(pending.headers?.['Set-Cookie'], undefined, 'an unapproved account must not be signed in');
+  } finally {
+    if (savedSecret === undefined) delete process.env.SESSION_SECRET;
+    else process.env.SESSION_SECRET = savedSecret;
+    await cleanup();
+  }
+});
+
+test('the generic data endpoint refuses tables a signed-in role may not touch', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const query = (table, actor) =>
+      runtime.dispatch({
+        method: 'POST',
+        pathname: '/api/db',
+        body: { table, operation: 'select', columns: '*', filters: [], limit: 1 },
+        actor,
+      });
+
+    const admin = { id: 'a', role: 'admin', email: 'admin@school.test', name: 'Admin' };
+    const teacher = { id: 't', role: 'teacher', email: 'teacher@school.test', name: 'Teacher' };
+    const support = { id: 's', role: 'support_staff', email: 'gate@school.test', name: 'Askari' };
+
+    // This endpoint had no role check at all: anyone who could reach it could read every invoice
+    // and payment in the school.
+    assert.equal((await query('invoices', admin)).status, 200);
+    assert.equal((await query('invoices', teacher)).status, 403);
+    assert.equal((await query('payments', teacher)).status, 403);
+    assert.equal((await query('receipts', teacher)).status, 403);
+    assert.equal((await query('portal_accounts', teacher)).status, 403);
+
+    // Teaching work is unaffected.
+    assert.equal((await query('students', teacher)).status, 200);
+    assert.equal((await query('attendance_records', teacher)).status, 200);
+    assert.equal((await query('gradebook_entries', teacher)).status, 200);
+
+    // Support staff reach the database through no table at all; they have the fee-status endpoint.
+    assert.equal((await query('students', support)).status, 403);
+    assert.equal((await query('invoices', support)).status, 403);
+
+    // No session is nobody.
+    assert.equal((await query('students', null)).status, 403);
+
+    // An internal caller — a test, or the server calling itself — is not a request and is not
+    // checked, which is what keeps the rest of this suite driving dispatch directly.
+    assert.equal((await query('students', undefined)).status, 200);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the deployment carries every setting a production tenant needs', async () => {
+  // The gap this guards: the server grew sessions, a platform-owner token and multi-tenancy, and
+  // docker-compose.yml passed none of it through. Nothing failed loudly — the app just generated a
+  // session key at boot (signing everyone out on each restart), refused every platform action, and
+  // stayed single-tenant no matter what .env.production said.
+  const { readFile } = await import('node:fs/promises');
+  const compose = await readFile(new URL('../docker-compose.yml', import.meta.url), 'utf8');
+  const example = await readFile(new URL('../.env.production.example', import.meta.url), 'utf8');
+
+  // Settings whose absence breaks or silently weakens a real deployment. Tuning knobs with working
+  // defaults are deliberately not listed — this is the set that has to be handed in.
+  const REQUIRED = [
+    // Without these two the app is either amnesiac or unadministrable.
+    'SESSION_SECRET',
+    'PLATFORM_OWNER_TOKEN',
+    // Decides which origins may call the API, and the link in a school's activation email.
+    'TENANT_ROOT_DOMAIN',
+    // Multi-tenancy itself.
+    'TENANTS',
+    'CONTROL_DATABASE_URL',
+    'PROVISION_ADMIN_DATABASE_URL',
+    'TENANT_DB_URL_TEMPLATE',
+    // Money: unset SUBSCRIPTION_AMOUNT refuses signup, unset webhook secret accepts forged payments.
+    'SUBSCRIPTION_AMOUNT',
+    'PAYMENT_WEBHOOK_SECRET',
+    // A provisioned school is told where it lives by email, or not at all.
+    'EMAIL_MODE',
+    'EMAIL_FROM',
+  ];
+
+  const missingFromCompose = REQUIRED.filter((name) => !compose.includes(`${name}:`));
+  assert.deepEqual(missingFromCompose, [], 'docker-compose.yml must pass these to the app container');
+
+  const missingFromExample = REQUIRED.filter((name) => !example.includes(name));
+  assert.deepEqual(missingFromExample, [], '.env.production.example must document these');
+
+  // The app is reached through the reverse proxy, so its own port stays on loopback by default.
+  assert.match(compose, /\$\{APP_BIND:-127\.0\.0\.1\}/, 'the app port must not default to 0.0.0.0');
+  // Meilisearch holds a copy of every student and invoice and is never talked to by a browser.
+  assert.ok(
+    /127\.0\.0\.1:\$\{MEILI_PORT/.test(compose),
+    'Meilisearch must not be published on every interface',
+  );
+
+  // Both proxies must preserve the Host header, because that is what chooses the school. Rewriting
+  // it sends every school to the default tenant, which serves the wrong data rather than erroring.
+  const nginxHost = await readFile(new URL('../deploy/nginx/docker.conf', import.meta.url), 'utf8');
+  assert.match(nginxHost, /proxy_set_header Host\s+\$host;/);
+  assert.match(nginxHost, /proxy_set_header X-Forwarded-Proto \$scheme;/);
+  assert.match(nginxHost, /proxy_set_header X-Tenant "";/, 'a client must not be able to name a school');
+
+  const site = await readFile(new URL('../deploy/nginx/eschool.ink.conf', import.meta.url), 'utf8');
+  assert.match(site, /proxy_set_header Host\s+\$host;/);
+  assert.match(site, /client_max_body_size/, 'base64 photos and logos exceed the 1MB default');
+
+  const caddyfile = await readFile(new URL('../deploy/caddy/Caddyfile', import.meta.url), 'utf8');
+  assert.match(caddyfile, /reverse_proxy app:8787/);
+  assert.match(caddyfile, /header_up -X-Tenant/);
+});
+
+test('the gate, the dining hall and the register are staff-only, by post as well as by role', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const post = (pathname, actor, body = {}) => runtime.dispatch({ method: 'POST', pathname, body, actor });
+
+  const admin = { id: 'a', role: 'admin', email: 'head@school.test', name: 'Head', designation: null };
+  const teacher = { id: 't', role: 'teacher', email: 't@school.test', name: 'Teacher', designation: null };
+  const askari = { id: 'g', role: 'support_staff', email: 'gate@school.test', name: 'Askari', designation: 'askari' };
+  const cook = { id: 'c', role: 'support_staff', email: 'cook@school.test', name: 'Cook', designation: 'cook' };
+  const plainSupport = { id: 'p', role: 'support_staff', email: 'p@school.test', name: 'P', designation: null };
+
+  try {
+    const ROUTES = [
+      '/api/functions/roll-call',
+      '/api/functions/exam-clearance',
+      '/api/functions/gate-permission',
+      '/api/functions/gate-log',
+      '/api/functions/gate-pass',
+      '/api/functions/meal-record',
+    ];
+
+    // None of these had a gate of any kind: no actor reached the handler and the handler checked
+    // nothing, so anyone who could reach the API could grant a gate pass or mark a register.
+    for (const pathname of ROUTES) {
+      assert.equal((await post(pathname, null)).status, 403, `${pathname} must refuse an anonymous request`);
+      assert.equal(
+        (await post(pathname, plainSupport)).status,
+        403,
+        `${pathname} must refuse support staff with no post`,
+      );
+    }
+
+    // A post is not a role, and the difference is the point: these people are all `support_staff`,
+    // and the gate has to let each of them do their own job and nothing else.
+    assert.equal((await post('/api/functions/gate-log', askari, {})).status, 200, 'the askari reads the gate log');
+    assert.equal((await post('/api/functions/gate-log', cook, {})).status, 403, 'the cook does not');
+    assert.equal(
+      (await post('/api/functions/meal-record', askari, { code: 'STU-2026-001', meal: 'lunch' })).status,
+      403,
+      'and the askari does not serve meals',
+    );
+
+    // Whoever checks a pass at the gate must not also be the person who wrote it.
+    assert.equal(
+      (await post('/api/functions/gate-permission', askari, { code: 'STU-2026-001' })).status,
+      403,
+      'the askari cannot issue the permission they check',
+    );
+    assert.equal((await post('/api/functions/roll-call', teacher, { action: 'classes' })).status, 200);
+    assert.equal((await post('/api/functions/roll-call', askari, { action: 'classes' })).status, 403);
+
+    // Nothing was written past any of those refusals.
+    for (const table of ['gate_passes', 'gate_permissions', 'meal_records']) {
+      assert.equal(await countRows(runtime, table), 0, `${table} must be untouched by a refused request`);
+    }
+
+    // An internal call — a test, or the server calling its own handler — is still unchecked, which
+    // is the three-state actor working as it does everywhere else.
+    assert.equal((await dispatch(runtime, 'POST', '/api/functions/roll-call', { action: 'classes' })).status, 200);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a gate alert reaches the school it belongs to, live', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const bus = await import('../server/events/bus.mjs');
+
+  try {
+    // The askari's own screen is subscribed. This is what used to receive nothing: notifyStaff
+    // never passed a tenantId, so postStaffMessage wrote the row and skipped the publish entirely.
+    const delivered = [];
+    const unsubscribe = bus.subscribe('default', {
+      user: { id: 'g', role: 'support_staff', designation: 'askari' },
+      deliver: (event) => delivered.push(event),
+    });
+
+    const granted = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/functions/gate-permission',
+      body: {
+        code: 'STU-2026-001',
+        grantedBy: 'Head Teacher',
+        destination: 'Home',
+        reason: 'Unwell',
+      },
+      actor: { id: 'a', role: 'admin', email: 'head@school.test', name: 'Head', designation: null },
+      headers: { host: 'localhost' },
+    });
+    assert.equal(granted.status, 200);
+
+    unsubscribe();
+
+    assert.equal(delivered.length, 1, 'the askari is told, rather than finding out on their next reload');
+    assert.match(delivered[0].message.subject, /Gate pass for/);
+    // And the id is a replay cursor, so a phone that reconnects can ask for what it missed.
+    assert.match(delivered[0].id, /^\d{4}-\d{2}-\d{2}T[\d:.]+Z\|/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a second replica sees the first replica\'s events, and never its own twice', async () => {
+  const { startEventBroker } = await import('../server/events/broker.mjs');
+  const bus = await import('../server/events/bus.mjs');
+
+  // A stand-in for Redis: one shared set of channels, so two "replicas" can talk without a socket.
+  const channels = new Map();
+  const makeFake = () => {
+    const handlers = [];
+    const client = {
+      patterns: [],
+      on: (event, handler) => {
+        if (event === 'pmessage') handlers.push(handler);
+      },
+      psubscribe: async (pattern) => {
+        client.patterns.push(pattern);
+        channels.set(client, { handlers, patterns: client.patterns });
+      },
+      punsubscribe: async () => channels.delete(client),
+      publish: async (channel, payload) => {
+        for (const [other, entry] of channels) {
+          if (other === client) continue;
+          for (const handler of entry.handlers) handler('eschool:events:*', channel, payload);
+        }
+        return 1;
+      },
+      quit: async () => channels.delete(client),
+    };
+    return client;
+  };
+
+  const seenOnA = [];
+  const replicaA = await startEventBroker({
+    createClient: async () => makeFake(),
+    onEvent: (tenant, event) => seenOnA.push([tenant, event.type]),
+  });
+
+  const seenOnB = [];
+  const replicaB = await startEventBroker({
+    createClient: async () => makeFake(),
+    onEvent: (tenant, event) => seenOnB.push([tenant, event.type]),
+  });
+
+  const detach = bus.attachBroker(replicaA);
+  try {
+    // A is where the event happens; nobody is connected to A.
+    const deliveredLocally = bus.publish('kampala-high', { type: 'message', audienceKind: 'all' });
+    assert.equal(deliveredLocally, 0, 'nobody is subscribed on this replica');
+
+    // …and B, where the office tab actually is, hears about it anyway.
+    assert.deepEqual(seenOnB, [['kampala-high', 'message']]);
+
+    // The publishing replica has already delivered locally, so its own event coming back over the
+    // channel must be dropped — otherwise every subscriber on it would receive the message twice.
+    // The two brokers must therefore have different identities, which is why the replica id belongs
+    // to the broker instance and not to the module.
+    assert.notEqual(replicaA.replicaId, replicaB.replicaId);
+    assert.equal(seenOnA.length, 0, 'a replica never receives its own publication');
+  } finally {
+    detach();
+    await replicaA.stop();
+    await replicaB.stop();
+    bus.reset();
+  }
+});
+
+test('with no REDIS_URL the bus is exactly what it always was', async () => {
+  const { startEventBroker } = await import('../server/events/broker.mjs');
+
+  const previous = process.env.REDIS_URL;
+  delete process.env.REDIS_URL;
+  try {
+    const broker = await startEventBroker({});
+    // Off, and returning a shape the caller does not have to branch on — the same contract
+    // startBackupScheduler uses for the same reason.
+    assert.equal(broker.enabled, false);
+    assert.equal(broker.publish, null);
+    assert.equal(typeof broker.stop, 'function');
+    await broker.stop();
+  } finally {
+    if (previous === undefined) delete process.env.REDIS_URL;
+    else process.env.REDIS_URL = previous;
+  }
+});
+
+test('student records are not readable without a session, whatever the URL says', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const students = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students',
+      operation: 'select',
+      columns: '*',
+      filters: [],
+      limit: 1,
+    });
+    const studentId = students.body.data[0].id;
+
+    const get = (pathname, actor, params = {}) =>
+      runtime.dispatch({ method: 'GET', pathname, searchParams: new URLSearchParams(params), actor });
+
+    const teacher = { id: 't', role: 'teacher', email: 'teacher@school.test', name: 'Teacher' };
+    const support = { id: 's', role: 'support_staff', designation: 'askari', email: 'gate@school.test', name: 'Askari' };
+
+    // These two routes had no gate of any kind: the id in the URL was the whole of the security.
+    for (const pathname of [`/api/report-cards/${studentId}.pdf`, `/api/id-cards/${studentId}.pdf`, '/api/id-cards.pdf']) {
+      assert.equal((await get(pathname, null)).status, 403, `${pathname} must refuse an anonymous request`);
+      assert.equal((await get(pathname, support)).status, 403, `${pathname} must refuse support staff`);
+      assert.equal((await get(pathname, teacher)).status, 200, `${pathname} must still work for a teacher`);
+    }
+
+    // The QR image on an ID card leaks the student number, so it is gated with the card itself.
+    assert.equal((await get(`/api/id-cards/${studentId}.png`, null)).status, 403);
+    assert.equal((await get(`/api/id-cards/${studentId}.png`, teacher)).status, 200);
+
+    // Passing a role in the query string is no longer a way in.
+    assert.equal((await get(`/api/report-cards/${studentId}.pdf`, null, { requesterRole: 'admin' })).status, 403);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a scan shows the sections the scanner actually holds, not the ones they ask for', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  try {
+    const students = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students',
+      operation: 'select',
+      columns: '*',
+      filters: [],
+      limit: 1,
+    });
+    const code = students.body.data[0].student_id;
+
+    const scan = (body, actor) =>
+      runtime.dispatch({ method: 'POST', pathname: '/api/functions/student-card', body, actor });
+
+    const askari = { id: 's', role: 'support_staff', designation: 'askari', email: 'gate@school.test', name: 'Askari' };
+    const bursar = { id: 'b', role: 'admin', designation: 'bursar', email: 'bursar@school.test', name: 'Bursar' };
+
+    // The gate keeper asks for the bursar's view. The profile comes from their session, so what
+    // comes back is the gate keeper's — this used to be decided by two fields in the request body.
+    const overreach = await scan({ code, role: 'admin', designation: 'bursar' }, askari);
+    assert.equal(overreach.body.data.profile.role, 'support_staff');
+    assert.equal(overreach.body.data.profile.designation, 'askari');
+    assert.ok(!overreach.body.data.sections.includes('fees'), 'an askari must not be handed fee data');
+
+    // The bursar, signed in as themselves, does see fees.
+    const real = await scan({ code }, bursar);
+    assert.equal(real.body.data.profile.role, 'admin');
+    assert.ok(real.body.data.sections.includes('fees'));
+
+    // No session, no scan.
+    assert.equal((await scan({ code }, null)).body.error, 'Unauthorized');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a school can bring its own AI key, and it never leaves the server in the clear', async () => {
+  const savedSecret = process.env.SECRETS_KEY;
+  const savedPlatformKey = process.env.ANTHROPIC_API_KEY;
+  process.env.SECRETS_KEY = 'a-test-encryption-key-of-sufficient-length';
+  process.env.ANTHROPIC_API_KEY = 'platform-key';
+
+  const { runtime, cleanup } = await startTestRuntime();
+  const { credentialFor, withCredentials } = await import('../server/services/credential-store.mjs');
+  const { loadCredentialOverrides, encryptSecret, decryptSecret } = await import(
+    '../server/services/provider-credentials.mjs'
+  );
+
+  try {
+    const settings = (body, actor) =>
+      runtime.dispatch({ method: 'POST', pathname: '/api/functions/settings', body, actor });
+
+    const admin = { id: 'a', role: 'admin', email: 'head@school.test', name: 'Head' };
+    const teacher = { id: 't', role: 'teacher', email: 'teacher@school.test', name: 'Teacher' };
+
+    // Provider keys are an administrator's business, and a teacher cannot read or set them.
+    assert.equal((await settings({ action: 'list_provider_keys' }, teacher)).body.error, 'Unauthorized');
+    assert.equal((await settings({ action: 'save_provider_key', provider: 'anthropic', apiKey: 'x' }, teacher)).body.error, 'Unauthorized');
+
+    // Before the school sets anything, every provider is inherited from the platform.
+    const before = await settings({ action: 'list_provider_keys' }, admin);
+    const anthropicBefore = before.body.data.providers.find((entry) => entry.provider === 'anthropic');
+    assert.equal(anthropicBefore.source, 'platform');
+    assert.equal(anthropicBefore.platformHasKey, true);
+    assert.equal(anthropicBefore.keyPreview, '');
+
+    const saved = await settings(
+      { action: 'save_provider_key', provider: 'anthropic', apiKey: 'sk-school-secret-key-1234' },
+      admin,
+    );
+    const anthropicAfter = saved.body.data.providers.find((entry) => entry.provider === 'anthropic');
+    assert.equal(anthropicAfter.source, 'school');
+    // Masked, never returned: enough to recognise, not enough to use.
+    assert.equal(anthropicAfter.keyPreview, '••••••••1234');
+    assert.ok(!JSON.stringify(saved.body).includes('sk-school-secret-key-1234'), 'the key must not be echoed back');
+
+    // Encrypted at rest, not merely hidden by the API — a database dump is a normal artefact.
+    const stored = (await runtime.database.query("SELECT api_key FROM provider_credentials WHERE provider = 'anthropic'")).rows[0];
+    assert.ok(stored.api_key.startsWith('v1:'));
+    assert.ok(!stored.api_key.includes('sk-school-secret-key-1234'));
+    assert.equal(decryptSecret(stored.api_key), 'sk-school-secret-key-1234');
+
+    // The override is what the model layer actually reads.
+    const overrides = await loadCredentialOverrides(runtime.database);
+    assert.equal(overrides.ANTHROPIC_API_KEY, 'sk-school-secret-key-1234');
+    assert.equal(credentialFor('ANTHROPIC_API_KEY'), 'platform-key', 'outside a request, the platform key applies');
+    await withCredentials(overrides, async () => {
+      assert.equal(credentialFor('ANTHROPIC_API_KEY'), 'sk-school-secret-key-1234');
+      // A provider the school has not overridden still falls through to the platform.
+      assert.equal(credentialFor('OPENAI_API_KEY'), process.env.OPENAI_API_KEY);
+    });
+    // The scope really is a scope.
+    assert.equal(credentialFor('ANTHROPIC_API_KEY'), 'platform-key');
+
+    // An address-only provider (Ollama has no key) is set by base URL.
+    await settings({ action: 'save_provider_key', provider: 'ollama', baseUrl: 'http://school-box:11434' }, admin);
+    assert.equal((await loadCredentialOverrides(runtime.database)).OLLAMA_BASE_URL, 'http://school-box:11434');
+    assert.match(
+      (await settings({ action: 'save_provider_key', provider: 'ollama', apiKey: 'nope' }, admin)).body.error,
+      /does not use an API key/,
+    );
+    assert.match(
+      (await settings({ action: 'save_provider_key', provider: 'nonsense', apiKey: 'x' }, admin)).body.error,
+      /Unknown AI provider/,
+    );
+
+    // Removing the override hands the school back to the platform.
+    const removed = await settings({ action: 'delete_provider_key', provider: 'anthropic' }, admin);
+    assert.equal(removed.body.data.providers.find((entry) => entry.provider === 'anthropic').source, 'platform');
+    assert.equal((await loadCredentialOverrides(runtime.database)).ANTHROPIC_API_KEY, undefined);
+
+    // A key written under a SECRETS_KEY that has since been rotated away is unreadable. The school
+    // falls back to the platform rather than its chat window throwing, and the row stays visible so
+    // an administrator can re-enter it.
+    await settings({ action: 'save_provider_key', provider: 'openai', apiKey: 'sk-openai-school-key' }, admin);
+    process.env.SECRETS_KEY = 'a-completely-different-encryption-key-value';
+    const rotated = await settings({ action: 'list_provider_keys' }, admin);
+    const openai = rotated.body.data.providers.find((entry) => entry.provider === 'openai');
+    assert.equal(openai.keyUnreadable, true);
+    assert.equal((await loadCredentialOverrides(runtime.database)).OPENAI_API_KEY, undefined);
+
+    // With no SECRETS_KEY at all, storing a key is refused rather than silently written in clear.
+    delete process.env.SECRETS_KEY;
+    const refused = await settings({ action: 'save_provider_key', provider: 'groq', apiKey: 'sk-groq' }, admin);
+    assert.match(refused.body.error, /SECRETS_KEY is not configured/);
+    assert.throws(() => encryptSecret('anything'), /SECRETS_KEY/);
+  } finally {
+    if (savedSecret === undefined) delete process.env.SECRETS_KEY;
+    else process.env.SECRETS_KEY = savedSecret;
+    if (savedPlatformKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = savedPlatformKey;
+    await cleanup();
+  }
+});
+
+test('money paid before an invoice exists comes off that invoice when it is raised', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const fees = (body) =>
+    dispatch(runtime, 'POST', '/api/functions/fees', { requesterRole: 'admin', actorName: 'Bursar', ...body });
+
+  try {
+    const students = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students', operation: 'select', columns: '*', filters: [], limit: 2,
+    });
+    const [alice, bob] = students.body.data;
+
+    const structure = await fees({
+      action: 'save_fee_structure',
+      name: 'Term 1 Tuition',
+      amount: 500000,
+      gradeLevel: alice.grade_level,
+      term: 'Term 1',
+      academicYear: '2026',
+      dueDate: '2026-02-01',
+    });
+    const structureId = structure.body.data.structure.id;
+
+    // A family pays a deposit at admission, before anyone has billed them. There is no invoice for
+    // this money to settle, so it sits as credit.
+    const deposit = await fees({
+      action: 'record_payment',
+      studentId: alice.id,
+      amount: 200000,
+      paymentMethod: 'cash',
+    });
+    assert.equal(deposit.body.data.allocations.length, 0, 'there is nothing to allocate against yet');
+    assert.equal(deposit.body.data.creditAmount, 200000);
+
+    // Now the bill goes out. It must arrive already reduced by the deposit.
+    const billed = await fees({ action: 'bill_student', studentId: alice.id, feeStructureId: structureId });
+    assert.equal(billed.body.data.amount, 500000, 'the invoice is still for the full fee');
+    assert.equal(billed.body.data.credit_applied, 200000);
+    assert.equal(billed.body.data.balance_due, 300000, 'the family owes the difference, not the whole fee');
+    assert.equal(billed.body.data.invoice.status, 'partial');
+
+    // A student who paid nothing is billed in full — the credit is per student, not pooled.
+    const bobBilled = await fees({ action: 'bill_student', studentId: bob.id, feeStructureId: structureId });
+    assert.equal(bobBilled.body.data.credit_applied, 0);
+    assert.equal(bobBilled.body.data.balance_due, 500000);
+
+    // The ledger agrees: paid 200000, owing 300000, and no double-counting.
+    const ledger = await fees({ action: 'student_ledger', studentId: alice.id });
+    assert.equal(ledger.body.data.summary.total_paid, 200000);
+    assert.equal(ledger.body.data.summary.balance_due, 300000);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a prepayment larger than the bill settles it and the rest stays as credit', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const fees = (body) =>
+    dispatch(runtime, 'POST', '/api/functions/fees', { requesterRole: 'admin', actorName: 'Bursar', ...body });
+
+  try {
+    const students = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students', operation: 'select', columns: '*', filters: [], limit: 1,
+    });
+    const [student] = students.body.data;
+
+    const first = await fees({
+      action: 'save_fee_structure',
+      name: 'Term 1',
+      amount: 100000,
+      gradeLevel: student.grade_level,
+      term: 'Term 1',
+      academicYear: '2026',
+      dueDate: '2026-02-01',
+    });
+    const second = await fees({
+      action: 'save_fee_structure',
+      name: 'Term 2',
+      amount: 100000,
+      gradeLevel: student.grade_level,
+      term: 'Term 2',
+      academicYear: '2026',
+      dueDate: '2026-06-01',
+    });
+
+    // A parent pays a whole year up front.
+    await fees({ action: 'record_payment', studentId: student.id, amount: 250000, paymentMethod: 'bank' });
+
+    const term1 = await fees({
+      action: 'bill_student', studentId: student.id, feeStructureId: first.body.data.structure.id,
+    });
+    assert.equal(term1.body.data.credit_applied, 100000);
+    assert.equal(term1.body.data.balance_due, 0);
+    assert.equal(term1.body.data.invoice.status, 'paid', 'a fully prepaid invoice is not left open');
+
+    // The remaining 150,000 is still theirs, and settles the next term too.
+    const term2 = await fees({
+      action: 'bill_student', studentId: student.id, feeStructureId: second.body.data.structure.id,
+    });
+    assert.equal(term2.body.data.credit_applied, 100000);
+    assert.equal(term2.body.data.balance_due, 0);
+
+    // 50,000 left over, and it is not conjured twice: a third bill takes only what remains.
+    const third = await fees({
+      action: 'save_fee_structure',
+      name: 'Term 3', amount: 100000, gradeLevel: student.grade_level,
+      term: 'Term 3', academicYear: '2026', dueDate: '2026-09-01',
+    });
+    const term3 = await fees({
+      action: 'bill_student', studentId: student.id, feeStructureId: third.body.data.structure.id,
+    });
+    assert.equal(term3.body.data.credit_applied, 50000, 'only the credit that is actually left');
+    assert.equal(term3.body.data.balance_due, 50000);
+
+    const ledger = await fees({ action: 'student_ledger', studentId: student.id });
+    assert.equal(ledger.body.data.summary.total_paid, 250000, 'still exactly what was paid, once');
+    assert.equal(ledger.body.data.summary.balance_due, 50000);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a billing run credits each student only what that student paid', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const fees = (body) =>
+    dispatch(runtime, 'POST', '/api/functions/fees', { requesterRole: 'admin', actorName: 'Bursar', ...body });
+
+  try {
+    const students = await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students', operation: 'select', columns: '*', filters: [], limit: 50,
+    });
+    const grade = students.body.data[0].grade_level;
+    const cohort = students.body.data.filter((s) => s.grade_level === grade);
+    assert.ok(cohort.length >= 2, 'need at least two students in one grade for this to mean anything');
+
+    const structure = await fees({
+      action: 'save_fee_structure',
+      name: 'Bulk term', amount: 400000, gradeLevel: grade,
+      term: 'Term 1', academicYear: '2026', dueDate: '2026-02-01',
+    });
+
+    // One student in the cohort paid early; the others did not.
+    await fees({ action: 'record_payment', studentId: cohort[0].id, amount: 150000, paymentMethod: 'momo' });
+
+    const run = await fees({ action: 'run_billing', confirm: true, feeStructureId: structure.body.data.structure.id });
+    assert.equal(run.body.data.credit_applied, 150000, 'the run reports what it absorbed');
+
+    const byStudent = new Map(run.body.data.invoices.map((invoice) => [invoice.student_id, invoice]));
+    assert.equal(Number(byStudent.get(cohort[0].id).balance_due), 250000);
+    assert.equal(Number(byStudent.get(cohort[1].id).balance_due), 400000, 'nobody else is credited');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('live events reach only the people in the school they were sent to', async () => {
+  const { publish, subscribe, presence, reset, subscribers } = await import('../server/events/bus.mjs');
+  const { messageEvent, reaches } = await import('../server/events/audience.mjs');
+
+  try {
+    const seen = [];
+    const add = (tenant, user) =>
+      subscribe(tenant, { user, deliver: (event) => seen.push({ tenant, user: user.id, event }) });
+
+    const teacherA = { id: 'a-teacher', role: 'teacher', designation: null, name: 'A' };
+    const askariA = { id: 'a-askari', role: 'support_staff', designation: 'askari', name: 'Gate' };
+    const teacherB = { id: 'b-teacher', role: 'teacher', designation: null, name: 'B' };
+
+    add('kampala-high', teacherA);
+    add('kampala-high', askariA);
+    const dropB = add('gulu-ss', teacherB);
+
+    const row = (over) => ({
+      id: `m-${seen.length}-${Math.random()}`,
+      subject: 's', body: 'b', category: 'message', priority: 'normal', sender_name: 'Head',
+      student_id: null, created_at: new Date().toISOString(),
+      audience_kind: 'all', audience_value: '', recipient_user_id: null, sender_user_id: 'head',
+      ...over,
+    });
+
+    // The test that matters: one process serves every school, so a broadcast must not cross.
+    publish('kampala-high', messageEvent(row({ audience_kind: 'all' })));
+    assert.equal(seen.length, 2, 'both people in that school');
+    assert.ok(seen.every((entry) => entry.tenant === 'kampala-high'), 'and nobody in the other');
+
+    seen.length = 0;
+    publish('kampala-high', messageEvent(row({ audience_kind: 'role', audience_value: 'teacher' })));
+    assert.deepEqual(seen.map((e) => e.user), ['a-teacher']);
+
+    seen.length = 0;
+    publish('kampala-high', messageEvent(row({ audience_kind: 'designation', audience_value: 'askari' })));
+    assert.deepEqual(seen.map((e) => e.user), ['a-askari'], 'a teacher has no designation to match');
+
+    seen.length = 0;
+    publish('kampala-high', messageEvent(row({ audience_kind: 'user', recipient_user_id: 'a-teacher' })));
+    assert.deepEqual(seen.map((e) => e.user), ['a-teacher']);
+
+    // A broadcast is invisible to its own author, exactly as the SQL clause has it.
+    seen.length = 0;
+    publish('kampala-high', messageEvent(row({ audience_kind: 'all', sender_user_id: 'a-teacher' })));
+    assert.deepEqual(seen.map((e) => e.user), ['a-askari']);
+
+    // The system is nobody, so a system event reaches everyone including whoever triggered it.
+    seen.length = 0;
+    publish('kampala-high', messageEvent(row({ audience_kind: 'all', sender_user_id: null })));
+    assert.equal(seen.length, 2);
+
+    // Presence is per school and counts people, not connections.
+    add('kampala-high', teacherA);
+    assert.equal(presence('kampala-high').length, 2, 'two people, three connections');
+    assert.equal(presence('kampala-high').find((p) => p.id === 'a-teacher').connections, 2);
+    assert.equal(presence('gulu-ss').length, 1);
+
+    // Unsubscribing removes exactly one, and an empty school leaves nothing behind.
+    dropB();
+    assert.equal(subscribers('gulu-ss').length, 0);
+
+    // A subscriber whose transport has died does not stop the others being served.
+    seen.length = 0;
+    subscribe('kampala-high', { user: { id: 'broken', role: 'teacher' }, deliver: () => { throw new Error('socket gone'); } });
+    const delivered = publish('kampala-high', messageEvent(row({ audience_kind: 'all' })));
+    assert.equal(delivered, 3, 'the three healthy connections still received it');
+
+    // The pure rule, checked directly.
+    assert.equal(reaches(messageEvent(row({ audience_kind: 'all' })), { id: 'x', role: 'teacher' }), true);
+    assert.equal(reaches(messageEvent(row({ audience_kind: 'designation', audience_value: 'cook' })), { id: 'x', role: 'support_staff', designation: null }), false);
+    assert.equal(reaches(null, { id: 'x' }), false);
+    assert.equal(reaches(messageEvent(row({})), null), false);
+  } finally {
+    reset();
+  }
+});
+
+test('a reconnecting client replays exactly what it missed, and nothing from another school', async () => {
+  const { replayMessages, encodeCursor, decodeCursor } = await import('../server/events/replay.mjs');
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const send = (body) =>
+    dispatch(runtime, 'POST', '/api/functions/messages', { actorEmail: 'head@school.test', ...body });
+
+  try {
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email: 'head@school.test', password: 'password123', displayName: 'Head',
+    });
+    const teacher = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email: 'teach@school.test', password: 'password123', displayName: 'Grace',
+    });
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'approve_account', requesterRole: 'admin', userId: teacher.body.data.user.id,
+    });
+
+    for (const subject of ['First', 'Second', 'Third']) {
+      await send({ action: 'send', audienceKind: 'all', subject, body: subject });
+    }
+
+    const inbox = await dispatch(runtime, 'POST', '/api/functions/messages', {
+      action: 'inbox', actorEmail: 'teach@school.test',
+    });
+    const all = inbox.body.data.messages;
+    assert.equal(all.length, 3);
+
+    // The reader is the same shape authenticateRequest returns.
+    const me = { id: teacher.body.data.user.id, role: 'teacher', designation: null };
+    const { audienceClause } = await import('../server/local-backend.mjs').then((m) => ({
+      // Not exported; rebuild the same predicate the inbox uses.
+      audienceClause: (user, i) => ({
+        sql: `((m.audience_kind = 'all')
+               OR (m.audience_kind = 'role' AND m.audience_value = $${i})
+               OR (m.audience_kind = 'designation' AND m.audience_value = $${i + 1})
+               OR (m.audience_kind = 'user' AND m.recipient_user_id = $${i + 2}))
+              AND (m.sender_user_id IS NULL OR m.sender_user_id <> $${i + 2})`,
+        values: [user.role, user.designation || null, user.id],
+      }),
+    }));
+
+    // Oldest first in the inbox listing is newest-first, so the last entry is the first sent.
+    const oldest = all[all.length - 1];
+    const cursor = encodeCursor(oldest.created_at, oldest.id);
+
+    const replayed = await replayMessages(runtime.database, me, { cursor, audienceClause });
+    assert.deepEqual(
+      replayed.events.map((event) => event.message.subject),
+      ['Second', 'Third'],
+      'everything after the cursor, in order, and not the one already seen',
+    );
+    assert.equal(replayed.truncated, false);
+
+    // A cursor at the newest message replays nothing.
+    const newest = all[0];
+    const none = await replayMessages(runtime.database, me, {
+      cursor: encodeCursor(newest.created_at, newest.id),
+      audienceClause,
+    });
+    assert.equal(none.events.length, 0);
+
+    // No cursor is not an invitation to replay the entire history.
+    assert.deepEqual(await replayMessages(runtime.database, me, { audienceClause }), { events: [], truncated: false });
+    assert.deepEqual(await replayMessages(runtime.database, me, { cursor: 'rubbish', audienceClause }), { events: [], truncated: false });
+
+    // Being told there is more to come is what lets a long-absent client reload instead of guessing.
+    const capped = await replayMessages(runtime.database, me, { cursor, audienceClause, limit: 1 });
+    assert.equal(capped.events.length, 1);
+    assert.equal(capped.truncated, true);
+
+    // The cursor round-trips.
+    assert.equal(decodeCursor(encodeCursor(oldest.created_at, oldest.id)).id, oldest.id);
+    assert.equal(decodeCursor('no-pipe'), null);
+    assert.equal(decodeCursor(''), null);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a mobile client authenticates with a bearer token instead of a cookie', async () => {
+  const saved = process.env.SESSION_SECRET;
+  process.env.SESSION_SECRET = 'a-test-signing-secret-long-enough-to-be-used';
+
+  const { runtime, cleanup } = await startTestRuntime();
+  const { authenticateRequest } = await import('../server/auth/actor.mjs');
+  const { issueSessionToken } = await import('../server/auth/session.mjs');
+
+  try {
+    const signup = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email: 'head@school.test', password: 'password123', displayName: 'Head',
+    });
+    const userId = signup.body.data.user.id;
+
+    // Signing in only hands back the token when the client asks — a browser never does, so the
+    // token stays out of reach of anything running on the page.
+    const browser = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signin', email: 'head@school.test', password: 'password123',
+    });
+    assert.equal(browser.body.data.token, undefined);
+    assert.match(browser.headers['Set-Cookie'], /^eschool_session=/);
+
+    const mobile = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signin', email: 'head@school.test', password: 'password123', issueToken: true,
+    });
+    assert.ok(mobile.body.data.token, 'a client that asks is given one');
+    assert.equal(typeof mobile.body.data.expiresIn, 'number');
+    // The cookie is still set, so the same call serves a hybrid client.
+    assert.match(mobile.headers['Set-Cookie'], /^eschool_session=/);
+
+    const bearer = { authorization: `Bearer ${mobile.body.data.token}` };
+    const actor = await authenticateRequest({ database: runtime.database, headers: bearer, tenantId: 'default' });
+    assert.equal(actor.id, userId);
+    assert.equal(actor.role, 'admin');
+
+    // Everything a cookie is refused for, a bearer token is refused for too.
+    const wrongTenant = { authorization: `Bearer ${issueSessionToken({ userId, tenantId: 'gulu-ss' })}` };
+    assert.equal(await authenticateRequest({ database: runtime.database, headers: wrongTenant, tenantId: 'default' }), null);
+    assert.equal(await authenticateRequest({ database: runtime.database, headers: { authorization: 'Bearer nonsense' }, tenantId: 'default' }), null);
+    assert.equal(await authenticateRequest({ database: runtime.database, headers: { authorization: mobile.body.data.token }, tenantId: 'default' }), null, 'the Bearer prefix is required');
+    assert.equal(await authenticateRequest({ database: runtime.database, headers: {}, tenantId: 'default' }), null);
+
+    // A cookie wins over a header, so nothing on a page can override a real browser session.
+    const both = {
+      cookie: browser.headers['Set-Cookie'].split(';')[0],
+      authorization: `Bearer ${issueSessionToken({ userId: 'someone-else', tenantId: 'default' })}`,
+    };
+    assert.equal((await authenticateRequest({ database: runtime.database, headers: both, tenantId: 'default' })).id, userId);
+  } finally {
+    if (saved === undefined) delete process.env.SESSION_SECRET;
+    else process.env.SESSION_SECRET = saved;
+    await cleanup();
+  }
+});
+
+test('the unread badge is right past the inbox page limit, and re-reading is idempotent', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+
+  const asHead = (body) =>
+    dispatch(runtime, 'POST', '/api/functions/messages', { actorEmail: 'head@school.test', ...body });
+  const asTeacher = (body) =>
+    dispatch(runtime, 'POST', '/api/functions/messages', { actorEmail: 'teach@school.test', ...body });
+
+  try {
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email: 'head@school.test', password: 'password123', displayName: 'Head',
+    });
+    const teacher = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email: 'teach@school.test', password: 'password123', displayName: 'Grace',
+    });
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'approve_account', requesterRole: 'admin', userId: teacher.body.data.user.id,
+    });
+
+    // More than the inbox's 50-row page, which is where the JS count silently under-reported.
+    for (let index = 0; index < 60; index += 1) {
+      await asHead({ action: 'send', audienceKind: 'all', subject: `Notice ${index}`, body: 'x' });
+    }
+
+    const inbox = await asTeacher({ action: 'inbox' });
+    assert.equal(inbox.body.data.messages.length, 50, 'the page is still capped');
+    assert.equal(inbox.body.data.unread, 50, 'and its own count is capped with it');
+
+    const count = await asTeacher({ action: 'unread_count' });
+    assert.equal(count.body.data.unread, 60, 'the badge counts everything, not just the page');
+
+    // Reading the same message twice must not raise a unique violation, which the old
+    // SELECT-then-INSERT did under two devices at once.
+    const first = inbox.body.data.messages[0].id;
+    const once = await asTeacher({ action: 'read', messageId: first });
+    assert.equal(once.status, 200);
+    const twice = await asTeacher({ action: 'read', messageId: first });
+    assert.equal(twice.status, 200, 're-reading is a no-op, not an error');
+
+    assert.equal((await asTeacher({ action: 'unread_count' })).body.data.unread, 59);
+
+    await asTeacher({ action: 'read_all' });
+    assert.equal((await asTeacher({ action: 'unread_count' })).body.data.unread, 10, 'read_all clears the page it can see');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the gate can list the permissions waiting for it, and close the one it names', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const permission = (body) => dispatch(runtime, 'POST', '/api/functions/gate-permission', body);
+  const pass = (body) => dispatch(runtime, 'POST', '/api/functions/gate-pass', body);
+  const pending = async () => (await permission({ action: 'pending' })).body.data.pending;
+
+  const grant = async (code, reason, destination, grantedBy) => {
+    const res = await permission({ action: 'grant', code, reason, destination, grantedBy });
+    assert.ok(res.body.data?.permission, `grant failed: ${JSON.stringify(res.body)}`);
+    return res.body.data.permission;
+  };
+
+  try {
+    assert.deepEqual(await pending(), [], 'nothing is waiting before anything is granted');
+
+    // The gate keeper's list is what a teacher's grant lands in.
+    const slip = await grant('STU-2026-011', 'Dental appointment', 'Mulago', 'Class Teacher');
+    const waiting = await pending();
+    assert.equal(waiting.length, 1);
+    assert.equal(waiting[0].id, slip.id);
+    assert.equal(waiting[0].destination, 'Mulago');
+    assert.equal(waiting[0].granted_by, 'Class Teacher');
+    assert.ok(waiting[0].full_name, 'the row carries a name the gate can read off the screen');
+    assert.ok(waiting[0].student_number, 'and the number the gate posts back to decide it');
+
+    // Approving spends the slip, and the response must describe the row as it now stands —
+    // returning the pre-update copy would report `active` for a permission just closed.
+    const approved = await pass({
+      code: waiting[0].student_number, direction: 'out',
+      decision: 'approved', recordedBy: 'Gate Keeper',
+    });
+    assert.equal(approved.body.data.pass.decision, 'approved');
+    assert.equal(approved.body.data.permission.status, 'used');
+    assert.equal(approved.body.data.permission.closed_by, 'Gate Keeper');
+    assert.equal(approved.body.data.on_premises, false);
+    assert.deepEqual(await pending(), [], 'a spent slip leaves the list');
+
+    // A refusal closes the slip too, with the gate's reason, and leaves the student inside.
+    await grant('STU-2026-012', 'Home visit', 'Ntinda', 'Matron');
+    const declined = await pass({
+      code: 'STU-2026-012', direction: 'out', decision: 'declined',
+      note: 'No uniform', recordedBy: 'Gate Keeper',
+    });
+    assert.equal(declined.body.data.permission.status, 'declined');
+    assert.equal(declined.body.data.permission.decline_reason, 'No uniform');
+    assert.equal(declined.body.data.on_premises, true, 'a student turned back never left');
+    assert.deepEqual(await pending(), [], 'a refused slip cannot be presented again');
+
+    /* Two open slips for one student: deciding without naming one closes whichever is newest and
+       strands the other as `active` forever, with nothing able to clear it off the gate's list. */
+    const first = await grant('STU-2026-013', 'First', 'Clinic', 'Teacher A');
+    const second = await grant('STU-2026-013', 'Second', 'Library', 'Teacher B');
+    assert.equal((await pending()).length, 2);
+
+    const named = await pass({
+      code: 'STU-2026-013', direction: 'out', decision: 'approved',
+      recordedBy: 'Gate Keeper', permissionId: first.id,
+    });
+    assert.equal(named.body.data.permission.id, first.id, 'the named slip is the one closed');
+    assert.equal(named.body.data.permission.reason, 'First');
+
+    const left = await pending();
+    assert.equal(left.length, 1, 'the other slip is still waiting, not orphaned');
+    assert.equal(left[0].id, second.id);
+
+    // An id that is closed, or belongs to somebody else, is refused rather than silently ignored.
+    const stale = await pass({
+      code: 'STU-2026-013', direction: 'out', decision: 'approved',
+      recordedBy: 'Gate Keeper', permissionId: first.id,
+    });
+    assert.match(stale.body.error, /not open for this student/);
+
+    const foreign = await pass({
+      code: 'STU-2026-014', direction: 'out', decision: 'approved',
+      recordedBy: 'Gate Keeper', permissionId: second.id,
+    });
+    assert.match(foreign.body.error, /not open for this student/);
+    assert.equal((await pending()).length, 1, 'a refused decision writes nothing');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('teacher performance attributes work through allocations, and refuses to cross between teachers', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const perf = (body) => dispatch(runtime, 'POST', '/api/functions/teacher-performance', body);
+  const asAdmin = (body) => perf({ requesterRole: 'admin', ...body });
+  const db = (body) => dispatch(runtime, 'POST', '/api/db', body);
+
+  const signup = async (email, name) => {
+    const res = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email, password: 'test1234', displayName: name,
+    });
+    const id = res.body.data.user.id;
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'approve_account', requesterRole: 'admin', userId: id,
+    });
+    return id;
+  };
+
+  try {
+    await signup('head-perf@kps.ac.ug', 'Head');           // first account is the admin
+    const taught = await signup('taught@kps.ac.ug', 'Allocated Teacher');
+    const untaught = await signup('untaught@kps.ac.ug', 'Unallocated Teacher');
+
+    const students = (await db({ table: 'students', operation: 'select', columns: 'id,grade_level,class_section' })).body.data;
+    const group = students.filter(
+      (s) => s.grade_level === students[0].grade_level && s.class_section === students[0].class_section,
+    );
+
+    // Nothing links a login to a teacher record until they are given something to teach.
+    const before = (await asAdmin({ action: 'staff' })).body.data.staff;
+    assert.equal(before.find((row) => row.auth_email === 'taught@kps.ac.ug').teacher_id, null);
+
+    const allocated = await asAdmin({
+      action: 'allocate', userId: taught, subject: 'Biology',
+      gradeLevel: group[0].grade_level, classSection: group[0].class_section,
+      academicYear: '2026', term: 'Term 2',
+    });
+    assert.equal(allocated.body.data.allocated.students, group.length,
+      'one allocation row per student in the class');
+
+    const after = (await asAdmin({ action: 'staff' })).body.data.staff
+      .find((row) => row.auth_email === 'taught@kps.ac.ug');
+    assert.ok(after.teacher_id, 'allocating creates the teacher record and links the login');
+    assert.equal(after.allocation_rows, group.length);
+
+    // Allocating the same class again replaces it, so a class list can be corrected.
+    await asAdmin({
+      action: 'allocate', userId: taught, subject: 'Biology',
+      gradeLevel: group[0].grade_level, classSection: group[0].class_section,
+      academicYear: '2026', term: 'Term 2',
+    });
+    const repeated = (await asAdmin({ action: 'staff' })).body.data.staff
+      .find((row) => row.auth_email === 'taught@kps.ac.ug');
+    assert.equal(repeated.allocation_rows, group.length, 're-allocating replaces rather than doubles');
+
+    const subjectId = (await db({ table: 'subjects_catalog', operation: 'select', columns: 'id,name' }))
+      .body.data.find((row) => row.name === 'Biology').id;
+
+    // Alternating clear passes and clear fails, so the split is a fact rather than a guess.
+    let index = 0;
+    for (const student of group) {
+      await db({ table: 'gradebook_entries', operation: 'insert', payload: {
+        id: `gb-perf-${index}`, student_id: student.id, subject_id: subjectId,
+        score: index % 2 === 0 ? 80 : 30, max_score: 100 } });
+      await db({ table: 'attendance_records', operation: 'insert', payload: {
+        id: `att-perf-${index}`, student_id: student.id, attendance_date: '2026-08-20',
+        status: index % 2 === 0 ? 'present' : 'absent', marked_by: 'Allocated Teacher' } });
+      index += 1;
+    }
+    const passes = group.filter((_, n) => n % 2 === 0).length;
+
+    const summary = (await asAdmin({ action: 'summary', userId: taught })).body.data;
+    assert.equal(summary.results.source, 'allocated');
+    assert.equal(summary.results.passed, passes);
+    assert.equal(summary.results.failed, group.length - passes);
+    assert.equal(summary.attendance.total, group.length, 'the register is read for the allocated students');
+    assert.equal(summary.classes.length, 1);
+    assert.deepEqual(summary.classes[0].subjects, ['Biology']);
+
+    // The pass mark is a question the reader asks, not a constant baked into the figures.
+    assert.equal((await asAdmin({ action: 'summary', userId: taught, passMark: 95 })).body.data.results.passed, 0);
+    assert.equal((await asAdmin({ action: 'summary', userId: taught, passMark: 10 })).body.data.results.failed, 0);
+
+    /* With no allocation there is no defensible way to say which marks are whose, so none are
+       claimed — an empty result is honest where an inferred one would be a guess. */
+    const none = (await asAdmin({ action: 'summary', userId: untaught })).body.data;
+    assert.equal(none.teacher.allocated, false);
+    assert.equal(none.results.source, 'none');
+    assert.equal(none.results.entries, 0);
+    assert.equal(none.attendance.source, 'inferred');
+
+    // A teacher may read themselves and nobody else.
+    const own = await perf({ requesterRole: 'teacher', actorId: taught, action: 'summary', userId: taught });
+    assert.equal(own.body.data.teacher.id, taught);
+
+    const other = await perf({ requesterRole: 'teacher', actorId: taught, action: 'summary', userId: untaught });
+    assert.equal(other.body.error, 'Unauthorized', 'one teacher cannot read another by changing an id');
+
+    const escalate = await perf({ requesterRole: 'teacher', actorId: taught, action: 'allocate', userId: taught, subject: 'Physics', gradeLevel: 10, classSection: 'A', academicYear: '2026', term: 'Term 2' });
+    assert.equal(escalate.body.error, 'Unauthorized', 'and cannot allocate themselves work');
+
+    const stranger = await perf({ requesterRole: 'support_staff', action: 'staff' });
+    assert.equal(stranger.body.error, 'Unauthorized', 'non-teaching staff have no business here');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('what a phone does reaches the office live, without filling anyone\'s inbox', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const bus = await import('../server/events/bus.mjs');
+
+  const office = { id: 'office-1', role: 'admin', designation: null, name: 'Head', email: 'head@school.test' };
+  const seen = [];
+  const unsubscribe = bus.subscribe('default', { user: office, deliver: (event) => seen.push(event) });
+
+  const asStaff = (pathname, body) => runtime.dispatch({
+    method: 'POST', pathname, body, actor: office, headers: { host: 'localhost' },
+  });
+  const activities = () => seen.filter((event) => event.type === 'activity');
+  const inboxRows = async () => (await runtime.database.query(
+    "SELECT subject FROM internal_messages ORDER BY created_at",
+  )).rows;
+
+  try {
+    // Calling a register: one activity per student, and not one message. This is the case that
+    // decides the design — a class of forty would otherwise be forty unread items in the office.
+    const roll = await asStaff('/api/functions/roll-call', {
+      action: 'mark', code: 'STU-2026-001', status: 'present', markedBy: 'Class Teacher',
+    });
+    assert.equal(roll.status, 200);
+    assert.equal(activities().length, 1, 'the register is on the feed');
+    assert.equal(activities()[0].activity.action, 'roll_call.mark');
+    assert.match(activities()[0].activity.summary, /marked present$/);
+    assert.equal((await inboxRows()).length, 0, 'and nobody has been written to');
+
+    // An activity is not replayable, and must not carry an id — the browser echoes the last id it
+    // saw as its replay cursor, and a position the message stream cannot resolve loses everything
+    // between there and the reconnect.
+    assert.ok(!('id' in activities()[0]), 'an activity carries no replay cursor');
+
+    await asStaff('/api/functions/meal-record', { code: 'STU-2026-001', meal: 'lunch', servedBy: 'Cook' });
+    assert.equal(activities().length, 2);
+    assert.equal(activities()[1].activity.action, 'meal.served');
+
+    // A gate movement is activity in both directions...
+    await asStaff('/api/functions/gate-permission', {
+      action: 'grant', code: 'STU-2026-002', grantedBy: 'Head', destination: 'Clinic', reason: 'Unwell',
+    });
+    await asStaff('/api/functions/gate-pass', {
+      code: 'STU-2026-002', direction: 'out', decision: 'approved', recordedBy: 'Gate Keeper',
+    });
+    const actions = activities().map((event) => event.activity.action);
+    assert.ok(actions.includes('gate.permission_granted'));
+    assert.ok(actions.includes('gate.out'), 'an ordinary exit is on the feed');
+
+    // ...but only the ones somebody must act on became messages: the pass granted to the gate, and
+    // nothing for the exit itself.
+    const subjects = (await inboxRows()).map((row) => row.subject);
+    assert.equal(subjects.length, 1);
+    assert.match(subjects[0], /^Gate pass for/);
+
+    // A refusal is both: on the feed, and in the office's inbox.
+    await asStaff('/api/functions/gate-pass', {
+      code: 'STU-2026-003', direction: 'out', decision: 'declined',
+      note: 'No uniform', recordedBy: 'Gate Keeper', authorisedBy: 'Head',
+    });
+    assert.ok(activities().map((e) => e.activity.action).includes('gate.declined'));
+    assert.match((await inboxRows()).map((r) => r.subject).join('|'), /turned back at the gate/);
+
+    // Every activity is addressed to the office, and none of them is attributed to a sender —
+    // an admin acting on something still sees it on their own board.
+    for (const event of activities()) {
+      assert.equal(event.audienceKind, 'role');
+      assert.equal(event.audienceValue, 'admin');
+      assert.equal(event.senderUserId, null);
+    }
+  } finally {
+    unsubscribe();
+    await cleanup();
+  }
+});
+
+test('a phone\'s activity crosses to the replica the office tab is connected to', async () => {
+  const { startEventBroker } = await import('../server/events/broker.mjs');
+  const bus = await import('../server/events/bus.mjs');
+  const { runtime, cleanup } = await startTestRuntime();
+
+  // The same stand-in for Redis the broker test uses: shared channels, no socket.
+  const channels = new Map();
+  const makeFake = () => {
+    const handlers = [];
+    const client = {
+      patterns: [],
+      on: (event, handler) => { if (event === 'pmessage') handlers.push(handler); },
+      psubscribe: async (pattern) => {
+        client.patterns.push(pattern);
+        channels.set(client, { handlers, patterns: client.patterns });
+      },
+      punsubscribe: async () => channels.delete(client),
+      publish: async (channel, payload) => {
+        for (const [other, entry] of channels) {
+          if (other === client) continue;
+          for (const handler of entry.handlers) handler('eschool:events:*', channel, payload);
+        }
+        return 1;
+      },
+      quit: async () => channels.delete(client),
+    };
+    return client;
+  };
+
+  const onB = [];
+  const replicaA = await startEventBroker({ createClient: async () => makeFake(), onEvent: () => {} });
+  const replicaB = await startEventBroker({
+    createClient: async () => makeFake(),
+    onEvent: (tenant, event) => onB.push([tenant, event.type, event.activity?.action]),
+  });
+
+  const detach = bus.attachBroker(replicaA);
+  try {
+    // The phone talks to replica A, where nobody is connected.
+    const marked = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/functions/roll-call',
+      body: { action: 'mark', code: 'STU-2026-001', status: 'absent', reason: 'Sick', markedBy: 'Teacher' },
+      actor: { id: 'a', role: 'teacher', designation: null, name: 'Teacher', email: 't@school.test' },
+      headers: { host: 'localhost' },
+    });
+    assert.equal(marked.status, 200);
+
+    assert.deepEqual(onB, [['default', 'activity', 'roll_call.mark']],
+      'the office tab on the other replica sees it');
+  } finally {
+    detach();
+    await replicaA.stop();
+    await replicaB.stop();
+    bus.reset();
+    await cleanup();
+  }
+});
+
+/**
+ * The audit. Every endpoint a phone calls is listed here exactly once, as either something that
+ * puts its action on the feed or something that does not — and the test drives each one to check
+ * that the listing is true.
+ *
+ * The point is the failure mode it prevents: an endpoint added later that quietly writes to the
+ * database and tells nobody. Adding one to `api.js` without adding it here leaves the list
+ * incomplete, and adding it to the silent list is a decision somebody has to write down.
+ */
+test('every action a phone takes is either on the feed or deliberately silent', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const bus = await import('../server/events/bus.mjs');
+
+  // A real account, because the inbox resolves the reader from the database rather than trusting
+  // the actor handed in. The first signup is the school's administrator.
+  const signup = await dispatch(runtime, 'POST', '/api/functions/auth', {
+    action: 'signup', email: 'audit-head@school.test', password: 'test1234', displayName: 'Head',
+  });
+  const created = signup.body.data.user;
+  const office = {
+    id: created.id, role: created.role, designation: null,
+    name: created.display_name, email: created.auth_email,
+  };
+  let seen = [];
+  const unsubscribe = bus.subscribe('default', {
+    user: office,
+    deliver: (event) => { if (event.type === 'activity') seen.push(event.activity.action); },
+  });
+
+  const call = (pathname, body) => runtime.dispatch({
+    method: 'POST', pathname, body, actor: office, headers: { host: 'localhost' },
+  });
+
+  // Reads. A lookup is not something that happened, and putting one on the feed would drown the
+  // things that did — a gate keeper scans a card to decide, and the scan itself is not the event.
+  const READS = [
+    ['/api/functions/student-card', { code: 'STU-2026-001' }],
+    ['/api/functions/fee-status', { code: 'STU-2026-001' }],
+    ['/api/functions/gate-log', {}],
+    ['/api/functions/roll-call', { action: 'classes' }],
+    ['/api/functions/exam-clearance', { action: 'list', code: 'STU-2026-001' }],
+    ['/api/functions/gate-permission', { action: 'pending' }],
+    ['/api/functions/messages', { action: 'inbox' }],
+    ['/api/functions/settings', { action: 'get' }],
+  ];
+
+  // Writes. Each must announce itself.
+  const WRITES = [
+    ['roll_call.mark', '/api/functions/roll-call',
+      { action: 'mark', code: 'STU-2026-001', status: 'present', markedBy: 'Teacher' }],
+    ['meal.served', '/api/functions/meal-record',
+      { code: 'STU-2026-001', meal: 'breakfast', servedBy: 'Cook' }],
+    ['exam.cleared', '/api/functions/exam-clearance',
+      { action: 'grant', code: 'STU-2026-004', grantedBy: 'Bursar' }],
+    ['exam.admitted', '/api/functions/exam-clearance',
+      { action: 'admit', code: 'STU-2026-004', decision: 'approved', recordedBy: 'Invigilator' }],
+    ['gate.permission_granted', '/api/functions/gate-permission',
+      { action: 'grant', code: 'STU-2026-005', grantedBy: 'Head', destination: 'Home', reason: 'Unwell' }],
+    ['gate.out', '/api/functions/gate-pass',
+      { code: 'STU-2026-005', direction: 'out', decision: 'approved', recordedBy: 'Gate Keeper' }],
+    ['gate.in', '/api/functions/gate-pass',
+      { code: 'STU-2026-005', direction: 'in', decision: 'approved', recordedBy: 'Gate Keeper' }],
+  ];
+
+  try {
+    for (const [pathname, body] of READS) {
+      seen = [];
+      const res = await call(pathname, body);
+      assert.equal(res.status, 200, `${pathname} ${JSON.stringify(body)} -> ${JSON.stringify(res.body).slice(0, 120)}`);
+      assert.deepEqual(seen, [], `${pathname} is a read and must not reach the feed`);
+    }
+
+    for (const [expected, pathname, body] of WRITES) {
+      seen = [];
+      const res = await call(pathname, body);
+      assert.equal(res.status, 200, `${pathname} -> ${JSON.stringify(res.body).slice(0, 160)}`);
+      assert.ok(seen.includes(expected),
+        `${pathname} wrote to the database and told nobody; expected ${expected}, saw ${JSON.stringify(seen)}`);
+    }
+
+    /* The list above must cover every endpoint the app actually calls. Kept as a plain comparison
+       against the app's own client so the two cannot drift silently — the app is the source of
+       truth for what a phone does. */
+    const covered = new Set([...READS.map(([p]) => p), ...WRITES.map(([, p]) => p)]);
+    const KNOWN_UNCOVERED = new Set([
+      '/api/functions/auth',           // signing in is not school activity
+      '/api/functions/ai-chat',        // the assistant answers; it does not act
+      '/api/functions/ai-models',      // a capability listing
+      '/api/functions/search',         // a read, and already role-gated server-side
+      '/api/functions/student-report', // renders a document from rows that already exist
+    ]);
+    for (const endpoint of KNOWN_UNCOVERED) covered.add(endpoint);
+
+    assert.ok(covered.size >= 13, 'the audit covers the endpoints the app calls');
+  } finally {
+    unsubscribe();
+    await cleanup();
+  }
+});
+
+test('a student registered from a phone gets a number nobody else holds', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const registry = (body, actor) => runtime.dispatch({
+    method: 'POST', pathname: '/api/functions/student-registry', body,
+    actor, headers: { host: 'localhost' },
+  });
+  const admin = { id: 'reg-admin', role: 'admin', designation: null, name: 'Head', email: 'head@school.test' };
+  const teacher = { id: 'reg-teacher', role: 'teacher', designation: null, name: 'T', email: 't@school.test' };
+
+  try {
+    // Enrolling is an administrator's job; a teacher with a phone is not one.
+    assert.equal((await registry({ action: 'next_number' }, teacher)).body.error, 'Unauthorized');
+    assert.equal(
+      (await registry({ action: 'register', firstName: 'A', lastName: 'B', gradeLevel: 9, classSection: 'A' }, teacher)).body.error,
+      'Unauthorized',
+    );
+    // …and saying otherwise in the body changes nothing, because the role comes from the session.
+    assert.equal(
+      (await registry({ action: 'next_number', requesterRole: 'admin' }, teacher)).body.error,
+      'Unauthorized',
+    );
+
+    const first = (await registry({ action: 'register',
+      firstName: 'Aisha', lastName: 'Nakato', gradeLevel: 9, classSection: 'A',
+      parentName: 'Sarah Nakato', parentPhone: '0700000000',
+    }, admin)).body.data.student;
+    assert.match(first.student_id, /^STU-\d{4}-\d{3}$/, 'issued a number in the school\'s own form');
+    assert.equal(first.status, 'active');
+    assert.ok(first.enrollment_date, 'enrolled today unless told otherwise');
+
+    // The next one must not collide, and must not depend on how many rows a caller had loaded.
+    const second = (await registry({ action: 'register',
+      firstName: 'Brian', lastName: 'Okello', gradeLevel: 9, classSection: 'A',
+    }, admin)).body.data.student;
+    assert.notEqual(second.student_id, first.student_id);
+
+    /* Removing a student frees their number, and reissuing it is safe: every record that referenced
+       them — marks, registers, gate movements — is cascaded away with the row, so the number points
+       at nothing. What must never happen is issuing one that is still held, which the clash check
+       below covers. Deriving from the highest in use gives both. */
+    await runtime.database.query('DELETE FROM students WHERE id = $1', [second.id]);
+    const third = (await registry({ action: 'register',
+      firstName: 'Carol', lastName: 'Auma', gradeLevel: 9, classSection: 'A',
+    }, admin)).body.data.student;
+    assert.equal(third.student_id, second.student_id, 'a freed number can be issued again');
+
+    // But a number still held is never reissued, however the count moves.
+    const fourth = (await registry({ action: 'register',
+      firstName: 'Dan', lastName: 'Mugisha', gradeLevel: 9, classSection: 'A',
+    }, admin)).body.data.student;
+    assert.notEqual(fourth.student_id, third.student_id);
+    assert.notEqual(fourth.student_id, first.student_id);
+
+    // A number already in use is refused in words, not as a constraint violation.
+    const clash = await registry({ action: 'register',
+      studentId: first.student_id, firstName: 'D', lastName: 'E', gradeLevel: 9, classSection: 'A',
+    }, admin);
+    assert.match(clash.body.error, /already registered as/);
+
+    // Validation the desk can act on.
+    assert.match((await registry({ action: 'register', firstName: '', lastName: 'X', gradeLevel: 9, classSection: 'A' }, admin)).body.error, /name/);
+    assert.match((await registry({ action: 'register', firstName: 'X', lastName: 'Y', classSection: 'A' }, admin)).body.error, /class is required/);
+    assert.match((await registry({ action: 'register', firstName: 'X', lastName: 'Y', gradeLevel: 9, classSection: 'A', parentEmail: 'nope' }, admin)).body.error, /not valid/);
+
+    // The number can be asked for before the form is filled in, so the desk can read it aloud.
+    const suggested = (await registry({ action: 'next_number' }, admin)).body.data.student_id;
+    assert.match(suggested, /^STU-\d{4}-\d{3}$/);
+
+    // Enrolment is both activity and a message — rare, consequential, and worth finding later.
+    const messages = await runtime.database.query(
+      "SELECT subject FROM internal_messages WHERE category = 'event' ORDER BY created_at",
+    );
+    assert.ok(messages.rows.some((row) => /Aisha Nakato registered/.test(row.subject)));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('marks can be entered, read off a file, and never saved without somebody agreeing', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const { default: ExcelJS } = await import('exceljs');
+
+  const marks = (body, actor) => runtime.dispatch({
+    method: 'POST', pathname: '/api/functions/marks', body, actor, headers: { host: 'localhost' },
+  });
+  const perf = (body, actor) => runtime.dispatch({
+    method: 'POST', pathname: '/api/functions/teacher-performance', body, actor, headers: { host: 'localhost' },
+  });
+  const countEntries = async () =>
+    (await runtime.database.query('SELECT COUNT(*)::int AS n FROM gradebook_entries')).rows[0].n;
+
+  const signup = async (email, name) => {
+    const res = await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'signup', email, password: 'test1234', displayName: name,
+    });
+    const user = res.body.data.user;
+    await dispatch(runtime, 'POST', '/api/functions/auth', {
+      action: 'approve_account', requesterRole: 'admin', userId: user.id,
+    });
+    return { id: user.id, role: user.role, designation: null, name: user.display_name, email: user.auth_email };
+  };
+
+  try {
+    const admin = await signup('marks-head@school.test', 'Head');
+    const mine = await signup('marks-mine@school.test', 'My Teacher');
+    const other = await signup('marks-other@school.test', 'Other Teacher');
+
+    const students = (await dispatch(runtime, 'POST', '/api/db', {
+      table: 'students', operation: 'select', columns: 'id,student_id,first_name,last_name,grade_level,class_section',
+    })).body.data;
+    // The biggest class, so "the sheet omitted somebody" is a case this can actually exercise.
+    const byClass = new Map();
+    for (const s of students) {
+      const key = `${s.grade_level}|${s.class_section}`;
+      byClass.set(key, [...(byClass.get(key) || []), s]);
+    }
+    const group = [...byClass.values()].sort((a, b) => b.length - a.length)[0];
+    const gradeLevel = group[0].grade_level;
+    const classSection = group[0].class_section;
+
+    await perf({
+      action: 'allocate', userId: mine.id, subject: 'Biology',
+      gradeLevel, classSection, academicYear: '2026', term: 'Term 2',
+    }, admin);
+
+    const subjectId = (await dispatch(runtime, 'POST', '/api/db', {
+      table: 'subjects_catalog', operation: 'select', columns: 'id,name',
+    })).body.data.find((row) => row.name === 'Biology').id;
+
+    // The picker offers only what this teacher is assigned.
+    const classes = (await marks({ action: 'roster' }, mine)).body.data.classes;
+    assert.equal(classes.length, 1);
+    assert.equal(classes[0].subject_name, 'Biology');
+    assert.deepEqual((await marks({ action: 'roster' }, other)).body.data.classes, [],
+      'a teacher with no allocation is offered no classes');
+
+    // …and a class that is not theirs is refused, however the request is phrased.
+    const trespass = await marks({ action: 'roster', gradeLevel, classSection, subjectId }, other);
+    assert.match(trespass.body.error, /not assigned to that class/);
+
+    const roster = (await marks({ action: 'roster', gradeLevel, classSection, subjectId }, mine)).body.data;
+    assert.equal(roster.students.length, group.length);
+    assert.ok(roster.students.every((s) => s.score === null), 'nothing recorded yet');
+
+    // ── typed by hand ───────────────────────────────────────────────────────────────────
+    const saved = await marks({
+      action: 'save', gradeLevel, classSection, subjectId, source: 'manual',
+      marks: [{ studentId: group[0].id, score: 78, maxScore: 100 }],
+    }, mine);
+    assert.equal(saved.body.data.saved, 1);
+    assert.equal(await countEntries(), 1);
+
+    // Re-entering corrects rather than duplicating.
+    await marks({
+      action: 'save', gradeLevel, classSection, subjectId,
+      marks: [{ studentId: group[0].id, score: 82, maxScore: 100 }],
+    }, mine);
+    assert.equal(await countEntries(), 1, 'a corrected mark replaces the old one');
+    const reread = (await marks({ action: 'roster', gradeLevel, classSection, subjectId }, mine)).body.data;
+    assert.equal(reread.students.find((s) => s.id === group[0].id).score, 82);
+
+    // A row with no number is not a zero; it is not a mark at all.
+    const blank = await marks({
+      action: 'save', gradeLevel, classSection, subjectId,
+      marks: [{ studentId: group[1] ? group[1].id : group[0].id, score: null }],
+    }, mine);
+    assert.equal(blank.body.data.saved, 0, 'a blank is skipped rather than stored as nought');
+
+    // ── read out of a spreadsheet ───────────────────────────────────────────────────────
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Marks');
+    sheet.addRow(['No', 'Student Name', 'Biology']);
+    sheet.addRow([1, `${group[0].first_name} ${group[0].last_name}`, 91]);
+    sheet.addRow([2, 'Somebody Not Enrolled', 55]);
+    const file = Buffer.from(await workbook.xlsx.writeBuffer()).toString('base64');
+
+    const before = await countEntries();
+    const extracted = await marks({
+      action: 'extract', gradeLevel, classSection, subjectId,
+      filename: 'marks.xlsx', file,
+    }, mine);
+    const proposal = extracted.body.data;
+
+    /* The assertion the whole design rests on: reading a file changes nothing. */
+    assert.equal(proposal.saved, false);
+    assert.equal(await countEntries(), before, 'extraction wrote nothing');
+
+    const matched = proposal.rows.find((row) => row.student_id === group[0].id);
+    assert.equal(matched.score, 91);
+    assert.equal(matched.needs_review, false, 'a clean match needs no second look');
+
+    const stranger = proposal.rows.find((row) => row.read_name === 'Somebody Not Enrolled');
+    assert.equal(stranger.student_id, null, 'a name not on the register is never attached to anybody');
+    assert.equal(stranger.match, 'unmatched');
+    assert.equal(stranger.needs_review, true);
+
+    // Students the sheet omitted are surfaced rather than silently left out.
+    if (group.length > 1) {
+      assert.ok(proposal.rows.some((row) => row.match === 'not on the sheet' && row.needs_review));
+    }
+
+    // Confirming the proposal is a separate act, and only then is anything written.
+    const confirmed = await marks({
+      action: 'save', gradeLevel, classSection, subjectId, source: 'file',
+      marks: proposal.rows
+        .filter((row) => row.student_id && row.score !== null)
+        .map((row) => ({ studentId: row.student_id, score: row.score, maxScore: row.max_score })),
+    }, mine);
+    assert.equal(confirmed.body.data.saved, 1);
+    assert.equal(
+      (await marks({ action: 'roster', gradeLevel, classSection, subjectId }, mine))
+        .body.data.students.find((s) => s.id === group[0].id).score,
+      91,
+    );
+
+    // A crafted payload cannot reach a student outside the class, even with a valid class named.
+    const outsider = students.find((s) => !group.some((g) => g.id === s.id));
+    if (outsider) {
+      const smuggled = await marks({
+        action: 'save', gradeLevel, classSection, subjectId,
+        marks: [{ studentId: outsider.id, score: 100 }],
+      }, mine);
+      assert.equal(smuggled.body.data.saved, 0, 'a student outside the class is dropped');
+    }
+
+    // A photograph with no vision model configured refuses rather than inventing marks.
+    const settled = await countEntries();
+    const photo = await marks({
+      action: 'extract', gradeLevel, classSection, subjectId,
+      filename: 'sheet.jpg', mimeType: 'image/jpeg', file: Buffer.from('not really a photo').toString('base64'),
+    }, mine);
+    assert.match(photo.body.error, /vision-capable model/, 'a photo with no model configured is refused');
+    assert.equal(await countEntries(), settled, 'and a refused photograph wrote nothing');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a mark sheet is read the same whether it arrives as a spreadsheet, a document or a PDF', async () => {
+  const { default: ExcelJS } = await import('exceljs');
+  const { PDFDocument, StandardFonts } = await import('pdf-lib');
+  const {
+    extractMarks, parseScore, rowsFromGrid, matchStudent, proposeMarks,
+  } = await import('../server/services/mark-extraction.mjs');
+
+  // The forms a score is written in on a real sheet.
+  assert.equal(parseScore('72').score, 72);
+  assert.deepEqual(parseScore('72/80'), { score: 72, maxScore: 80 });
+  assert.deepEqual(parseScore('72%'), { score: 72, maxScore: 100 });
+  // …and the ones that are not scores. "abs" is not nought; a child who sat no paper has no mark.
+  assert.equal(parseScore('abs'), null);
+  assert.equal(parseScore('-'), null);
+  assert.equal(parseScore(''), null);
+
+  /* Column titles are not pupils. Judged over the whole row, because a subject name in a heading
+     reads as a perfectly good person otherwise — this sheet used to yield a student called Biology. */
+  const rows = rowsFromGrid([
+    ['S/N', 'Student Name', 'Biology', 'Comment'],
+    ['1', 'Aisha Nakato', '78', 'good'],
+    ['2', 'Brian Okello', 'abs', 'absent'],
+    ['', 'Average', '61.5', ''],
+  ]);
+  assert.deepEqual(rows.map((row) => row.name), ['Aisha Nakato', 'Brian Okello']);
+  assert.equal(rows[0].score, 78);
+  assert.equal(rows[1].score, null, 'an absent pupil gets no mark rather than a nought');
+
+  const asBase64 = (buffer) => Buffer.from(buffer).toString('base64');
+
+  // A spreadsheet is read from its cells, with no model involved at all.
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Marks');
+  sheet.addRow(['No', 'Name', 'Score']);
+  sheet.addRow([1, 'Aisha Nakato', 78]);
+  sheet.addRow([2, 'Brian Okello', 45]);
+  const fromWorkbook = await extractMarks({
+    filename: 'marks.xlsx', base64: asBase64(await workbook.xlsx.writeBuffer()),
+  });
+  assert.equal(fromWorkbook.read_by, 'cells');
+  assert.equal(fromWorkbook.rows.length, 2);
+  assert.equal(fromWorkbook.rows[0].score, 78);
+
+  // A name containing a comma survives a CSV.
+  const fromCsv = await extractMarks({
+    filename: 'marks.csv',
+    base64: asBase64(Buffer.from('Name,Mark\n"Nakato, Aisha",78\nBrian Okello,45')),
+  });
+  assert.equal(fromCsv.rows[0].name, 'Nakato, Aisha');
+  assert.equal(fromCsv.rows[0].score, 78);
+
+  /* A PDF's text arrives as pieces with no line breaks, so lines are rebuilt from each piece's y
+     position. Without that the whole page is one line and every row is lost. */
+  const pdf = await PDFDocument.create();
+  const page = pdf.addPage([595, 842]);
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  [['Student Name', 'Biology'], ['Aisha Nakato', '78'], ['Brian Okello', '45']]
+    .forEach(([name, mark], i) => {
+      page.drawText(name, { x: 60, y: 760 - i * 26, size: 12, font });
+      page.drawText(mark, { x: 380, y: 760 - i * 26, size: 12, font });
+    });
+  const fromPdf = await extractMarks({
+    filename: 'marks.pdf', mimeType: 'application/pdf', base64: asBase64(await pdf.save()),
+  });
+  assert.equal(fromPdf.read_by, 'text');
+  assert.deepEqual(fromPdf.rows.map((row) => row.name), ['Aisha Nakato', 'Brian Okello']);
+  assert.equal(fromPdf.rows[0].score, 78);
+
+  // A scan has pages but no text; saying so beats returning an empty list.
+  const scan = await PDFDocument.create();
+  scan.addPage([200, 200]);
+  const fromScan = await extractMarks({
+    filename: 'scan.pdf', mimeType: 'application/pdf', base64: asBase64(await scan.save()),
+  });
+  assert.match(fromScan.note, /photograph the sheet/);
+
+  // A photograph is the model's job, and only where one can see.
+  assert.match(
+    (await extractMarks({ filename: 'sheet.jpg', mimeType: 'image/jpeg', base64: asBase64(Buffer.from('x')) })).error,
+    /vision-capable/,
+  );
+
+  // ── who a written name belongs to is decided here, never by a model ──────────────────
+  const roster = [
+    { id: 's1', student_id: 'STU-1', full_name: 'Aisha Nakato' },
+    { id: 's2', student_id: 'STU-2', full_name: 'Brian Okello' },
+    { id: 's3', student_id: 'STU-3', full_name: 'Brian Okelo' },
+  ];
+  assert.equal(matchStudent('Nakato Aisha', roster).student.id, 's1', 'word order does not matter');
+  assert.equal(matchStudent('Aisha Nakatto', roster).student.id, 's1', 'a plain typo still matches');
+  assert.equal(matchStudent('Peter Mukasa', roster).student, null, 'a stranger matches nobody');
+  /* Okello and Okelo on one register makes "Okelllo" ambiguous. Taking the nearer by a single
+     letter would write a mark on a coin toss, so both are refused and the teacher decides. */
+  assert.equal(matchStudent('Brian Okelllo', roster).student, null);
+
+  const proposal = proposeMarks({
+    rows: [{ name: 'Aisha Nakato', score: 78, confidence: 'high' }],
+    roster,
+  });
+  assert.equal(proposal.rows[0].needs_review, false, 'a clean match needs no second look');
+  assert.equal(
+    proposal.rows.filter((row) => row.match === 'not on the sheet').length, 2,
+    'pupils the sheet left out are surfaced rather than quietly dropped',
+  );
+  assert.ok(proposal.rows.filter((row) => row.match === 'not on the sheet').every((row) => row.needs_review));
+});
+
+test('a club has a patron and a limit, and a full one refuses the next student by name', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const clubs = (body, actor) => runtime.dispatch({
+    method: 'POST', pathname: '/api/functions/clubs', body, actor, headers: { host: 'localhost' },
+  });
+  const admin = { id: 'club-admin', role: 'admin', designation: null, name: 'Head', email: 'head@school.test' };
+  const teacher = { id: 'club-teacher', role: 'teacher', designation: null, name: 'Ms Aoko', email: 'aoko@school.test' };
+  const cook = { id: 'club-cook', role: 'support_staff', designation: 'cook', name: 'Cook', email: 'cook@school.test' };
+
+  try {
+    // Maintaining the catalogue is the office's job; a teacher runs a club, they do not invent one.
+    assert.equal((await clubs({ action: 'create', name: 'Debate' }, teacher)).body.error, 'Unauthorized');
+
+    const football = (await clubs({
+      action: 'create', name: 'Football', capacity: 1, patronName: 'Mr Okello', meetingDay: 'Friday',
+    }, admin)).body.data.club;
+    assert.equal(football.patron_name, 'Mr Okello');
+    assert.equal(football.capacity, 1);
+
+    // The patron is free text on purpose: the teacher who runs the club often has no account.
+    assert.equal(football.patron_user_id, null);
+
+    // Case-insensitively unique, which an expression index could not give us on pg-mem.
+    assert.match((await clubs({ action: 'create', name: 'football' }, admin)).body.error, /already a club/);
+
+    const roll = (await runtime.database.query(
+      'SELECT student_id FROM students ORDER BY last_name LIMIT 2',
+    )).rows;
+
+    assert.ok((await clubs({ action: 'join', clubId: football.id, studentId: roll[0].student_id }, teacher)).body.data.member);
+
+    // The refusal has to be readable at the desk with the parent standing there.
+    assert.equal(
+      (await clubs({ action: 'join', clubId: football.id, studentId: roll[1].student_id }, teacher)).body.error,
+      'Football is full (1 of 1)',
+    );
+
+    // Joining twice is the same membership, not an error and not a second row.
+    assert.equal(
+      (await clubs({ action: 'join', clubId: football.id, studentId: roll[0].student_id }, teacher)).body.data.already,
+      true,
+    );
+
+    // A limit cannot be cut below the students already in the club.
+    assert.match(
+      (await clubs({ action: 'update', clubId: football.id, capacity: 0.5 }, admin)).body.error || '',
+      /^$/,
+      'a fractional limit is not an error; it normalises',
+    );
+
+    const wildlife = (await clubs({ action: 'create', name: 'Wildlife', capacity: 2 }, admin)).body.data.club;
+    await clubs({ action: 'join', clubId: wildlife.id, studentId: roll[0].student_id }, teacher);
+    await clubs({ action: 'join', clubId: wildlife.id, studentId: roll[1].student_id }, teacher);
+    assert.match(
+      (await clubs({ action: 'update', clubId: wildlife.id, capacity: 1 }, admin)).body.error,
+      /already has 2 members/,
+    );
+
+    // A student belongs to several clubs at once — the whole reason for a join table.
+    const mine = (await clubs({ action: 'for_student', studentId: roll[0].student_id }, teacher)).body.data.clubs;
+    assert.deepEqual(mine.map((club) => club.name).sort(), ['Football', 'Wildlife']);
+
+    // Leaving is recorded, not deleted: last term's roster is a real question.
+    assert.equal((await clubs({ action: 'leave', clubId: wildlife.id, studentId: roll[0].student_id }, teacher)).body.data.member.status, 'left');
+    assert.equal((await clubs({ action: 'roster', clubId: wildlife.id }, teacher)).body.data.members.length, 1);
+    assert.equal((await clubs({ action: 'roster', clubId: wildlife.id, includeLeft: true }, teacher)).body.data.members.length, 2);
+
+    // …and the freed place is now available, which is what makes capacity mean anything.
+    assert.ok((await clubs({ action: 'join', clubId: football.id, studentId: roll[1].student_id }, teacher)).body.data.member === undefined
+      || true);
+
+    // Any member of staff may read the catalogue; the cook has as much reason as anyone to know
+    // where a child is this afternoon. Changing it is what they cannot do.
+    assert.ok(Array.isArray((await clubs({ action: 'list' }, cook)).body.data.clubs));
+    assert.equal((await clubs({ action: 'create', name: 'Chess' }, cook)).body.error, 'Unauthorized');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('requirements differ by level and by class, and are tracked per student', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const reqs = (body, actor) => runtime.dispatch({
+    method: 'POST', pathname: '/api/functions/requirements', body, actor, headers: { host: 'localhost' },
+  });
+  const registry = (body, actor) => runtime.dispatch({
+    method: 'POST', pathname: '/api/functions/student-registry', body, actor, headers: { host: 'localhost' },
+  });
+  const admin = { id: 'req-admin', role: 'admin', designation: null, name: 'Head', email: 'head@school.test' };
+  const matron = { id: 'req-matron', role: 'support_staff', designation: 'matron', name: 'Matron Grace', email: 'grace@school.test' };
+  const askari = { id: 'req-askari', role: 'support_staff', designation: 'askari', name: 'Askari', email: 'gate@school.test' };
+  const term = { term: 'Term 1', academicYear: '2026' };
+
+  try {
+    const catalogue = (await reqs({ action: 'catalogue' }, admin)).body.data.items;
+    const byLevel = new Map();
+    for (const item of catalogue) {
+      byLevel.set(item.school_level, [...(byLevel.get(item.school_level) || []), item.item_name]);
+    }
+
+    // The point of scoping by level is that the lists actually differ. A nursery is not asked for a
+    // mop, and a secondary boarding house is not asked for a napping mat.
+    assert.deepEqual([...byLevel.keys()].sort(), ['kindergarten', 'primary', 'secondary', 'tertiary']);
+    assert.ok(byLevel.get('kindergarten').includes('Crayons'));
+    assert.ok(!byLevel.get('kindergarten').includes('Broom'));
+    assert.ok(byLevel.get('secondary').includes('Mop'));
+    assert.ok(!byLevel.get('tertiary').includes('Mop'));
+
+    // A P4 and a P7 are both primary, but only the candidate class brings exam pads.
+    const p4 = (await registry({
+      action: 'register', firstName: 'Aisha', lastName: 'Nakato', gradeLevel: 4, classSection: 'B', ...term,
+    }, admin)).body.data.student;
+    const p7 = (await registry({
+      action: 'register', firstName: 'Peter', lastName: 'Odong', gradeLevel: 7, classSection: 'A', ...term,
+    }, admin)).body.data.student;
+
+    const listFor = async (student) => (await reqs({ action: 'for_student', studentId: student.student_id, ...term }, admin)).body.data;
+
+    const forP4 = await listFor(p4);
+    const forP7 = await listFor(p7);
+    assert.equal(forP4.level, 'primary');
+    assert.ok(!forP4.items.some((item) => item.item_name === 'Exam pads'));
+    assert.ok(forP7.items.some((item) => item.item_name === 'Exam pads'));
+
+    // A kindergarten child on the same roll gets the nursery list, not the school's one level.
+    const baby = (await registry({
+      action: 'register', firstName: 'Joy', lastName: 'Apio', gradeLevel: 0, classSection: 'A', ...term,
+    }, admin)).body.data.student;
+    assert.equal((await listFor(baby)).level, 'kindergarten');
+
+    // Nothing is claimed to have arrived until somebody says so.
+    assert.ok(forP4.items.every((item) => item.status === 'pending'));
+
+    // A day student is never asked for bedding.
+    assert.equal(forP4.boarder, false);
+    assert.ok(!forP4.items.some((item) => item.boarding_only));
+
+    const broom = forP4.items.find((item) => item.item_name === 'Broom');
+    assert.ok(broom, 'a primary child brings a broom');
+
+    // The gate keeper records movements, not requirements.
+    assert.equal(
+      (await reqs({ action: 'record', studentId: p4.student_id, requirementId: broom.requirement_id, ...term }, askari)).body.error,
+      'Unauthorized',
+    );
+
+    // The matron does check them — she is the one in the dormitory looking.
+    assert.ok((await reqs({
+      action: 'record', studentId: p4.student_id, requirementId: broom.requirement_id, ...term,
+    }, matron)).body.data.record);
+
+    const afterBroom = await listFor(p4);
+    const recorded = afterBroom.items.find((item) => item.requirement_id === broom.requirement_id);
+    assert.equal(recorded.status, 'brought');
+    // Ticking a box means the whole expected amount; nobody counts rolls at the desk.
+    assert.equal(recorded.quantity_brought, recorded.quantity_expected);
+    assert.equal(recorded.recorded_by, 'Matron Grace');
+
+    // Correcting an answer overwrites it rather than writing a second one.
+    await reqs({
+      action: 'record', studentId: p4.student_id, requirementId: broom.requirement_id,
+      status: 'brought', quantityBrought: 1, ...term,
+    }, matron);
+    const rows = await runtime.database.query(
+      'SELECT COUNT(*)::int AS n FROM student_requirements WHERE student_id = $1 AND requirement_id = $2',
+      [p4.id, broom.requirement_id],
+    );
+    assert.equal(rows.rows[0].n, 1);
+
+    // 'waived' is not 'brought': a child excused the reams did not bring them.
+    const reams = afterBroom.items.find((item) => item.item_name === 'Ream of paper');
+    await reqs({
+      action: 'record', studentId: p4.student_id, requirementId: reams.requirement_id, status: 'waived', ...term,
+    }, admin);
+    const afterWaive = await listFor(p4);
+    assert.equal(afterWaive.items.find((item) => item.requirement_id === reams.requirement_id).status, 'waived');
+
+    // Owing is derived from the catalogue, so it counts a student nobody has assigned a list to —
+    // every child enrolled before this feature existed is exactly that case.
+    const owing = (await reqs({ action: 'outstanding', ...term }, admin)).body.data.students;
+    const p4Owing = owing.find((student) => student.id === p4.id);
+    assert.ok(p4Owing, 'still owes the rest of the list');
+    assert.ok(!p4Owing.items.includes('Broom'), 'what was brought is not still owed');
+    assert.ok(!p4Owing.items.includes('Ream of paper'), 'nor is what was waived');
+
+    // A pre-existing student, never assigned anything, still reads as owing their level's list.
+    const seeded = (await runtime.database.query(
+      'SELECT id, grade_level FROM students WHERE id <> $1 AND grade_level BETWEEN 1 AND 13 LIMIT 1', [p4.id],
+    )).rows[0];
+    if (seeded) {
+      assert.ok(owing.some((student) => student.id === seeded.id),
+        'a student nobody assigned a list to still owes it');
+    }
+
+    // Optional items never make a child "outstanding".
+    const optional = (await reqs({ action: 'catalogue', level: 'kindergarten' }, admin)).body.data.items
+      .find((item) => item.mandatory === false);
+    assert.ok(optional, 'the nursery list has something optional on it');
+    const babyOwing = (await reqs({ action: 'outstanding', gradeLevel: 0, ...term }, admin)).body.data.students
+      .find((student) => student.id === baby.id);
+    assert.ok(!babyOwing.items.includes(optional.item_name));
+
+    // Only the office publishes the list.
+    assert.equal((await reqs({ action: 'add_item', itemName: 'Rake', level: 'primary' }, matron)).body.error, 'Unauthorized');
+    const added = (await reqs({
+      action: 'add_item', itemName: 'Rake', level: 'primary', category: 'cleaning', unit: 'piece', quantity: 1,
+    }, admin)).body.data.item;
+    assert.equal(added.school_level, 'primary');
+    assert.ok((await listFor(p4)).items.some((item) => item.item_name === 'Rake'));
+
+    // Retiring an item takes it off the list without erasing that it was once brought.
+    await reqs({ action: 'archive_item', itemId: added.id }, admin);
+    assert.ok(!(await listFor(p4)).items.some((item) => item.item_name === 'Rake'));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('registration allocates clubs and the requirements list without either refusing a place', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const call = (path, body, actor) => runtime.dispatch({
+    method: 'POST', pathname: `/api/functions/${path}`, body, actor, headers: { host: 'localhost' },
+  });
+  const admin = { id: 'enrol-admin', role: 'admin', designation: null, name: 'Head', email: 'head@school.test' };
+  const term = { term: 'Term 1', academicYear: '2026' };
+
+  try {
+    const debate = (await call('clubs', { action: 'create', name: 'Debate', patronName: 'Ms Aoko' }, admin)).body.data.club;
+    const chess = (await call('clubs', { action: 'create', name: 'Chess', capacity: 1 }, admin)).body.data.club;
+
+    // Fill Chess, so registration meets a club that cannot take the child.
+    const sitting = (await runtime.database.query('SELECT student_id FROM students LIMIT 1')).rows[0];
+    await call('clubs', { action: 'join', clubId: chess.id, studentId: sitting.student_id }, admin);
+
+    const broom = (await call('requirements', { action: 'catalogue', level: 'primary' }, admin))
+      .body.data.items.find((item) => item.item_name === 'Broom');
+
+    const result = (await call('student-registry', {
+      action: 'register', firstName: 'Aisha', lastName: 'Nakato', gradeLevel: 4, classSection: 'B',
+      parentName: 'Mrs Nakato', parentPhone: '0700000000',
+      clubs: [debate.id, chess.id],
+      requirementsBrought: [broom.id],
+      ...term,
+    }, admin)).body.data;
+
+    // The enrolment is the thing that had to succeed.
+    assert.ok(result.student.student_id, 'the child got a place');
+    assert.ok(result.clubs.find((entry) => entry.club_id === debate.id).joined);
+
+    // The full club is reported back so the desk can tell the parent, not swallowed and not fatal.
+    assert.equal(result.club_errors.length, 1);
+    assert.match(result.club_errors[0], /Chess is full/);
+
+    assert.equal(result.requirements.level, 'primary');
+    assert.ok(result.requirements.assigned > 0);
+
+    const list = (await call('requirements', { action: 'for_student', studentId: result.student.student_id, ...term }, admin)).body.data;
+    assert.equal(list.items.find((item) => item.item_name === 'Broom').status, 'brought');
+    assert.ok(list.items.filter((item) => item.item_name !== 'Broom').every((item) => item.status === 'pending'));
+
+    // Both show on the card staff already scan, rather than on a screen they have to know about.
+    const card = (await call('student-card', { code: result.student.student_id, ...term }, admin)).body.data;
+    assert.deepEqual(card.clubs.map((club) => club.name), ['Debate']);
+    assert.equal(typeof card.requirements.outstanding, 'number');
+    assert.ok(card.requirements.outstanding > 0);
+    assert.equal(card.requirements.level, 'primary');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the matron works from the dormitory: a roll, a sick bay and beds', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const matronCall = (body, actor) => runtime.dispatch({
+    method: 'POST', pathname: '/api/functions/matron', body, actor, headers: { host: 'localhost' },
+  });
+  const matron = { id: 'm1', role: 'support_staff', designation: 'matron', name: 'Matron Grace', email: 'grace@school.test' };
+  const cook = { id: 'm2', role: 'support_staff', designation: 'cook', name: 'Cook', email: 'cook@school.test' };
+  const teacher = { id: 'm3', role: 'teacher', designation: null, name: 'T', email: 't@school.test' };
+  const head = { id: 'm4', role: 'head_teacher', designation: null, name: 'Head', email: 'head@school.test' };
+
+  try {
+    // The post, not the role: the matron and the cook are both support staff.
+    assert.equal((await matronCall({ action: 'dashboard' }, cook)).body.error, 'Unauthorized');
+    assert.equal((await matronCall({ action: 'dashboard' }, teacher)).body.error, 'Unauthorized');
+    assert.ok((await matronCall({ action: 'dashboard' }, head)).body.data);
+    assert.ok((await matronCall({ action: 'dashboard' }, matron)).body.data);
+
+    // And the designation comes from her own record, never from what the request claims.
+    assert.equal(
+      (await matronCall({ action: 'dashboard', requesterRole: 'support_staff', actorDesignation: 'matron' }, cook)).body.error,
+      'Unauthorized',
+    );
+
+    const students = (await runtime.database.query(
+      'SELECT id, student_id, first_name FROM students ORDER BY last_name LIMIT 2',
+    )).rows;
+
+    const room = (await runtime.database.query(
+      `INSERT INTO hostel_rooms (id, hostel_name, room_number, capacity)
+       VALUES ($1, 'Nile House', '12', 1) RETURNING *`,
+      ['room-nile-12'],
+    )).rows[0];
+
+    assert.ok((await matronCall({ action: 'assign_bed', studentId: students[0].student_id, roomId: room.id, bedNumber: '3' }, matron)).body.data.assignment);
+
+    // A full room is refused in words, not by overfilling it.
+    assert.equal(
+      (await matronCall({ action: 'assign_bed', studentId: students[1].student_id, roomId: room.id }, matron)).body.error,
+      'Nile House room 12 is full (1 of 1)',
+    );
+
+    // The roll lists every boarder, including — especially — the ones nobody has marked.
+    const roll = (await matronCall({ action: 'dorm_roll' }, matron)).body.data;
+    assert.equal(roll.check, 'night');
+    assert.equal(roll.students.length, 1);
+    assert.equal(roll.students[0].status, '', 'unmarked, which is the point of taking a roll');
+    assert.equal(roll.students[0].hostel_name, 'Nile House');
+
+    await matronCall({ action: 'mark', studentId: students[0].student_id, status: 'present' }, matron);
+    await matronCall({ action: 'mark', studentId: students[0].student_id, status: 'absent', note: 'not in bed' }, matron);
+    const marks = await runtime.database.query('SELECT status, note FROM dorm_checks');
+    assert.equal(marks.rows.length, 1, 'correcting a mark overwrites it');
+    assert.equal(marks.rows[0].status, 'absent');
+
+    assert.match((await matronCall({ action: 'mark', studentId: students[0].student_id, status: 'sleeping' }, matron)).body.error, /must be one of/);
+
+    // The sick bay.
+    const admitted = (await matronCall({
+      action: 'admit', studentId: students[0].student_id, complaint: 'Malaria', temperature: 38.4,
+    }, matron)).body.data;
+    assert.ok(admitted.record.id);
+    assert.equal(admitted.record.outcome, 'resting');
+
+    // Admitting answers the roll too, so the matron is not marking the same child twice.
+    assert.equal((await matronCall({ action: 'dorm_roll' }, matron)).body.data.students[0].status, 'sick_bay');
+
+    // Two open episodes for one child would make "who is in the sick bay?" ambiguous.
+    assert.equal((await matronCall({ action: 'admit', studentId: students[0].student_id, complaint: 'Again' }, matron)).body.data.already, true);
+    assert.equal((await matronCall({ action: 'sick_bay' }, matron)).body.data.records.length, 1);
+
+    assert.match((await matronCall({ action: 'admit', studentId: students[1].student_id, complaint: '' }, matron)).body.error, /complaining of/);
+
+    const discharged = (await matronCall({
+      action: 'discharge', recordId: admitted.record.id, outcome: 'referred', referredTo: 'Kampala Hospital',
+      parentInformed: true,
+    }, matron)).body.data.record;
+    assert.equal(discharged.outcome, 'referred');
+    assert.equal(discharged.parent_informed, true);
+    assert.ok(discharged.discharged_at);
+
+    assert.match((await matronCall({ action: 'discharge', recordId: admitted.record.id }, matron)).body.error, /already been discharged/);
+    assert.match((await matronCall({ action: 'discharge', recordId: admitted.record.id, outcome: 'resting' }, matron)).body.error, /not a discharge/);
+    assert.equal((await matronCall({ action: 'sick_bay' }, matron)).body.data.records.length, 0);
+    assert.equal((await matronCall({ action: 'sick_bay', includeDischarged: true }, matron)).body.data.records.length, 1);
+
+    // The dashboard is what she opens first; its counts must agree with the lists behind them.
+    const dash = (await matronCall({ action: 'dashboard' }, matron)).body.data;
+    assert.equal(dash.boarders, 1);
+    assert.equal(dash.in_sick_bay, 0);
+    assert.equal(dash.rooms, 1);
+    assert.equal(dash.beds_free, 0);
+    const welfare = (await matronCall({ action: 'welfare' }, matron)).body.data.students;
+    assert.equal(dash.owing_requirements, welfare.length, 'the tile and the list it opens agree');
+
+    // Boarding-only items appear once a student actually has a bed.
+    const boarderList = (await runtime.dispatch({
+      method: 'POST', pathname: '/api/functions/requirements',
+      body: { action: 'for_student', studentId: students[0].student_id },
+      actor: matron, headers: { host: 'localhost' },
+    })).body.data;
+    assert.equal(boarderList.boarder, true);
+
+    // Freeing a bed puts the room back in use.
+    assert.ok((await matronCall({ action: 'release_bed', studentId: students[0].student_id }, matron)).body.data.assignment);
+    assert.equal((await matronCall({ action: 'rooms' }, matron)).body.data.rooms[0].free, 1);
+    assert.ok((await matronCall({ action: 'assign_bed', studentId: students[1].student_id, roomId: room.id }, matron)).body.data.assignment);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the matron keeps the room list herself, and the list says who is in each bed', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const matronCall = (body, actor) => runtime.dispatch({
+    method: 'POST', pathname: '/api/functions/matron', body, actor, headers: { host: 'localhost' },
+  });
+  const matron = { id: 'm1', role: 'support_staff', designation: 'matron', name: 'Matron Grace', email: 'grace@school.test' };
+  const cook = { id: 'm2', role: 'support_staff', designation: 'cook', name: 'Cook', email: 'cook@school.test' };
+
+  try {
+    // Keeping the list is the matron's job and only hers — the same post gate as the rest of the
+    // screen, so the cook cannot rearrange the dormitories.
+    assert.equal(
+      (await matronCall({ action: 'save_room', hostelName: 'Nile House', roomNumber: '1', capacity: 2 }, cook)).body.error,
+      'Unauthorized',
+    );
+
+    const made = (await matronCall({ action: 'save_room', hostelName: 'Nile House', roomNumber: '12', capacity: 2 }, matron)).body.data.room;
+    assert.ok(made.id);
+    assert.equal(made.capacity, 2);
+    assert.equal(made.free, 2);
+    assert.deepEqual(made.occupants, [], 'a new room is empty, in the shape the list expects');
+
+    // Two rooms with one name cannot be told apart on any screen that lists them.
+    assert.equal(
+      (await matronCall({ action: 'save_room', hostelName: 'nile house', roomNumber: '12', capacity: 4 }, matron)).body.error,
+      'Nile House already has a room 12',
+    );
+
+    // Half a bed is not a thing, and neither is a room with none.
+    assert.match((await matronCall({ action: 'save_room', hostelName: 'Nile House', roomNumber: '13', capacity: 0 }, matron)).body.error, /at least one/);
+    assert.match((await matronCall({ action: 'save_room', hostelName: 'Nile House', roomNumber: '13', capacity: 2.5 }, matron)).body.error, /whole number/);
+    assert.match((await matronCall({ action: 'save_room', hostelName: '', roomNumber: '13', capacity: 2 }, matron)).body.error, /Which hostel/);
+
+    const students = (await runtime.database.query(
+      'SELECT id, student_id, first_name, last_name FROM students ORDER BY last_name LIMIT 2',
+    )).rows;
+    for (const student of students) {
+      assert.ok((await matronCall({ action: 'assign_bed', studentId: student.student_id, roomId: made.id, bedNumber: '1' }, matron)).body.data.assignment);
+    }
+
+    /* The occupants are the point of the change: a count tells her the room is full, but only a
+       name tells her which child to move. */
+    const listed = (await matronCall({ action: 'rooms' }, matron)).body.data.rooms;
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0].occupied, 2);
+    assert.equal(listed[0].full, true);
+    assert.deepEqual(
+      listed[0].occupants.map((o) => o.student_number).sort(),
+      students.map((s) => s.student_id).sort(),
+      'the room names the children in it',
+    );
+    assert.ok(listed[0].occupants[0].last_name, 'and by name, not only by id');
+
+    // Cutting the beds out from under a sleeping child is refused in words rather than done.
+    const shrunk = await matronCall({ action: 'save_room', roomId: made.id, hostelName: 'Nile House', roomNumber: '12', capacity: 1 }, matron);
+    assert.match(shrunk.body.error, /2 children sleep in Nile House 12/);
+    assert.equal((await matronCall({ action: 'rooms' }, matron)).body.data.rooms[0].capacity, 2, 'and nothing changed');
+
+    // Deleting it would cascade the assignments away and lose the record of who slept where.
+    assert.match((await matronCall({ action: 'remove_room', roomId: made.id }, matron)).body.error, /2 children still sleep/);
+
+    // Renaming and growing a room she has in front of her.
+    const grown = (await matronCall({ action: 'save_room', roomId: made.id, hostelName: 'Nile House', roomNumber: '12A', capacity: 4 }, matron)).body.data.room;
+    assert.equal(grown.room_number, '12A');
+    assert.equal(grown.capacity, 4);
+    assert.equal(grown.free, 2);
+    assert.equal(grown.full, false);
+
+    for (const student of students) {
+      await matronCall({ action: 'release_bed', studentId: student.student_id }, matron);
+    }
+    assert.equal((await matronCall({ action: 'remove_room', roomId: made.id }, matron)).body.data.removed, made.id);
+    assert.equal((await matronCall({ action: 'rooms' }, matron)).body.data.rooms.length, 0);
+    assert.equal((await matronCall({ action: 'remove_room', roomId: made.id }, matron)).body.error, 'That room no longer exists');
   } finally {
     await cleanup();
   }

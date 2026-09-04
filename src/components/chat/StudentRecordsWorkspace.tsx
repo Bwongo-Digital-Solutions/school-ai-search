@@ -1,26 +1,57 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  AlertTriangle,
-  Bell,
-  BookOpen,
-  CheckCircle2,
-  ChevronLeft,
-  ChevronRight,
-  ClipboardList,
-  FilePlus2,
-  GraduationCap,
-  Loader2,
-  RefreshCw,
-  Repeat2,
-  School,
-  Shield,
-  UserCheck,
-} from 'lucide-react';
+  ActionableNotification,
+  Button,
+  InlineNotification,
+  Select,
+  SelectItem,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  Tag,
+  Tab,
+  TabList,
+  TabPanel,
+  TabPanels,
+  Tabs,
+} from '@carbon/react';
+import {
+  Book,
+  Checkmark,
+  ListChecked,
+  DocumentAdd,
+  Education,
+  Renew,
+  Repeat,
+  Result,
+  UserFollow,
+  Warning,
+} from '@carbon/react/icons';
 import { supabase } from '@/lib/supabase';
 import { callFees } from '@/lib/fees';
+import { classAndSection, classOptionsFor } from '@/lib/classLevels';
 import { useAuth } from '@/contexts/AuthContext';
 import { useChatContext } from '@/contexts/ChatContext';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { useNotifications } from '@/contexts/NotificationContext';
+import { useSettings } from '@/contexts/SettingsContext';
+import {
+  AccessDenied,
+  CardHeader,
+  Field,
+  ListSkeleton,
+  PageHeader,
+  StatRow,
+  StatTile,
+  StatTileSkeleton,
+  StudentPicker,
+  TablePager,
+  WidgetCard,
+} from '@/components/common';
+import { usePagedRows } from '@/hooks/usePagedRows';
+import styles from './student-records.module.scss';
 import type { Student } from '@/types/chat';
 
 type SectionKey = 'admissions' | 'attendance' | 'academic' | 'discipline' | 'allocation' | 'lifecycle';
@@ -36,6 +67,21 @@ const academicYear = () => {
 const getErrorMessage = (error: unknown) => (error instanceof Error ? error.message : 'Unknown error');
 const studentName = (student?: Student) => student ? `${student.first_name} ${student.last_name}` : 'Unknown student';
 const ADMISSIONS_PAGE_SIZE = 8;
+
+/** Every table this workspace reads, with the column each is newest-first by. */
+const TABLES = [
+  ['admissions', 'submitted_at'],
+  ['attendance_records', 'attendance_date'],
+  ['attendance_alerts', 'sent_at'],
+  ['gradebook_entries', 'created_at'],
+  ['discipline_records', 'incident_date'],
+  ['classes', 'academic_year'],
+  ['student_promotions', 'effective_date'],
+  ['student_transfers', 'effective_date'],
+] as const;
+
+type TableName = (typeof TABLES)[number][0];
+type TableStatus = 'pending' | 'ready' | 'failed';
 
 const emptyAdmission = {
   application_number: '',
@@ -95,83 +141,29 @@ const emptyLifecycle = {
   approved_by: '',
 };
 
-const StatTile = ({ label, value, icon: Icon }: { label: string; value: number | string; icon: React.ElementType }) => (
-  <div className="bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 rounded-lg px-4 py-3">
-    <div className="flex items-center justify-between">
-      <p className="text-[10px] text-gray-400 uppercase tracking-wider">{label}</p>
-      <Icon className="w-4 h-4 text-indigo-500" />
-    </div>
-    <p className="text-2xl font-bold text-gray-800 dark:text-white mt-1">{value}</p>
-  </div>
-);
-
-const Field = ({
-  label,
-  value,
-  onChange,
-  type = 'text',
-  options,
-  min,
-  max,
-  step,
-}: {
-  label: string;
-  value: FieldValue;
-  onChange: (value: FieldValue) => void;
-  type?: string;
-  options?: { value: string; label: string }[];
-  min?: number;
-  max?: number;
-  step?: number;
-}) => (
-  <label className="block">
-    <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">{label}</span>
-    {options ? (
-      <select
-        value={String(value ?? '')}
-        onChange={event => onChange(event.target.value)}
-        className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
-      >
-        {options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-      </select>
-    ) : type === 'textarea' ? (
-      <textarea
-        value={String(value ?? '')}
-        onChange={event => onChange(event.target.value)}
-        rows={3}
-        className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400 resize-none"
-      />
-    ) : type === 'checkbox' ? (
-      <input
-        type="checkbox"
-        checked={Boolean(value)}
-        onChange={event => onChange(event.target.checked)}
-        className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-      />
-    ) : (
-      <input
-        type={type}
-        value={String(value ?? '')}
-        min={min}
-        max={max}
-        step={step}
-        onChange={event => onChange(type === 'number' ? Number(event.target.value) : event.target.value)}
-        className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
-      />
-    )}
-  </label>
-);
-
 const StudentRecordsWorkspace: React.FC = () => {
-  const { students, refreshStudents } = useChatContext();
-  const { isAuthenticated, isAdmin, isSupportStaff, user, logAudit } = useAuth();
+  const { students, refreshStudents, focus, clearFocus } = useChatContext();
+  const { isAuthenticated, isAdmin, isSupportStaff, user, isLoading: authLoading, logAudit } = useAuth();
+  const { notify, confirm } = useNotifications();
+
+  // Arrived from a search hit on an attendance record: open that student's file.
+  useEffect(() => {
+    if (focus?.view !== 'records' || !focus.studentId) return;
+    setSelectedStudentId(focus.studentId);
+    setActiveSection('attendance');
+    clearFocus();
+  }, [focus, clearFocus]);
+  const { settings } = useSettings();
   const [activeSection, setActiveSection] = useState<SectionKey>('admissions');
   const [admissionPane, setAdmissionPane] = useState('form');
   const [admissionPage, setAdmissionPage] = useState(1);
   const [selectedStudentId, setSelectedStudentId] = useState('');
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [records, setRecords] = useState<Record<string, SchoolRecord[]>>({});
+  // Per table rather than per pane, so a section can resolve as soon as its own tables have.
+  // Everything starts pending because nothing has been asked for yet.
+  const [tableStatus, setTableStatus] = useState<Record<string, TableStatus>>({});
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [admission, setAdmission] = useState(emptyAdmission);
   const [attendance, setAttendance] = useState(emptyAttendance);
   const [academic, setAcademic] = useState(emptyAcademic);
@@ -225,33 +217,73 @@ const StudentRecordsWorkspace: React.FC = () => {
     }));
   }, [selectedStudent]);
 
+  /**
+   * Every record table this workspace shows, for whoever is signed in.
+   *
+   * `user` is a dependency for the same reason it is one in ChatContext's roster load: all eight
+   * of these tables are gated to teaching roles, so a fetch made before the session was restored
+   * was refused, and without `user` here nothing ever asked again. Signing in reloads them.
+   *
+   * The eight run together and each is committed the moment it lands, rather than the screen
+   * waiting on the slowest. They were once fetched in a `for` loop, so the pane was blank for the
+   * sum of eight round trips to show a discipline record that had arrived first. Only one section
+   * is on screen at a time, and it never needed more than its own tables.
+   */
   const loadRecords = useCallback(async () => {
-    if (isSupportStaff) return;
-    setLoading(true);
-    const tables = [
-      ['admissions', 'submitted_at'],
-      ['attendance_records', 'attendance_date'],
-      ['attendance_alerts', 'sent_at'],
-      ['gradebook_entries', 'created_at'],
-      ['discipline_records', 'incident_date'],
-      ['classes', 'academic_year'],
-      ['student_promotions', 'effective_date'],
-      ['student_transfers', 'effective_date'],
-    ] as const;
-
-    const loaded: Record<string, SchoolRecord[]> = {};
-    for (const [table, orderField] of tables) {
-      const { data, error } = await supabase.from<SchoolRecord[]>(table).select('*').order(orderField, { ascending: false }).limit(100);
-      if (error) {
-        console.error(`Failed to load ${table}:`, error);
-        loaded[table] = [];
-      } else {
-        loaded[table] = data || [];
-      }
+    if (authLoading) return;
+    if (!user || isSupportStaff) {
+      setRecords({});
+      setTableStatus({});
+      setLoadError(null);
+      return;
     }
-    setRecords(loaded);
-    setLoading(false);
-  }, [isSupportStaff]);
+
+    // Marked pending without clearing `records`. A refresh has to leave the rows already on screen
+    // in place — partly so the reader is not thrown back to a skeleton, partly because emptying the
+    // list would send every pager below back to page 1.
+    setTableStatus(
+      Object.fromEntries(TABLES.map(([table]) => [table, 'pending'])) as Record<TableName, TableStatus>,
+    );
+
+    const results = await Promise.all(
+      TABLES.map(async ([table, orderField]) => {
+        const { data, error } = await supabase
+          .from<SchoolRecord[]>(table)
+          .select('*')
+          .order(orderField, { ascending: false })
+          .limit(100);
+        if (error) {
+          setTableStatus(prev => ({ ...prev, [table]: 'failed' }));
+          return table;
+        }
+        setRecords(prev => ({ ...prev, [table]: data || [] }));
+        setTableStatus(prev => ({ ...prev, [table]: 'ready' }));
+        return null;
+      }),
+    );
+
+    // Named rather than counted: knowing it was attendance that would not load is the difference
+    // between "the register is missing" and "the whole workspace is broken". Read back off TABLES
+    // so the order is the reader's, not whichever request happened to fail first.
+    const failures = results.filter((table): table is TableName => table !== null);
+    setLoadError(failures.length ? failures.join(', ').replace(/_/g, ' ') : null);
+  }, [authLoading, user, isSupportStaff]);
+
+  /** A section is still coming while a table behind it is in flight and has never yet answered. */
+  const pending = useCallback(
+    (...tables: TableName[]) =>
+      tables.some(table => (tableStatus[table] ?? 'pending') === 'pending' && !records[table]),
+    [records, tableStatus],
+  );
+
+  /** A section whose tables could not be read at all — distinct from one that read back empty. */
+  const failed = useCallback(
+    (...tables: TableName[]) => tables.some(table => tableStatus[table] === 'failed' && !records[table]),
+    [records, tableStatus],
+  );
+
+  /** Anything still in flight, for the Refresh button. */
+  const loading = TABLES.some(([table]) => (tableStatus[table] ?? 'pending') === 'pending');
 
   useEffect(() => {
     loadRecords();
@@ -296,7 +328,7 @@ const StudentRecordsWorkspace: React.FC = () => {
       await refreshStudents();
     } catch (error) {
       console.error(`${label} failed:`, error);
-      alert(`${label} failed: ${getErrorMessage(error)}`);
+      notify.error(`${label} failed`, getErrorMessage(error));
     } finally {
       setSaving(false);
     }
@@ -311,7 +343,14 @@ const StudentRecordsWorkspace: React.FC = () => {
 
   const createAdmission = () => saveRecord('Admission registration', async () => {
     const dup = existingLiveAdmission();
-    if (dup && !window.confirm(`${studentName(selectedStudent)} already has an admission (${dup.application_number}, ${dup.status}). Add another anyway?`)) {
+    if (
+      dup &&
+      !(await confirm({
+        title: 'This student already has an admission',
+        message: `${studentName(selectedStudent)} has admission ${dup.application_number} (${dup.status}). Add another anyway?`,
+        confirmLabel: 'Add another',
+      }))
+    ) {
       return;
     }
     const applicationNumber = admission.application_number.trim() || `APP-${Date.now()}`;
@@ -329,7 +368,14 @@ const StudentRecordsWorkspace: React.FC = () => {
   // Admit a student and immediately bill tuition from the matching fee structure. The admin
   // confirms the amount (computed by a preview) before the invoice is raised.
   const admitAndBill = () => saveRecord('Admitting student', async () => {
-    if (existingLiveAdmission() && !window.confirm(`${studentName(selectedStudent)} already has an admission. Admit and bill again?`)) {
+    if (
+      existingLiveAdmission() &&
+      !(await confirm({
+        title: 'This student already has an admission',
+        message: `${studentName(selectedStudent)} has already been admitted. Admit and bill again?`,
+        confirmLabel: 'Admit and bill again',
+      }))
+    ) {
       return;
     }
     const preview = await callFees<{ amount: number; currency: string; feeStructure: { name: string } }>(
@@ -337,9 +383,15 @@ const StudentRecordsWorkspace: React.FC = () => {
       { studentId: selectedStudent.id, preview: true },
       user,
     );
-    const ok = window.confirm(
-      `Admit ${studentName(selectedStudent)} and bill ${preview.currency} ${Math.round(preview.amount).toLocaleString()} tuition (${preview.feeStructure.name})?`,
-    );
+    // The amount is shown before the invoice exists, because this is the last point at which a
+    // wrong fee structure can be caught for free.
+    const ok = await confirm({
+      title: 'Admit and bill this student?',
+      message: `${studentName(selectedStudent)} will be admitted and invoiced ${preview.currency} ${Math.round(
+        preview.amount,
+      ).toLocaleString()} for tuition, from the “${preview.feeStructure.name}” structure.`,
+      confirmLabel: 'Admit and bill',
+    });
     if (!ok) return;
 
     const applicationNumber = admission.application_number.trim() || `APP-${Date.now()}`;
@@ -359,10 +411,11 @@ const StudentRecordsWorkspace: React.FC = () => {
     );
     await logAudit('admission', selectedStudent.id, studentName(selectedStudent), { application_number: applicationNumber, status: 'admitted', billed: result.amount }, 'invoice');
     resetAdmissionForm();
-    window.alert(
+    notify.success(
+      `${studentName(selectedStudent)} admitted`,
       result.alreadyBilled
-        ? `${studentName(selectedStudent)} admitted. Tuition was already billed (${result.invoice?.invoice_number ?? ''}).`
-        : `${studentName(selectedStudent)} admitted and billed ${result.currency} ${Math.round(result.amount).toLocaleString()}.`,
+        ? `Tuition was already billed${result.invoice?.invoice_number ? ` (${result.invoice.invoice_number})` : ''}.`
+        : `Billed ${result.currency} ${Math.round(result.amount).toLocaleString()} for tuition.`,
     );
   });
 
@@ -498,157 +551,209 @@ const StudentRecordsWorkspace: React.FC = () => {
   });
 
   const sections = [
-    { key: 'admissions', label: 'Admissions', icon: FilePlus2 },
-    { key: 'attendance', label: 'Attendance', icon: UserCheck },
-    { key: 'academic', label: 'Academic', icon: BookOpen },
-    { key: 'discipline', label: 'Discipline', icon: AlertTriangle },
-    { key: 'allocation', label: 'Allocation', icon: School },
-    { key: 'lifecycle', label: 'Lifecycle', icon: Repeat2 },
+    { key: 'admissions', label: 'Admissions', icon: DocumentAdd },
+    { key: 'attendance', label: 'Attendance', icon: UserFollow },
+    { key: 'academic', label: 'Academic', icon: Book },
+    { key: 'discipline', label: 'Discipline', icon: Warning },
+    { key: 'allocation', label: 'Allocation', icon: Result },
+    { key: 'lifecycle', label: 'Lifecycle', icon: Repeat },
   ] as const;
 
   if (!isAuthenticated || isSupportStaff) {
     return (
-      <div className="flex flex-col items-center justify-center h-full bg-gray-50 dark:bg-gray-900 p-8 text-center">
-        <Shield className="w-10 h-10 text-indigo-500 mb-3" />
-        <h2 className="text-xl font-bold text-gray-800 dark:text-white">
-          {isSupportStaff ? 'Restricted to Teachers and Admins' : 'Authentication Required'}
-        </h2>
-        <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-          {isSupportStaff
-            ? 'Support staff accounts can only view school fees payment status.'
-            : 'Sign in to view student operational records.'}
-        </p>
-      </div>
+      <AccessDenied
+        title={isSupportStaff ? 'Restricted to teachers and administrators' : 'Sign in to continue'}
+        message={
+          isSupportStaff
+            ? 'Support staff accounts can see school fees payment status. Student records are available to teachers and administrators.'
+            : 'Sign in to open student records.'
+        }
+      />
     );
   }
 
   return (
-    <div className="flex flex-col h-full bg-gray-50 dark:bg-gray-900">
-      <div className="px-6 pt-6 pb-4 border-b border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h2 className="text-xl font-bold text-gray-800 dark:text-white flex items-center gap-2">
-              <ClipboardList className="w-6 h-6 text-indigo-500" />
-              Student Records
-            </h2>
-            <p className="text-xs text-gray-400 mt-0.5">Admissions, attendance, academic history, discipline, allocation, and lifecycle actions</p>
-          </div>
-          <button
-            onClick={loadRecords}
-            disabled={loading}
-            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
-          >
-            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
-          </button>
-        </div>
+    <div className={styles.screen}>
+      <PageHeader title="Student records" illustration={<ListChecked size={32} />}>
+        <Button kind="ghost" size="sm" renderIcon={Renew} onClick={loadRecords} disabled={loading}>
+          Refresh
+        </Button>
+      </PageHeader>
 
-        <div className="grid grid-cols-2 lg:grid-cols-6 gap-3 mt-4">
-          <StatTile label="Admissions" value={records.admissions?.length || 0} icon={FilePlus2} />
-          <StatTile label="Attendance" value={records.attendance_records?.length || 0} icon={UserCheck} />
-          <StatTile label="Academics" value={records.gradebook_entries?.length || 0} icon={BookOpen} />
-          <StatTile label="Discipline" value={records.discipline_records?.length || 0} icon={AlertTriangle} />
-          <StatTile label="Promotions" value={records.student_promotions?.length || 0} icon={GraduationCap} />
-          <StatTile label="Movements" value={records.student_transfers?.length || 0} icon={Repeat2} />
-        </div>
+      {loadError && (
+        <ActionableNotification
+          inline
+          kind="error"
+          title="Some records could not be loaded"
+          subtitle={`${loadError}. What is shown below is incomplete.`}
+          lowContrast
+          actionButtonLabel="Try again"
+          onActionButtonClick={loadRecords}
+          onClose={() => setLoadError(null)}
+        />
+      )}
+
+      {/* Each tile waits only on its own table, so the band fills in as the eight answer rather
+          than sitting at six zeroes until the slowest one does. */}
+      <div className={styles.controls}>
+        <StatRow>
+          {pending('admissions') ? <StatTileSkeleton /> : (
+            <StatTile label="Admissions" value={records.admissions?.length || 0} icon={DocumentAdd} />
+          )}
+          {pending('attendance_records') ? <StatTileSkeleton /> : (
+            <StatTile label="Attendance" value={records.attendance_records?.length || 0} icon={UserFollow} />
+          )}
+          {pending('gradebook_entries') ? <StatTileSkeleton /> : (
+            <StatTile label="Academics" value={records.gradebook_entries?.length || 0} icon={Book} />
+          )}
+          {pending('discipline_records') ? <StatTileSkeleton /> : (
+            <StatTile
+              label="Discipline"
+              value={records.discipline_records?.length || 0}
+              icon={Warning}
+              tone={(records.discipline_records?.length || 0) > 0 ? 'warning' : 'default'}
+            />
+          )}
+          {pending('student_promotions') ? <StatTileSkeleton /> : (
+            <StatTile label="Promotions" value={records.student_promotions?.length || 0} icon={Education} />
+          )}
+          {pending('student_transfers') ? <StatTileSkeleton /> : (
+            <StatTile label="Movements" value={records.student_transfers?.length || 0} icon={Repeat} />
+          )}
+        </StatRow>
       </div>
 
-      <div className="flex-1 overflow-auto p-6">
-        <div className="grid grid-cols-1 xl:grid-cols-[280px_1fr] gap-5">
-          <aside className="space-y-4">
-            <div className="bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 rounded-lg p-4">
-              <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Student</label>
-              <select
-                value={selectedStudent?.id || ''}
-                onChange={event => setSelectedStudentId(event.target.value)}
-                className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm"
-              >
-                {students.map(student => (
-                  <option key={student.id} value={student.id}>{studentName(student)} - {student.student_id}</option>
-                ))}
-              </select>
-              {selectedStudent && (
-                <div className="mt-3 text-xs text-gray-500 dark:text-gray-400 space-y-1">
-                  <p>Grade {selectedStudent.grade_level}-{selectedStudent.class_section}</p>
-                  <p>Status: {selectedStudent.status}</p>
-                  <p>Lifecycle: {selectedStudent.lifecycle_status || 'enrolled'}</p>
-                </div>
-              )}
-            </div>
+      <div className={styles.body}>
+        <div className={styles.columns}>
+          <aside className={styles.aside}>
+            <WidgetCard>
+              <CardHeader title="Student" />
+              <div className={styles.asideBody}>
+                <StudentPicker
+                  id="records-student"
+                  value={selectedStudent?.id || ''}
+                  onChange={setSelectedStudentId}
+                  students={students}
+                  hideLabel
+                />
+                {selectedStudent && (
+                  <dl className={styles.studentFacts}>
+                    <div>
+                      <dt>Class</dt>
+                      <dd>
+                        {classAndSection(settings.school_level, selectedStudent.grade_level, selectedStudent.class_section)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Status</dt>
+                      <dd>{selectedStudent.status}</dd>
+                    </div>
+                    <div>
+                      <dt>Lifecycle</dt>
+                      <dd>{selectedStudent.lifecycle_status || 'enrolled'}</dd>
+                    </div>
+                  </dl>
+                )}
+              </div>
+            </WidgetCard>
 
-            <div className="bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 rounded-lg p-2">
-              {sections.map(section => (
-                <button
-                  key={section.key}
-                  onClick={() => setActiveSection(section.key)}
-                  className={`w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm text-left transition-colors ${
-                    activeSection === section.key
-                      ? 'bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400'
-                      : 'text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700'
-                  }`}
-                >
-                  <section.icon className="w-4 h-4" />
-                  {section.label}
-                </button>
-              ))}
-            </div>
+            <WidgetCard>
+              <nav className={styles.sectionNav} aria-label="Record sections">
+                {sections.map(section => (
+                  <button
+                    key={section.key}
+                    type="button"
+                    onClick={() => setActiveSection(section.key)}
+                    className={`${styles.sectionLink} ${
+                      activeSection === section.key ? styles.sectionCurrent : ''
+                    }`}
+                    aria-current={activeSection === section.key ? 'page' : undefined}
+                  >
+                    <section.icon size={16} />
+                    {section.label}
+                  </button>
+                ))}
+              </nav>
+            </WidgetCard>
           </aside>
 
-          <main className="bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 rounded-lg overflow-hidden">
-            {loading ? (
-              <div className="h-72 flex items-center justify-center text-gray-400">
-                <Loader2 className="w-5 h-5 animate-spin mr-2" />
-                Loading records
-              </div>
-            ) : (
-              <div className="p-5 space-y-5">
+          {/* No pane-wide loading gate. The forms in every section need none of the eight tables to
+              be usable, so blanking the whole pane charged the person filling in an admission the
+              cost of reading the discipline register. Each record list below waits on its own. */}
+          <WidgetCard className={styles.main}>
+            <div className={styles.pane}>
                 {!canEdit && (
-                  <div className="flex items-center gap-2 text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-100 dark:border-amber-800 rounded-lg px-3 py-2">
-                    <Shield className="w-4 h-4" />
-                    Teacher accounts can view records. Administrator access is required to add or update records.
-                  </div>
+                  <InlineNotification
+                    kind="info"
+                    title="View only"
+                    subtitle="Teacher accounts can read these records. Adding or changing them needs an administrator."
+                    lowContrast
+                    hideCloseButton
+                  />
                 )}
 
                 {activeSection === 'admissions' && (
                   <>
-                    <SectionTitle icon={FilePlus2} title="Student Registration / Admission" description="Record applications, then review the full admissions register." />
-                    <Tabs value={admissionPane} onValueChange={setAdmissionPane} className="space-y-4">
-                      <TabsList className="grid w-full max-w-md grid-cols-2">
-                        <TabsTrigger value="form">Admission</TabsTrigger>
-                        <TabsTrigger value="list">Admissions List</TabsTrigger>
-                      </TabsList>
-                      <TabsContent value="form" className="space-y-5">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <SectionTitle icon={DocumentAdd} title="Student Registration / Admission" description="Record applications, then review the full admissions register." />
+                    <Tabs
+                      selectedIndex={admissionPane === 'form' ? 0 : 1}
+                      onChange={({ selectedIndex }) => setAdmissionPane(selectedIndex === 0 ? 'form' : 'list')}
+                    >
+                      <TabList aria-label="Admissions" contained>
+                        <Tab>New admission</Tab>
+                        <Tab>Admissions register</Tab>
+                      </TabList>
+                      <TabPanels>
+                        <TabPanel className={styles.tabPanel}>
+                        <div className={styles.grid2}>
                           <Field label="Application Number" value={admission.application_number} onChange={value => setAdmission(prev => ({ ...prev, application_number: value }))} />
                           <Field label="Status" value={admission.status} onChange={value => setAdmission(prev => ({ ...prev, status: value }))} options={[
                             { value: 'submitted', label: 'Submitted' }, { value: 'reviewing', label: 'Reviewing' }, { value: 'accepted', label: 'Accepted' }, { value: 'admitted', label: 'Admitted' }, { value: 'rejected', label: 'Rejected' }, { value: 'registered', label: 'Registered' },
                           ]} />
                           <Field label="Applicant First Name" value={admission.applicant_first_name} onChange={value => setAdmission(prev => ({ ...prev, applicant_first_name: value }))} />
                           <Field label="Applicant Last Name" value={admission.applicant_last_name} onChange={value => setAdmission(prev => ({ ...prev, applicant_last_name: value }))} />
-                          <Field label="Grade Level" value={admission.grade_level} type="number" onChange={value => setAdmission(prev => ({ ...prev, grade_level: value }))} />
+                          <Field
+                            label="Class"
+                            value={admission.grade_level}
+                            onChange={value => setAdmission(prev => ({ ...prev, grade_level: Number(value) }))}
+                            options={classOptionsFor(settings.school_level).map(option => ({
+                              value: String(option.value),
+                              label: option.label,
+                            }))}
+                          />
                           <Field label="Documents" value={admission.documents} onChange={value => setAdmission(prev => ({ ...prev, documents: value }))} />
-                          <div className="md:col-span-2"><Field label="Notes" value={admission.notes} type="textarea" onChange={value => setAdmission(prev => ({ ...prev, notes: value }))} /></div>
+                          <div className={styles.spanAll}><Field label="Notes" value={admission.notes} type="textarea" onChange={value => setAdmission(prev => ({ ...prev, notes: value }))} /></div>
                         </div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <SaveButton disabled={!canEdit || saving} onClick={createAdmission} label="Save Admission" />
+                        <div className={styles.actions}>
+                          <Button
+                            kind="primary"
+                            size="md"
+                            renderIcon={Checkmark}
+                            onClick={createAdmission}
+                            disabled={!canEdit || saving}
+                          >
+                            Save admission
+                          </Button>
                           {isAdmin && (
-                            <button
+                            <Button
+                              kind="tertiary"
+                              size="md"
+                              renderIcon={Education}
                               onClick={admitAndBill}
                               disabled={saving}
-                              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 text-white text-sm font-medium hover:shadow-lg transition-all disabled:opacity-50"
                             >
-                              <GraduationCap className="w-4 h-4" /> Admit &amp; Bill Tuition
-                            </button>
+                              Admit &amp; bill tuition
+                            </Button>
                           )}
                         </div>
                         {isAdmin && (
-                          <p className="text-[11px] text-gray-400">
+                          <p className={styles.actionNote}>
                             &ldquo;Admit &amp; Bill&rdquo; records the admission and raises a tuition invoice from the matching fee structure for this student&apos;s grade.
                           </p>
                         )}
-                        <RecordList rows={selectedStudentRecords.admissions} empty="No admission records for this student." fields={['application_number', 'status', 'grade_level', 'submitted_at', 'notes']} />
-                      </TabsContent>
-                      <TabsContent value="list">
+                        <RecordList loading={pending('admissions')} failed={failed('admissions')} rows={selectedStudentRecords.admissions} empty="No admission records for this student." fields={['application_number', 'status', 'grade_level', 'submitted_at', 'notes']} />
+                        </TabPanel>
+                        <TabPanel className={styles.tabPanel}>
                         <AdmissionsZebraList
                           rows={paginatedAdmissions}
                           allRowsCount={admissionRows.length}
@@ -657,47 +762,48 @@ const StudentRecordsWorkspace: React.FC = () => {
                           onPageChange={setAdmissionPage}
                           students={students}
                         />
-                      </TabsContent>
+                        </TabPanel>
+                      </TabPanels>
                     </Tabs>
                   </>
                 )}
 
                 {activeSection === 'attendance' && (
                   <>
-                    <SectionTitle icon={UserCheck} title="Attendance Tracking" description="Mark daily attendance and optionally prepare a parent alert." />
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <SectionTitle icon={UserFollow} title="Attendance Tracking" description="Mark daily attendance and optionally prepare a parent alert." />
+                    <div className={styles.grid2}>
                       <Field label="Attendance Date" type="date" value={attendance.attendance_date} onChange={value => setAttendance(prev => ({ ...prev, attendance_date: value }))} />
                       <Field label="Status" value={attendance.status} onChange={value => setAttendance(prev => ({ ...prev, status: value }))} options={[
                         { value: 'present', label: 'Present' }, { value: 'absent', label: 'Absent' }, { value: 'late', label: 'Late' }, { value: 'excused', label: 'Excused' },
                       ]} />
                       <Field label="Marked By" value={attendance.marked_by} onChange={value => setAttendance(prev => ({ ...prev, marked_by: value }))} />
                       <Field label="Notify Parent" type="checkbox" value={attendance.notified_parent} onChange={value => setAttendance(prev => ({ ...prev, notified_parent: value }))} />
-                      <div className="md:col-span-2"><Field label="Reason / Note" value={attendance.reason} type="textarea" onChange={value => setAttendance(prev => ({ ...prev, reason: value }))} /></div>
+                      <div className={styles.spanAll}><Field label="Reason / Note" value={attendance.reason} type="textarea" onChange={value => setAttendance(prev => ({ ...prev, reason: value }))} /></div>
                     </div>
                     <SaveButton disabled={!canEdit || saving} onClick={markAttendance} label="Mark Attendance" />
-                    <RecordList rows={selectedStudentRecords.attendance} empty="No attendance records for this student." fields={['attendance_date', 'status', 'reason', 'marked_by', 'notified_parent']} />
+                    <RecordList loading={pending('attendance_records')} failed={failed('attendance_records')} rows={selectedStudentRecords.attendance} empty="No attendance records for this student." fields={['attendance_date', 'status', 'reason', 'marked_by', 'notified_parent']} />
                   </>
                 )}
 
                 {activeSection === 'academic' && (
                   <>
-                    <SectionTitle icon={BookOpen} title="Academic History" description="Store assessment results that can support transcripts and progress tracking." />
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <SectionTitle icon={Book} title="Academic History" description="Store assessment results that can support transcripts and progress tracking." />
+                    <div className={styles.grid3}>
                       <Field label="Score" type="number" value={academic.score} onChange={value => setAcademic(prev => ({ ...prev, score: value }))} />
                       <Field label="Max Score" type="number" value={academic.max_score} onChange={value => setAcademic(prev => ({ ...prev, max_score: value }))} />
                       <Field label="Grade" value={academic.grade} onChange={value => setAcademic(prev => ({ ...prev, grade: value }))} />
                       <Field label="Rank" type="number" value={academic.rank} onChange={value => setAcademic(prev => ({ ...prev, rank: value }))} />
-                      <div className="md:col-span-2"><Field label="Remarks" value={academic.remarks} onChange={value => setAcademic(prev => ({ ...prev, remarks: value }))} /></div>
+                      <div className={styles.spanAll}><Field label="Remarks" value={academic.remarks} onChange={value => setAcademic(prev => ({ ...prev, remarks: value }))} /></div>
                     </div>
                     <SaveButton disabled={!canEdit || saving} onClick={saveAcademic} label="Save Academic Entry" />
-                    <RecordList rows={selectedStudentRecords.academic} empty="No academic entries for this student." fields={['score', 'max_score', 'grade', 'rank', 'remarks', 'created_at']} />
+                    <RecordList loading={pending('gradebook_entries')} failed={failed('gradebook_entries')} rows={selectedStudentRecords.academic} empty="No academic entries for this student." fields={['score', 'max_score', 'grade', 'rank', 'remarks', 'created_at']} />
                   </>
                 )}
 
                 {activeSection === 'discipline' && (
                   <>
-                    <SectionTitle icon={AlertTriangle} title="Discipline Records" description="Record incidents, severity, actions taken, and guardian notification status." />
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <SectionTitle icon={Warning} title="Discipline Records" description="Record incidents, severity, actions taken, and guardian notification status." />
+                    <div className={styles.grid2}>
                       <Field label="Incident Date" type="date" value={discipline.incident_date} onChange={value => setDiscipline(prev => ({ ...prev, incident_date: value }))} />
                       <Field label="Category" value={discipline.category} onChange={value => setDiscipline(prev => ({ ...prev, category: value }))} />
                       <Field label="Severity" value={discipline.severity} onChange={value => setDiscipline(prev => ({ ...prev, severity: value }))} options={[
@@ -708,19 +814,27 @@ const StudentRecordsWorkspace: React.FC = () => {
                       ]} />
                       <Field label="Reported By" value={discipline.reported_by} onChange={value => setDiscipline(prev => ({ ...prev, reported_by: value }))} />
                       <Field label="Guardian Notified" type="checkbox" value={discipline.guardian_notified} onChange={value => setDiscipline(prev => ({ ...prev, guardian_notified: value }))} />
-                      <div className="md:col-span-2"><Field label="Description" type="textarea" value={discipline.description} onChange={value => setDiscipline(prev => ({ ...prev, description: value }))} /></div>
-                      <div className="md:col-span-2"><Field label="Action Taken" type="textarea" value={discipline.action_taken} onChange={value => setDiscipline(prev => ({ ...prev, action_taken: value }))} /></div>
+                      <div className={styles.spanAll}><Field label="Description" type="textarea" value={discipline.description} onChange={value => setDiscipline(prev => ({ ...prev, description: value }))} /></div>
+                      <div className={styles.spanAll}><Field label="Action Taken" type="textarea" value={discipline.action_taken} onChange={value => setDiscipline(prev => ({ ...prev, action_taken: value }))} /></div>
                     </div>
                     <SaveButton disabled={!canEdit || saving || !discipline.description.trim()} onClick={saveDiscipline} label="Save Discipline Record" />
-                    <RecordList rows={selectedStudentRecords.discipline} empty="No discipline records for this student." fields={['incident_date', 'category', 'severity', 'status', 'description', 'action_taken']} />
+                    <RecordList loading={pending('discipline_records')} failed={failed('discipline_records')} rows={selectedStudentRecords.discipline} empty="No discipline records for this student." fields={['incident_date', 'category', 'severity', 'status', 'description', 'action_taken']} />
                   </>
                 )}
 
                 {activeSection === 'allocation' && (
                   <>
-                    <SectionTitle icon={School} title="Class and Stream Allocation" description="Assign the selected student to a grade, section, stream, and room for the academic year." />
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                      <Field label="Grade Level" type="number" value={allocation.grade_level} onChange={value => setAllocation(prev => ({ ...prev, grade_level: value }))} />
+                    <SectionTitle icon={Result} title="Class and Stream Allocation" description="Assign the selected student to a grade, section, stream, and room for the academic year." />
+                    <div className={styles.grid3}>
+                      <Field
+                        label="Class"
+                        value={allocation.grade_level}
+                        onChange={value => setAllocation(prev => ({ ...prev, grade_level: Number(value) }))}
+                        options={classOptionsFor(settings.school_level).map(option => ({
+                          value: String(option.value),
+                          label: option.label,
+                        }))}
+                      />
                       <Field label="Section" value={allocation.section_name} onChange={value => setAllocation(prev => ({ ...prev, section_name: value }))} />
                       <Field label="Stream" value={allocation.stream} onChange={value => setAllocation(prev => ({ ...prev, stream: value }))} />
                       <Field label="Room" value={allocation.room} onChange={value => setAllocation(prev => ({ ...prev, room: value }))} />
@@ -728,14 +842,14 @@ const StudentRecordsWorkspace: React.FC = () => {
                       <Field label="Capacity" type="number" value={allocation.capacity} onChange={value => setAllocation(prev => ({ ...prev, capacity: value }))} />
                     </div>
                     <SaveButton disabled={!canEdit || saving} onClick={allocateClass} label="Allocate Student" />
-                    <RecordList rows={records.classes || []} empty="No classes or streams configured." fields={['grade_level', 'section_name', 'stream', 'room', 'academic_year', 'capacity']} />
+                    <RecordList loading={pending('classes')} failed={failed('classes')} rows={records.classes || []} empty="No classes or streams configured." fields={['grade_level', 'section_name', 'stream', 'room', 'academic_year', 'capacity']} />
                   </>
                 )}
 
                 {activeSection === 'lifecycle' && (
                   <>
-                    <SectionTitle icon={Repeat2} title="Promotion, Graduation, Transfer, and Withdrawal" description="Record formal student movement decisions and update the student profile." />
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <SectionTitle icon={Repeat} title="Promotion, Graduation, Transfer, and Withdrawal" description="Record formal student movement decisions and update the student profile." />
+                    <div className={styles.grid3}>
                       <Field label="Action" value={lifecycle.action} onChange={value => setLifecycle(prev => ({ ...prev, action: value }))} options={[
                         { value: 'promotion', label: 'Promotion / Graduation' }, { value: 'transfer', label: 'Transfer' }, { value: 'withdrawal', label: 'Withdrawal' },
                       ]} />
@@ -743,7 +857,15 @@ const StudentRecordsWorkspace: React.FC = () => {
                       <Field label="Approved / Processed By" value={lifecycle.approved_by} onChange={value => setLifecycle(prev => ({ ...prev, approved_by: value }))} />
                       {lifecycle.action === 'promotion' ? (
                         <>
-                          <Field label="To Grade" type="number" value={lifecycle.to_grade_level} onChange={value => setLifecycle(prev => ({ ...prev, to_grade_level: value }))} />
+                          <Field
+                            label="Promote to"
+                            value={lifecycle.to_grade_level}
+                            onChange={value => setLifecycle(prev => ({ ...prev, to_grade_level: Number(value) }))}
+                            options={classOptionsFor(settings.school_level).map(option => ({
+                              value: String(option.value),
+                              label: option.label,
+                            }))}
+                          />
                           <Field label="To Section" value={lifecycle.to_class_section} onChange={value => setLifecycle(prev => ({ ...prev, to_class_section: value }))} />
                           <Field label="Decision" value={lifecycle.decision} onChange={value => setLifecycle(prev => ({ ...prev, decision: value }))} options={[
                             { value: 'promoted', label: 'Promoted' }, { value: 'repeated', label: 'Repeated' }, { value: 'graduated', label: 'Graduated' },
@@ -751,19 +873,18 @@ const StudentRecordsWorkspace: React.FC = () => {
                         </>
                       ) : (
                         <>
-                          <Field label="Destination School" value={lifecycle.destination_school} onChange={value => setLifecycle(prev => ({ ...prev, destination_school: value }))} />
-                          <div className="md:col-span-2"><Field label="Reason" value={lifecycle.reason} onChange={value => setLifecycle(prev => ({ ...prev, reason: value }))} /></div>
+                          <Field label="Destination Result" value={lifecycle.destination_school} onChange={value => setLifecycle(prev => ({ ...prev, destination_school: value }))} />
+                          <div className={styles.spanAll}><Field label="Reason" value={lifecycle.reason} onChange={value => setLifecycle(prev => ({ ...prev, reason: value }))} /></div>
                         </>
                       )}
-                      <div className="md:col-span-3"><Field label="Notes" type="textarea" value={lifecycle.notes} onChange={value => setLifecycle(prev => ({ ...prev, notes: value }))} /></div>
+                      <div className={styles.spanAll}><Field label="Notes" type="textarea" value={lifecycle.notes} onChange={value => setLifecycle(prev => ({ ...prev, notes: value }))} /></div>
                     </div>
                     <SaveButton disabled={!canEdit || saving} onClick={saveLifecycle} label="Save Lifecycle Action" />
-                    <RecordList rows={[...selectedStudentRecords.promotions, ...selectedStudentRecords.transfers]} empty="No promotion, graduation, transfer, or withdrawal records for this student." fields={['movement_type', 'decision', 'from_grade_level', 'to_grade_level', 'effective_date', 'status', 'reason', 'notes']} />
+                    <RecordList loading={pending('student_promotions', 'student_transfers')} failed={failed('student_promotions', 'student_transfers')} rows={[...selectedStudentRecords.promotions, ...selectedStudentRecords.transfers]} empty="No promotion, graduation, transfer, or withdrawal records for this student." fields={['movement_type', 'decision', 'from_grade_level', 'to_grade_level', 'effective_date', 'status', 'reason', 'notes']} />
                   </>
                 )}
-              </div>
-            )}
-          </main>
+            </div>
+          </WidgetCard>
         </div>
       </div>
     </div>
@@ -771,55 +892,99 @@ const StudentRecordsWorkspace: React.FC = () => {
 };
 
 const SectionTitle = ({ icon: Icon, title, description }: { icon: React.ElementType; title: string; description: string }) => (
-  <div className="flex items-start gap-3">
-    <div className="w-10 h-10 rounded-lg bg-indigo-50 dark:bg-indigo-900/20 flex items-center justify-center">
-      <Icon className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
-    </div>
+  <div className={styles.sectionTitle}>
+    <span className={styles.sectionMark}>
+      <Icon size={20} />
+    </span>
     <div>
-      <h3 className="text-base font-semibold text-gray-800 dark:text-white">{title}</h3>
-      <p className="text-xs text-gray-400 mt-0.5">{description}</p>
+      <h3 className={styles.sectionHeading}>{title}</h3>
+      <p className={styles.sectionDescription}>{description}</p>
     </div>
   </div>
 );
 
 const SaveButton = ({ disabled, onClick, label }: { disabled: boolean; onClick: () => void; label: string }) => (
-  <button
-    onClick={onClick}
-    disabled={disabled}
-    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
-  >
-    <CheckCircle2 className="w-4 h-4" />
-    {label}
-  </button>
-);
-
-const RecordList = ({ rows, fields, empty }: { rows: SchoolRecord[]; fields: string[]; empty: string }) => (
-  <div className="border border-gray-100 dark:border-gray-700 rounded-lg overflow-hidden">
-    <div className="px-4 py-2 border-b border-gray-100 dark:border-gray-700 flex items-center gap-2">
-      <Bell className="w-4 h-4 text-gray-400" />
-      <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-200">Recent Records</h4>
-      <span className="text-[10px] text-gray-400">{rows.length}</span>
-    </div>
-    {rows.length === 0 ? (
-      <p className="px-4 py-8 text-center text-sm text-gray-400">{empty}</p>
-    ) : (
-      <div className="divide-y divide-gray-100 dark:divide-gray-700">
-        {rows.slice(0, 8).map(row => (
-          <div key={row.id} className="px-4 py-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
-            {fields.map(field => row[field] !== undefined && row[field] !== null && row[field] !== '' ? (
-              <div key={field}>
-                <p className="text-[10px] text-gray-400 uppercase tracking-wider">{field.replace(/_/g, ' ')}</p>
-                <p className="text-sm text-gray-700 dark:text-gray-200 break-words">
-                  {typeof row[field] === 'boolean' ? (row[field] ? 'Yes' : 'No') : String(row[field])}
-                </p>
-              </div>
-            ) : null)}
-          </div>
-        ))}
-      </div>
-    )}
+  <div className={styles.actions}>
+    <Button kind="primary" size="md" renderIcon={Checkmark} onClick={onClick} disabled={disabled}>
+      {label}
+    </Button>
   </div>
 );
+
+/**
+ * The last few entries of whatever was just written.
+ *
+ * Shown under every form because the question after saving is always "did that go in?", and the
+ * honest answer is the record itself rather than a toast that disappears.
+ */
+const RECORD_PAGE_SIZE = 8;
+
+const RecordList = ({
+  rows,
+  fields,
+  empty,
+  loading = false,
+  failed = false,
+}: {
+  rows: SchoolRecord[];
+  fields: string[];
+  empty: string;
+  /** The table behind this list has not answered yet. */
+  loading?: boolean;
+  /** It answered with a refusal. "No records" would be a lie; say so instead. */
+  failed?: boolean;
+}) => {
+  // This used to be `rows.slice(0, 8)` with no pager and no indication — so the ninth attendance
+  // entry, the ninth incident and the ninth promotion simply were not on the screen, while the tag
+  // beside the title stated the full count. A list that says "23" and shows eight is worse than one
+  // that shows eight and says so.
+  const { page, setPage, pageCount, pageRows, firstOnPage, lastOnPage, total } = usePagedRows(
+    rows,
+    RECORD_PAGE_SIZE,
+  );
+
+  return (
+    <WidgetCard>
+      <CardHeader title="Recent records">
+        {/* The pager is held back while the table is still coming: "No records" beside a skeleton
+            answers a question the screen has not been able to ask yet. */}
+        {!loading && (
+          <TablePager
+            page={page}
+            pageCount={pageCount}
+            onPageChange={setPage}
+            firstOnPage={firstOnPage}
+            lastOnPage={lastOnPage}
+            total={total}
+            noun="record"
+          />
+        )}
+      </CardHeader>
+      {loading ? (
+        <ListSkeleton rowCount={3} lines={1} />
+      ) : failed ? (
+        <p className={styles.empty}>These records could not be loaded. Try Refresh above.</p>
+      ) : rows.length === 0 ? (
+        <p className={styles.empty}>{empty}</p>
+      ) : (
+        pageRows.map(row => (
+          <div key={row.id} className={styles.recordRow}>
+            {fields.map(field =>
+              row[field] !== undefined && row[field] !== null && row[field] !== '' ? (
+                <div key={field}>
+                  <p className={styles.recordLabel}>{field.replace(/_/g, ' ')}</p>
+                  <p className={styles.recordValue}>
+                    {typeof row[field] === 'boolean' ? (row[field] ? 'Yes' : 'No') : String(row[field])}
+                  </p>
+                </div>
+              ) : null,
+            )}
+          </div>
+        ))
+      )}
+    </WidgetCard>
+  );
+};
 
 const formatAdmissionDocuments = (documents: unknown) => {
   if (!Array.isArray(documents)) return '';
@@ -852,71 +1017,65 @@ const AdmissionsZebraList = ({
   const studentById = useMemo(() => new Map(students.map(student => [student.id, student])), [students]);
 
   return (
-    <div className="border border-gray-100 dark:border-gray-700 rounded-lg overflow-hidden">
-      <div className="px-4 py-3 border-b border-gray-100 dark:border-gray-700 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-200">Admissions Register</h4>
-          <p className="text-xs text-gray-400">{allRowsCount} total applications</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => onPageChange(Math.max(1, page - 1))}
-            disabled={page === 1}
-            className="p-2 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-500 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50 dark:hover:bg-gray-700"
-            aria-label="Previous admissions page"
-          >
-            <ChevronLeft className="w-4 h-4" />
-          </button>
-          <span className="text-xs text-gray-500 dark:text-gray-400">Page {page} of {pageCount}</span>
-          <button
-            onClick={() => onPageChange(Math.min(pageCount, page + 1))}
-            disabled={page === pageCount}
-            className="p-2 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-500 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50 dark:hover:bg-gray-700"
-            aria-label="Next admissions page"
-          >
-            <ChevronRight className="w-4 h-4" />
-          </button>
-        </div>
-      </div>
+    <WidgetCard>
+      <CardHeader title="Admissions register">
+        <TablePager
+          page={page}
+          pageCount={pageCount}
+          onPageChange={onPageChange}
+          firstOnPage={allRowsCount === 0 ? 0 : (page - 1) * ADMISSIONS_PAGE_SIZE + 1}
+          lastOnPage={Math.min(page * ADMISSIONS_PAGE_SIZE, allRowsCount)}
+          total={allRowsCount}
+          noun="application"
+        />
+      </CardHeader>
+
       {rows.length === 0 ? (
-        <p className="px-4 py-8 text-center text-sm text-gray-400">No admissions have been recorded.</p>
+        <p className={styles.empty}>No admissions have been recorded.</p>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50 dark:bg-gray-900/40 text-[10px] uppercase tracking-wider text-gray-400">
-              <tr>
-                <th className="px-4 py-3 text-left font-medium">Application</th>
-                <th className="px-4 py-3 text-left font-medium">Applicant</th>
-                <th className="px-4 py-3 text-left font-medium">Grade</th>
-                <th className="px-4 py-3 text-left font-medium">Status</th>
-                <th className="px-4 py-3 text-left font-medium">Submitted</th>
-                <th className="px-4 py-3 text-left font-medium">Documents</th>
-              </tr>
-            </thead>
-            <tbody>
+        <div className={styles.tableWrap}>
+          <Table size="sm" useZebraStyles>
+            <TableHead>
+              <TableRow>
+                <TableHeader>Application</TableHeader>
+                <TableHeader>Applicant</TableHeader>
+                <TableHeader>Grade</TableHeader>
+                <TableHeader>Status</TableHeader>
+                <TableHeader>Submitted</TableHeader>
+                <TableHeader>Documents</TableHeader>
+              </TableRow>
+            </TableHead>
+            <TableBody>
               {rows.map((row, index) => {
-                const linkedStudent = typeof row.student_id === 'string' ? studentById.get(row.student_id) : undefined;
-                const applicantName = `${row.applicant_first_name || linkedStudent?.first_name || ''} ${row.applicant_last_name || linkedStudent?.last_name || ''}`.trim();
+                const linkedStudent =
+                  typeof row.student_id === 'string' ? studentById.get(row.student_id) : undefined;
+                const applicantName = `${row.applicant_first_name || linkedStudent?.first_name || ''} ${
+                  row.applicant_last_name || linkedStudent?.last_name || ''
+                }`.trim();
                 return (
-                  <tr key={row.id || `${row.application_number}-${index}`} className={index % 2 === 0 ? 'bg-white dark:bg-gray-800' : 'bg-gray-50/70 dark:bg-gray-900/30'}>
-                    <td className="px-4 py-3 font-medium text-gray-800 dark:text-gray-100">{String(row.application_number || 'Pending')}</td>
-                    <td className="px-4 py-3 text-gray-600 dark:text-gray-300">{applicantName || 'Unknown applicant'}</td>
-                    <td className="px-4 py-3 text-gray-600 dark:text-gray-300">{String(row.grade_level || '')}</td>
-                    <td className="px-4 py-3">
-                      <span className="inline-flex rounded-full bg-indigo-50 dark:bg-indigo-900/20 px-2 py-1 text-[11px] font-medium text-indigo-600 dark:text-indigo-300">
+                  <TableRow key={row.id || `${row.application_number}-${index}`}>
+                    <TableCell className={styles.strong}>
+                      {String(row.application_number || 'Pending')}
+                    </TableCell>
+                    <TableCell>{applicantName || 'Unknown applicant'}</TableCell>
+                    <TableCell>{String(row.grade_level || '')}</TableCell>
+                    <TableCell>
+                      <Tag type="blue" size="sm">
                         {String(row.status || 'submitted')}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-gray-600 dark:text-gray-300">{String(row.submitted_at || '').slice(0, 10)}</td>
-                    <td className="px-4 py-3 text-gray-600 dark:text-gray-300 max-w-xs truncate">{formatAdmissionDocuments(row.documents) || 'None'}</td>
-                  </tr>
+                      </Tag>
+                    </TableCell>
+                    <TableCell>{String(row.submitted_at || '').slice(0, 10)}</TableCell>
+                    <TableCell className={styles.truncate}>
+                      {formatAdmissionDocuments(row.documents) || 'None'}
+                    </TableCell>
+                  </TableRow>
                 );
               })}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         </div>
       )}
-    </div>
+    </WidgetCard>
   );
 };
 

@@ -1,35 +1,60 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { InlineLoading, Modal, Search as CarbonSearch } from '@carbon/react';
 import {
-  BookMarked,
-  ClipboardCheck,
-  Loader2,
-  NotebookPen,
+  Book,
+  Money,
+  Notebook,
   Search,
-  UserCheck,
-  Users,
-  Wallet,
-} from 'lucide-react';
-import {
-  CommandDialog,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-} from '@/components/ui/command';
+  TaskComplete,
+  UserFollow,
+  UserMultiple,
+} from '@carbon/react/icons';
 import { useAuth } from '@/contexts/AuthContext';
 import { useChatContext } from '@/contexts/ChatContext';
 import { callSearch } from '@/lib/teaching';
-import type { SearchGroup, SearchResponse } from '@/types/search';
+import type { SearchGroup, SearchHit, SearchResponse } from '@/types/search';
+import styles from './global-search.module.scss';
 
-/** How each result type is labelled and which view opens when it is picked. */
-const GROUP_META: Record<string, { label: string; icon: React.ElementType; view: string | null }> = {
-  students: { label: 'Students', icon: Users, view: 'students' },
-  curriculum: { label: 'Curriculum', icon: BookMarked, view: 'lessons' },
-  lesson_plans: { label: 'Lesson plans', icon: NotebookPen, view: 'lessons' },
-  exam_questions: { label: 'Exam questions', icon: ClipboardCheck, view: 'examiner' },
-  fees: { label: 'Fees', icon: Wallet, view: 'finance' },
-  attendance: { label: 'Attendance', icon: UserCheck, view: 'records' },
+/**
+ * How each result type is labelled, which screen opens it, and how to find the record there.
+ *
+ * `studentIdFrom` is what turns "switch to the fees screen" into "open this student's ledger".
+ * A fee or attendance document carries the student it belongs to; a student result is the student.
+ * Curriculum, lesson plans and questions have no per-record destination yet, so they open their
+ * screen — which is still where the answer is.
+ */
+const GROUP_META: Record<
+  string,
+  {
+    label: string;
+    icon: React.ElementType;
+    view: string | null;
+    studentIdFrom?: (hit: SearchHit) => string | undefined;
+  }
+> = {
+  students: {
+    label: 'Students',
+    icon: UserMultiple,
+    // The student's own file, not the roster filtered down to one row. Opening a search result
+    // should answer the question that prompted the search, not leave it one more click away.
+    view: 'student',
+    studentIdFrom: (hit) => hit.id,
+  },
+  curriculum: { label: 'Curriculum', icon: Book, view: 'lessons' },
+  lesson_plans: { label: 'Lesson plans', icon: Notebook, view: 'lessons' },
+  exam_questions: { label: 'Exam questions', icon: TaskComplete, view: 'examiner' },
+  fees: {
+    label: 'Fees',
+    icon: Money,
+    view: 'finance',
+    studentIdFrom: (hit) => hit.raw?.student_id as string | undefined,
+  },
+  attendance: {
+    label: 'Attendance',
+    icon: UserFollow,
+    view: 'records',
+    studentIdFrom: (hit) => hit.raw?.student_id as string | undefined,
+  },
 };
 
 // Long enough that a normal typist does not fire a request per keystroke, short enough to still
@@ -42,10 +67,14 @@ const DEBOUNCE_MS = 180;
  * Opens on ⌘K / Ctrl-K. Every query goes through the backend, which is the only place the signed-in
  * role is known — results are scoped to what that role may see, so a teacher never sees fee records
  * here even though they are indexed.
+ *
+ * Built from Carbon's Modal and Search rather than a command-palette library: the results are
+ * already ranked by Meilisearch, so the only thing a palette component would add is client-side
+ * re-filtering, which would drop the typo-tolerant matches that are the point of using it.
  */
 const GlobalSearch: React.FC = () => {
   const { user, isAdmin } = useAuth();
-  const { setActiveView } = useChatContext();
+  const { openRecord } = useChatContext();
 
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -107,13 +136,18 @@ const GlobalSearch: React.FC = () => {
   }, [open, query, user]);
 
   const openResult = useCallback(
-    (index: string) => {
-      const view = GROUP_META[index]?.view;
-      if (view) setActiveView(view as never);
+    (index: string, hit: SearchHit) => {
+      const meta = GROUP_META[index];
+      if (!meta?.view) return;
+      openRecord({
+        view: meta.view as never,
+        studentId: meta.studentIdFrom?.(hit),
+        query: hit.title,
+      });
       setOpen(false);
       setQuery('');
     },
-    [setActiveView],
+    [openRecord],
   );
 
   const totalHits = useMemo(
@@ -126,81 +160,100 @@ const GlobalSearch: React.FC = () => {
   return (
     <>
       <button
+        type="button"
+        className={styles.trigger}
         onClick={() => setOpen(true)}
-        className="hidden md:flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-gray-200 dark:border-gray-700 text-xs text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
         title="Search everything (Ctrl+K)"
       >
-        <Search className="w-3.5 h-3.5" />
+        <Search size={16} />
         <span>Search…</span>
-        <kbd className="ml-1 px-1 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-[10px] font-sans">⌘K</kbd>
+        <kbd className={styles.shortcut}>⌘K</kbd>
       </button>
 
-      <CommandDialog open={open} onOpenChange={setOpen}>
-        {/* shouldFilter=false: Meilisearch has already ranked these, and re-filtering client-side
-            would drop typo-tolerant matches that do not literally contain the typed text. */}
-        <CommandInput
-          placeholder="Search students, curriculum, lesson plans, questions…"
-          value={query}
-          onValueChange={setQuery}
-        />
-        <CommandList>
-          {loading && (
-            <div className="flex items-center gap-2 px-4 py-6 text-xs text-gray-400">
-              <Loader2 className="w-3.5 h-3.5 animate-spin" /> Searching…
-            </div>
-          )}
+      {open && (
+        <Modal
+          open
+          passiveModal
+          className={styles.modal}
+          modalHeading="Search"
+          onRequestClose={() => setOpen(false)}
+          size="md"
+        >
+          <div className={styles.searchRow}>
+            <CarbonSearch
+              id="global-search"
+              autoFocus
+              size="lg"
+              labelText="Search everything"
+              placeholder="Students, curriculum, lesson plans, questions…"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onClear={() => setQuery('')}
+            />
+          </div>
 
-          {!loading && query.trim() && totalHits === 0 && (
-            <CommandEmpty>No matches for “{query.trim()}”.</CommandEmpty>
-          )}
+          <div className={styles.results}>
+            {loading && (
+              <div className={styles.message}>
+                <InlineLoading description="Searching…" />
+              </div>
+            )}
 
-          {!loading && !query.trim() && (
-            <div className="px-4 py-6 text-xs text-gray-400">
-              Type to search across students, the curriculum library, lesson plans, banked questions
-              {isAdmin ? ', fees' : ''} and attendance.
-            </div>
-          )}
+            {!loading && !query.trim() && (
+              <p className={styles.message}>
+                Type to search across students, the curriculum library, lesson plans, banked
+                questions{isAdmin ? ', fees' : ''} and attendance.
+              </p>
+            )}
 
-          {groups.map(group => {
-            const meta = GROUP_META[group.index] || { label: group.index, icon: Search, view: null };
-            const Icon = meta.icon;
+            {!loading && query.trim() && totalHits === 0 && (
+              <p className={styles.message}>No matches for “{query.trim()}”.</p>
+            )}
 
-            return (
-              <CommandGroup key={group.index} heading={`${meta.label} (${group.total})`}>
-                {group.hits.map(hit => (
-                  <CommandItem
-                    key={`${group.index}:${hit.id}`}
-                    value={`${group.index}:${hit.id}`}
-                    onSelect={() => openResult(group.index)}
-                    className="flex items-start gap-2"
-                  >
-                    <Icon className="w-3.5 h-3.5 mt-0.5 shrink-0 text-indigo-500" />
-                    <div className="min-w-0">
-                      <p className="truncate text-sm text-gray-800 dark:text-gray-100">{hit.title}</p>
-                      {hit.subtitle && <p className="truncate text-[11px] text-gray-400">{hit.subtitle}</p>}
-                      {hit.snippet && (
-                        <p className="line-clamp-2 text-[11px] text-gray-400">{hit.snippet}</p>
-                      )}
-                    </div>
-                  </CommandItem>
-                ))}
-              </CommandGroup>
-            );
-          })}
+            {!loading &&
+              groups.map((group) => {
+                const meta = GROUP_META[group.index] || {
+                  label: group.index,
+                  icon: Search,
+                  view: null,
+                };
+                const Icon = meta.icon;
 
-          {notice && (
-            <p className="px-4 py-3 text-[11px] text-amber-600 dark:text-amber-400 border-t border-gray-100 dark:border-gray-700">
-              {notice}
-            </p>
-          )}
+                return (
+                  <div key={group.index}>
+                    <p className={styles.groupHeading}>
+                      {meta.label} ({group.total})
+                    </p>
+                    {group.hits.map((hit) => (
+                      <button
+                        key={`${group.index}:${hit.id}`}
+                        type="button"
+                        className={styles.hit}
+                        onClick={() => openResult(group.index, hit)}
+                      >
+                        <Icon size={16} />
+                        <span className={styles.hitText}>
+                          <span className={styles.hitTitle}>{hit.title}</span>
+                          {hit.subtitle && <span className={styles.hitSub}>{hit.subtitle}</span>}
+                          {hit.snippet && <span className={styles.hitSnippet}>{hit.snippet}</span>}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                );
+              })}
 
-          {!notice && engine === 'meilisearch' && totalHits > 0 && (
-            <p className="px-4 py-2 text-[10px] text-gray-400 border-t border-gray-100 dark:border-gray-700">
-              Typo-tolerant search across {groups.length} categor{groups.length === 1 ? 'y' : 'ies'}.
-            </p>
-          )}
-        </CommandList>
-      </CommandDialog>
+            {notice && <p className={`${styles.foot} ${styles.footWarning}`}>{notice}</p>}
+
+            {!notice && engine === 'meilisearch' && totalHits > 0 && (
+              <p className={styles.foot}>
+                Typo-tolerant search across {groups.length} categor
+                {groups.length === 1 ? 'y' : 'ies'}.
+              </p>
+            )}
+          </div>
+        </Modal>
+      )}
     </>
   );
 };

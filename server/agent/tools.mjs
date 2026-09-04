@@ -14,7 +14,9 @@ import { getPublicCurriculumFrameworks, resolveFramework, yearLabelFor } from '.
 import { retrieveCurriculum } from '../rag/retriever.mjs';
 import { studentLedger } from '../services/fees.mjs';
 
-const TEACHING_ROLES = ['admin', 'teacher'];
+// Imported rather than redeclared: an unknown role here yields an empty tool list, so the agent
+// answers with no tools and looks like a bad model rather than a permissions problem.
+import { TEACHING_ROLES } from '../auth/roles.mjs';
 
 const asJson = (value) => JSON.stringify(value, null, 2);
 

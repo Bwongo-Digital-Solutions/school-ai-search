@@ -1,0 +1,76 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../styles/vars' as *;
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  block-size: 100%;
+  overflow: hidden;
+  background-color: $ui-01;
+}
+
+.frameWrap {
+  flex: 1;
+  min-block-size: 0;
+  position: relative;
+  background: $ui-02;
+  border-block-start: 1px solid $ui-03;
+}
+
+.frame {
+  inline-size: 100%;
+  block-size: 100%;
+  border: none;
+  display: block;
+}
+
+// Shown when the system refuses to be framed, or is simply not answering.
+.fallback {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: layout.$spacing-05;
+  block-size: 100%;
+  padding: layout.$spacing-07;
+  text-align: center;
+}
+
+.fallbackTitle {
+  @include type.type-style('heading-04');
+  color: $text-01;
+  margin: 0;
+}
+
+.fallbackCopy {
+  @include type.type-style('body-01');
+  color: $text-02;
+  max-inline-size: 32rem;
+  margin: 0;
+}
+
+.address {
+  @include type.type-style('code-01');
+  color: $text-02;
+}
+
+:global(.cds--g100) {
+  .screen {
+    background-color: $ui-01-dark;
+  }
+
+  .frameWrap {
+    background: $ui-02-dark;
+    border-block-start-color: $ui-03-dark;
+  }
+
+  .fallbackTitle {
+    color: #f4f4f4;
+  }
+
+  .fallbackCopy,
+  .address {
+    color: $text-02-dark;
+  }
+}

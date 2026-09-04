@@ -6,3 +6,6 @@ dist/
 .env
 .env.local
 .meilisearch/
+
+# Wildcard TLS material for the nginx proxy profile — never committed.
+deploy/nginx/certs/*.pem

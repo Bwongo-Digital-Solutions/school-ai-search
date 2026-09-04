@@ -1,0 +1,79 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../../styles/vars' as *;
+
+// The syllabus passages a generated artefact came from.
+//
+// Shown wherever generated content is reviewed, because "which part of the syllabus is this from"
+// is the first question a head of department asks — and the answer is what separates a grounded
+// draft from a plausible-sounding invention. Quiet, but never hidden.
+.citations {
+  margin-block-start: layout.$spacing-05;
+}
+
+.citationsLabel {
+  @include type.type-style('label-01');
+  display: flex;
+  align-items: center;
+  gap: layout.$spacing-02;
+  color: $text-03;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin: 0 0 layout.$spacing-03;
+
+  svg {
+    fill: currentColor;
+  }
+}
+
+.citationList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: layout.$spacing-02;
+}
+
+.citation {
+  @include type.type-style('label-01');
+  display: flex;
+  gap: layout.$spacing-03;
+  color: $text-02;
+}
+
+.citationIndex {
+  color: var(--brand-01, #{$brand-01-fallback});
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.citationTitle {
+  font-weight: 600;
+  color: $text-01;
+}
+
+.citationSnippet {
+  display: block;
+  color: $text-03;
+  margin-block-start: layout.$spacing-01;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  display: -webkit-box;
+  overflow: hidden;
+}
+
+:global(.cds--g100) {
+  .citation {
+    color: $text-02-dark;
+  }
+
+  .citationTitle {
+    color: #f4f4f4;
+  }
+
+  .citationsLabel,
+  .citationSnippet {
+    color: $text-03-dark;
+  }
+}

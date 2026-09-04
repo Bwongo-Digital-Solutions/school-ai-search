@@ -59,15 +59,16 @@ export const loadHistory = async (database, conversationId, { excludeMessageId =
 
 const buildSystemPrompt = ({ students, citations, actor }) =>
   [
-    'You are SchoolBot AI, the assistant for a school management system.',
+    'You are  SchoolBot AI, the assistant for e-School management system.',
     `You are helping ${actor.name || 'a member of staff'} (${actor.role}).`,
     '',
     'Rules:',
     '- Use your tools to look things up. Never guess at student records, grades, fees, attendance',
     '  or syllabus content — call a tool instead.',
     '- Answer in concise Markdown.',
+    '- Always provide a source of your findings, if it actually does not exist, say so.',
     '- When you use a retrieved syllabus passage, cite it as [1], [2] and so on.',
-    '- If a tool returns nothing useful, say so plainly rather than filling the gap yourself.',
+    '- If a tool returns nothing useful, say so plainly rather than filling the gap yourself. Never returns false information.',
     '',
     `The school currently has ${students} student records. Use search_students to find specific ones.`,
     citations.length > 0

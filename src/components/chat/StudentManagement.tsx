@@ -1,14 +1,71 @@
-import React, { useState, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Search, Plus, Pencil, Trash2, X, ChevronUp, ChevronDown,
-  Save, AlertTriangle, Users, GraduationCap, ArrowUpDown, Filter,
-  Shield, Lock, Eye, FileText, Download, Loader2, Wallet, ScanLine, QrCode, Printer, ImagePlus, Palette
-} from 'lucide-react';
+  ActionableNotification,
+  Button,
+  Checkbox,
+  Dropdown,
+  Modal,
+  NumberInput,
+  InlineLoading,
+  InlineNotification,
+  Search,
+  Select,
+  SelectItem,
+  SelectableTag,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  Tag,
+  TextArea,
+  TextInput,
+} from '@carbon/react';
+import {
+  Add,
+  ArrowDown,
+  ArrowUp,
+  ArrowsVertical,
+  Calendar,
+  ChartLine,
+  Download,
+  CheckmarkFilled,
+  Edit as EditIcon,
+  Printer,
+  ScanAlt as ScanIcon,
+  TrashCan as TrashIcon,
+  UserAdmin,
+  UserMultiple,
+  View,
+  Wallet,
+} from '@carbon/react/icons';
+import { classAndSection, classFilterOptions, classLabel, classOptionsFor } from '@/lib/classLevels';
+import {
+  clubsApi, levelForGrade, requirementsApi,
+  type Club, type RequirementLevel, type StudentRequirement,
+} from '@/lib/schoolLife';
+import { useSettings } from '@/contexts/SettingsContext';
+import {
+  AccessDenied,
+  ColorPicker,
+  Field,
+  ImagePicker,
+  PageHeader,
+  StatRow,
+  StatTile,
+  StatTileSkeleton,
+  TablePager,
+  TableSkeleton,
+} from '@/components/common';
+import { usePagedRows } from '@/hooks/usePagedRows';
+import styles from './student-management.module.scss';
 import StudentIdScanner from './StudentIdScanner';
 import { buildApiUrl, supabase } from '@/lib/supabase';
 import { parseStudentCode } from '@/lib/studentCode';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useAuth } from '@/contexts/AuthContext';
+import { useNotifications } from '@/contexts/NotificationContext';
 import type { Student } from '@/types/chat';
 
 const EMPTY_STUDENT = {
@@ -97,9 +154,33 @@ const saveReportBranding = (branding: ReportBranding) => {
   }
 };
 
+/** The dropdown needs a real item to mean "no filter"; null reads as nothing selected. */
+const ALL_GRADES = 'all' as const;
+const GRADE_ALL_ITEMS: (typeof ALL_GRADES | number)[] = [ALL_GRADES];
+
+/** GPA and attendance colour bands, named once so the table markup does not carry the thresholds. */
+const gpaBand = (gpa: number) => (gpa >= 3.5 ? 'high' : gpa >= 3 ? 'good' : gpa >= 2.5 ? 'fair' : 'low');
+const attendanceBand = (rate: number) =>
+  rate >= 95 ? 'high' : rate >= 90 ? 'good' : rate >= 85 ? 'fair' : 'low';
+
 const getErrorMessage = (error: unknown) => (error instanceof Error ? error.message : 'Unknown error');
 
-const StudentField = ({ label, name, form, setForm, errors, type = 'text', required, options, min, max, step }: {
+// Twenty-five rows fills a laptop screen without scrolling the header away, and is small enough
+// that a phone renders a page instantly.
+const ROSTER_PAGE_SIZE = 25;
+
+/** Who a batch of ID cards is for. All four are optional; none of them means the whole school. */
+const emptyIdCardBatch = { grade: '', section: '', registeredFrom: '', registeredTo: '' };
+type IdCardBatch = typeof emptyIdCardBatch;
+
+/**
+ * One form field, on Carbon.
+ *
+ * Every field in the student form goes through here, so this is the whole form's appearance in one
+ * place: Carbon's inputs bring their own label, invalid state and helper-text slots, which is why
+ * the hand-built label and error paragraph below it are gone rather than restyled.
+ */
+const StudentField = ({ label, name, form, setForm, errors, type = 'text', required, options, numeric, min, max, step }: {
   label: string;
   name: keyof StudentFormState;
   form: StudentFormState;
@@ -108,54 +189,102 @@ const StudentField = ({ label, name, form, setForm, errors, type = 'text', requi
   type?: string;
   required?: boolean;
   options?: { value: string; label: string }[];
+  /** Store the chosen option as a number. `grade_level` is an integer column. */
+  numeric?: boolean;
   min?: number;
   max?: number;
   step?: number;
-}) => (
-  <div>
-    <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-      {label} {required && <span className="text-red-400">*</span>}
-    </label>
-    {options ? (
-      <select
+}) => {
+  const id = `student-${String(name)}`;
+  const invalid = Boolean(errors[name]);
+  const shared = { id, labelText: label, invalid, invalidText: errors[name] };
+
+  if (options) {
+    return (
+      <Select
+        {...shared}
         value={String(form[name])}
-        onChange={e => setForm(prev => ({ ...prev, [name]: e.target.value }))}
-        className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-200"
+        onChange={(event) =>
+          setForm((prev) => ({
+            ...prev,
+            [name]: numeric ? Number(event.target.value) : event.target.value,
+          }))
+        }
       >
-        {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-      </select>
-    ) : type === 'textarea' ? (
-      <textarea
-        value={String(form[name] ?? '')}
-        onChange={e => setForm(prev => ({ ...prev, [name]: e.target.value }))}
+        {options.map((option) => (
+          <SelectItem key={option.value} value={option.value} text={option.label} />
+        ))}
+      </Select>
+    );
+  }
+
+  if (type === 'textarea') {
+    return (
+      <TextArea
+        {...shared}
         rows={3}
-        className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-200 resize-none"
-      />
-    ) : (
-      <input
-        type={type}
         value={String(form[name] ?? '')}
-        onChange={e => setForm(prev => ({
-          ...prev,
-          [name]: type === 'number' ? (e.target.value === '' ? 0 : Number(e.target.value)) : e.target.value,
-        }))}
-        min={min} max={max} step={step}
-        className={`w-full bg-gray-50 dark:bg-gray-700 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-200 ${
-          errors[name] ? 'border-red-300 dark:border-red-600' : 'border-gray-200 dark:border-gray-600'
-        }`}
+        onChange={(event) =>
+          setForm((prev) => ({
+            ...prev,
+            [name]: numeric ? Number(event.target.value) : event.target.value,
+          }))
+        }
       />
-    )}
-    {errors[name] && <p className="text-[10px] text-red-500 mt-0.5">{errors[name]}</p>}
-  </div>
-);
+    );
+  }
+
+  if (type === 'number') {
+    // Carbon's NumberInput owns the increment/decrement affordances and the min/max clamp, which
+    // the plain input had to leave to the browser.
+    return (
+      <NumberInput
+        {...shared}
+        value={Number(form[name] ?? 0)}
+        min={min}
+        max={max}
+        step={step}
+        hideSteppers={step === undefined}
+        onChange={(_event, { value }) =>
+          setForm((prev) => ({ ...prev, [name]: value === '' ? 0 : Number(value) }))
+        }
+      />
+    );
+  }
+
+  return (
+    <TextInput
+      {...shared}
+      type={type}
+      value={String(form[name] ?? '')}
+      onChange={(event) => setForm((prev) => ({ ...prev, [name]: event.target.value }))}
+      required={required}
+    />
+  );
+};
 
 const StudentManagement: React.FC = () => {
-  const { students, refreshStudents } = useChatContext();
+  const { notify } = useNotifications();
+  const { settings } = useSettings();
+
+  const { students, studentsLoading, studentsError, refreshStudents, focus, clearFocus } = useChatContext();
   const { user, isAuthenticated, isAdmin, isSupportStaff, logAudit } = useAuth();
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('last_name');
   const [sortAsc, setSortAsc] = useState(true);
   const [gradeFilter, setGradeFilter] = useState<number | null>(null);
+
+  // Arrived here from global search: filter the roster down to the student that was picked, so the
+  // row is the only one on screen rather than one of four hundred.
+  useEffect(() => {
+    if (focus?.view !== 'students' || !focus.studentId) return;
+    const student = students.find(entry => entry.id === focus.studentId);
+    if (!student) return;
+    setSearch(student.student_id);
+    setGradeFilter(null);
+    clearFocus();
+  }, [focus, students, clearFocus]);
+
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState(EMPTY_STUDENT);
@@ -163,6 +292,15 @@ const StudentManagement: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [subjectInput, setSubjectInput] = useState('');
+
+  /* Clubs and requirements are recorded against a student, not columns on the students row, so they
+     are held apart from `form` and written after the save. See handleSave. */
+  const [clubCatalogue, setClubCatalogue] = useState<Club[]>([]);
+  const [chosenClubs, setChosenClubs] = useState<string[]>([]);
+  const [requirementList, setRequirementList] = useState<StudentRequirement[]>([]);
+  const [broughtItems, setBroughtItems] = useState<string[]>([]);
+  const [requirementLevel, setRequirementLevel] = useState<RequirementLevel | null>(null);
+
   const [reportCardStudent, setReportCardStudent] = useState<Student | null>(null);
   const [reportCardTerm, setReportCardTerm] = useState('Term 1');
   const [reportCardYear, setReportCardYear] = useState(getDefaultAcademicYear());
@@ -182,6 +320,7 @@ const StudentManagement: React.FC = () => {
   const [reportCardPhoto, setReportCardPhoto] = useState('');
   const [scannerOpen, setScannerOpen] = useState(false);
   const [idCardStudent, setIdCardStudent] = useState<Student | null>(null);
+  const [idCardBatch, setIdCardBatch] = useState<IdCardBatch | null>(null);
 
   const canEdit = isAdmin;
   // Support staff are limited to the school fees payment status view.
@@ -214,9 +353,15 @@ const StudentManagement: React.FC = () => {
     else { setSortKey(key); setSortAsc(true); }
   };
 
+  // Which way a column is sorted. Grey arrows on the columns you could sort by, the school's
+  // colour on the one you are sorting by.
   const SortIcon = ({ col }: { col: SortKey }) => {
-    if (sortKey !== col) return <ArrowUpDown className="w-3 h-3 text-gray-300" />;
-    return sortAsc ? <ChevronUp className="w-3 h-3 text-indigo-500" /> : <ChevronDown className="w-3 h-3 text-indigo-500" />;
+    if (sortKey !== col) return <ArrowsVertical size={16} className={styles.sortIdle} />;
+    return sortAsc ? (
+      <ArrowUp size={16} className={styles.sortActive} />
+    ) : (
+      <ArrowDown size={16} className={styles.sortActive} />
+    );
   };
 
   const validate = () => {
@@ -224,7 +369,7 @@ const StudentManagement: React.FC = () => {
     if (!form.first_name.trim()) e.first_name = 'Required';
     if (!form.last_name.trim()) e.last_name = 'Required';
     if (!form.student_id.trim()) e.student_id = 'Required';
-    if (form.grade_level < 0 || form.grade_level > 20) e.grade_level = 'Must be 0-20';
+    if (!Number.isFinite(Number(form.grade_level))) e.grade_level = 'Choose a class';
     if (form.gpa < 0 || form.gpa > 4) e.gpa = 'Must be 0-4';
     if (form.attendance_rate < 0 || form.attendance_rate > 100) e.attendance_rate = 'Must be 0-100';
     if (form.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) e.email = 'Invalid email';
@@ -235,12 +380,84 @@ const StudentManagement: React.FC = () => {
     return Object.keys(e).length === 0;
   };
 
+  /**
+   * The clubs on offer, and what this student's class is asked to bring.
+   *
+   * Fetched when the form opens and again whenever the class changes, because the class is what
+   * decides the list — moving a child from P4 to P7 changes what they are expected to bring, and a
+   * stale list would have the desk ticking off the wrong items.
+   */
+  const loadSchoolLife = useCallback(async (studentId: string | null, gradeLevel: number) => {
+    try {
+      setClubCatalogue((await clubsApi.list()).clubs);
+    } catch (err) {
+      console.error('Could not load the clubs:', err);
+      setClubCatalogue([]);
+    }
+
+    try {
+      if (studentId) {
+        // An existing student has answers already recorded; show those rather than a blank list.
+        const [mine, list] = await Promise.all([
+          clubsApi.forStudent(studentId),
+          requirementsApi.forStudent(studentId),
+        ]);
+        setChosenClubs(mine.clubs.map(club => club.club_id));
+        setRequirementList(list.items);
+        setRequirementLevel(list.level);
+        setBroughtItems(list.items.filter(item => item.status === 'brought').map(item => item.requirement_id));
+        return;
+      }
+
+      /* A student who does not exist yet has no list of their own, so the catalogue is filtered to
+         the class being typed. `levelForGrade` mirrors the server's own banding; the server still
+         decides what is actually written once the student has an id. */
+      const level = levelForGrade(gradeLevel);
+      setRequirementLevel(level);
+      setBroughtItems([]);
+      if (!level) {
+        setRequirementList([]);
+        return;
+      }
+      const catalogue = await requirementsApi.catalogue(level);
+      setRequirementList(
+        catalogue.items
+          // Boarding items are not offered before there is a bed to attach them to.
+          .filter(item => !item.boarding_only)
+          .filter(item => item.grade_level === null || Number(item.grade_level) === Number(gradeLevel))
+          .map(item => ({
+            requirement_id: item.id,
+            item_name: item.item_name,
+            category: item.category,
+            unit: item.unit,
+            quantity: item.quantity,
+            mandatory: item.mandatory,
+            boarding_only: item.boarding_only,
+            notes: item.notes,
+            status: 'pending' as const,
+            quantity_expected: item.quantity,
+            quantity_brought: 0,
+            note: '',
+            recorded_by: '',
+            recorded_at: null,
+          })),
+      );
+    } catch (err) {
+      console.error('Could not load the requirements:', err);
+      setRequirementList([]);
+      setRequirementLevel(null);
+    }
+  }, []);
+
   const openAdd = () => {
     if (!canEdit) return;
-    setForm({ ...EMPTY_STUDENT, student_id: `STU-${new Date().getFullYear()}-${String(students.length + 1).padStart(3, '0')}` });
+    const fresh = { ...EMPTY_STUDENT, student_id: `STU-${new Date().getFullYear()}-${String(students.length + 1).padStart(3, '0')}` };
+    setForm(fresh);
     setEditingId(null);
     setErrors({});
     setSubjectInput('');
+    setChosenClubs([]);
+    loadSchoolLife(null, fresh.grade_level);
     setShowForm(true);
   };
 
@@ -260,28 +477,81 @@ const StudentManagement: React.FC = () => {
     setEditingId(s.id);
     setErrors({});
     setSubjectInput('');
+    loadSchoolLife(s.id, s.grade_level);
     setShowForm(true);
   };
+
+  /**
+   * Clubs and requirements, written once the student row exists.
+   *
+   * They are separate calls rather than fields on the insert because they are separate tables, and
+   * this form writes to `students` directly through the data shim. Neither may undo a save: the
+   * child is enrolled by the time we get here, so a club that filled up while the form was open is
+   * a notification for the desk, not a failure. That mirrors what the server does when a phone
+   * registers a student through /api/functions/student-registry.
+   */
+  const saveSchoolLife = async (studentId: string) => {
+    const problems: string[] = [];
+
+    for (const clubId of chosenClubs) {
+      try {
+        await clubsApi.join(clubId, studentId);
+      } catch (err) {
+        const name = clubCatalogue.find(club => club.id === clubId)?.name || 'A club';
+        problems.push(err instanceof Error ? err.message : `${name} could not be joined`);
+      }
+    }
+
+    try {
+      // Writes the whole applicable list, so a student who brought nothing still reads as owing it
+      // rather than as having no requirements at all.
+      await requirementsApi.assign(studentId, broughtItems);
+    } catch (err) {
+      console.error('Could not record requirements:', err);
+      problems.push('The requirements list could not be recorded.');
+    }
+
+    if (problems.length) {
+      notify.warning('The student was saved, with exceptions', problems.join(' '));
+    }
+  };
+
+  /* The class decides the list, so changing it in the form has to change the list under it. Only
+     for a new student: an existing one already has recorded answers, and silently rebuilding their
+     list from the catalogue would throw away what somebody already ticked. */
+  useEffect(() => {
+    if (!showForm || editingId) return;
+    loadSchoolLife(null, form.grade_level);
+  }, [showForm, editingId, form.grade_level, loadSchoolLife]);
 
   const handleSave = async () => {
     if (!canEdit || !validate()) return;
     setSaving(true);
     try {
       const payload = { ...form, subjects: form.subjects };
+      let studentId = editingId;
       if (editingId) {
         const { error } = await supabase.from('students').update(payload).eq('id', editingId);
         if (error) throw error;
         await logAudit('update', editingId, `${form.first_name} ${form.last_name}`, payload);
       } else {
-        const { data: newStudent, error } = await supabase.from('students').insert(payload).select('id').single();
+        // `from` is generic; naming the row shape is what lets the new id be read back. Without it
+        // the builder hands back `unknown` and this line does not compile.
+        const { data: newStudent, error } = await supabase
+          .from<{ id: string }>('students')
+          .insert(payload)
+          .select('id')
+          .single();
         if (error) throw error;
+        studentId = newStudent?.id ?? null;
         await logAudit('create', newStudent?.id, `${form.first_name} ${form.last_name}`, payload);
       }
+      if (studentId) await saveSchoolLife(studentId);
       await refreshStudents();
       setShowForm(false);
     } catch (err: unknown) {
       console.error('Save failed:', err);
-      alert('Failed to save student: ' + getErrorMessage(err));
+      notify.error('Could not save the student', getErrorMessage(err));
     } finally {
       setSaving(false);
     }
@@ -303,7 +573,7 @@ const StudentManagement: React.FC = () => {
       setDeleteConfirm(null);
     } catch (err: unknown) {
       console.error('Delete failed:', err);
-      alert('Failed to delete student: ' + getErrorMessage(err));
+      notify.error('Could not delete the student', getErrorMessage(err));
     }
   };
 
@@ -350,7 +620,7 @@ const StudentManagement: React.FC = () => {
     try {
       setter(await readFileAsDataUrl(file));
     } catch (err: unknown) {
-      alert(getErrorMessage(err) || 'Could not read the selected image.');
+      notify.error('Could not read that image', getErrorMessage(err) || undefined);
     }
   };
 
@@ -415,7 +685,7 @@ const StudentManagement: React.FC = () => {
       setReportCardStudent(null);
     } catch (err: unknown) {
       console.error('Report card download failed:', err);
-      alert(getErrorMessage(err) || 'Failed to build report card.');
+      notify.error('Could not build the report card', getErrorMessage(err) || undefined);
     } finally {
       setIsBuildingReport(false);
     }
@@ -436,346 +706,486 @@ const StudentManagement: React.FC = () => {
       URL.revokeObjectURL(url);
     } catch (err: unknown) {
       console.error('ID card download failed:', err);
-      alert(getErrorMessage(err) || 'Failed to build ID cards.');
+      notify.error('Could not build the ID cards', getErrorMessage(err) || undefined);
     }
   };
 
-  const grades = Array.from(new Set([...students.map(s => s.grade_level), 9, 10, 11, 12])).sort((a, b) => a - b);
+  // A page at a time. A school of four hundred rendered four hundred rows, each with its subject
+  // tags and its row of buttons — the roster was by a wide margin the heaviest screen in the app.
+  const { page, setPage, pageCount, pageRows, firstOnPage, lastOnPage } = usePagedRows(filtered, ROSTER_PAGE_SIZE);
+
+  // The school's own classes, plus any class a student is actually in that the level does not
+  // list — so changing the level never makes a student unreachable through the filter.
+  const grades = classFilterOptions(settings.school_level, students.map(s => s.grade_level));
+
+  // The streams that actually exist, rather than an alphabet the school may not use.
+  const idCardSections = Array.from(
+    new Set(students.map(s => s.class_section).filter((section): section is string => Boolean(section))),
+  ).sort();
+
+  /**
+   * The same selection the server will make, applied to the roster already in hand.
+   *
+   * Only so the dialog can say how many cards and how many sheets before anything is printed — the
+   * server re-runs the criteria in SQL and is the one that decides. A count that is briefly stale
+   * is a much smaller problem than four hundred cards printed on a guess.
+   */
+  const idCardMatches = !idCardBatch
+    ? []
+    : students.filter(student => {
+        if (idCardBatch.grade && student.grade_level !== Number(idCardBatch.grade)) return false;
+        if (idCardBatch.section && student.class_section !== idCardBatch.section) return false;
+        // Matching the server: no enrolment date means no match for any range.
+        const enrolled = student.enrollment_date ? String(student.enrollment_date).slice(0, 10) : '';
+        if (idCardBatch.registeredFrom && (!enrolled || enrolled < idCardBatch.registeredFrom)) return false;
+        if (idCardBatch.registeredTo && (!enrolled || enrolled > idCardBatch.registeredTo)) return false;
+        return true;
+      });
+
+  // How many would be excluded by a date range purely for want of a date — worth saying, because
+  // otherwise they simply are not in the batch and nobody finds out until the cards are handed out.
+  const undatedCount = !idCardBatch
+    ? 0
+    : students.filter(student => {
+        if (idCardBatch.grade && student.grade_level !== Number(idCardBatch.grade)) return false;
+        if (idCardBatch.section && student.class_section !== idCardBatch.section) return false;
+        return !student.enrollment_date;
+      }).length;
+
   const avgGpa = students.length ? (students.reduce((s, st) => s + (st.gpa || 0), 0) / students.length).toFixed(2) : '0';
   const avgAtt = students.length ? (students.reduce((s, st) => s + (st.attendance_rate || 0), 0) / students.length).toFixed(1) : '0';
 
   // Not authenticated, or a support staff account that may only see fees status
   if (!canView) {
     return (
-      <div className="flex flex-col items-center justify-center h-full bg-gradient-to-b from-gray-50/50 to-white dark:from-gray-900/50 dark:to-gray-900 p-8">
-        <div className="max-w-md text-center">
-          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-indigo-100 to-purple-100 dark:from-indigo-900/30 dark:to-purple-900/30 flex items-center justify-center mx-auto mb-4">
-            <Lock className="w-8 h-8 text-indigo-500" />
-          </div>
-          <h2 className="text-xl font-bold text-gray-800 dark:text-white mb-2">
-            {isSupportStaff ? 'Restricted to Teachers and Admins' : 'Authentication Required'}
-          </h2>
-          <p className="text-sm text-gray-500 dark:text-gray-400 mb-6">
-            {isSupportStaff
-              ? 'Support staff accounts can only view school fees payment status. Student records are available to teachers and administrators.'
-              : 'You need to sign in to access the Student Management panel. Please use the Sign In button in the header to continue.'}
-          </p>
-          {!isSupportStaff && (
-            <>
-              <div className="flex items-center justify-center gap-4 text-xs text-gray-400">
-                <div className="flex items-center gap-1.5">
-                  <Shield className="w-3.5 h-3.5 text-purple-500" />
-                  <span><strong>Admin</strong> — Full access (add, edit, delete)</span>
-                </div>
-              </div>
-              <div className="flex items-center justify-center gap-4 text-xs text-gray-400 mt-2">
-                <div className="flex items-center gap-1.5">
-                  <Eye className="w-3.5 h-3.5 text-blue-500" />
-                  <span><strong>Teacher</strong> — View-only access</span>
-                </div>
-              </div>
-              <div className="flex items-center justify-center gap-4 text-xs text-gray-400 mt-2">
-                <div className="flex items-center gap-1.5">
-                  <Wallet className="w-3.5 h-3.5 text-emerald-500" />
-                  <span><strong>Support Staff</strong> — Fees payment status only</span>
-                </div>
-              </div>
-            </>
-          )}
-        </div>
-      </div>
+      <AccessDenied
+        title={isSupportStaff ? 'Restricted to teachers and administrators' : 'Sign in to continue'}
+        message={
+          isSupportStaff
+            ? 'Support staff accounts can only see school fees payment status. Student records are available to teachers and administrators.'
+            : 'You need to sign in to open student management. Use the sign-in button in the header.'
+        }
+        roles={
+          isSupportStaff
+            ? undefined
+            : [
+                { icon: UserAdmin, name: 'Administrator', access: 'full access — add, edit and delete' },
+                { icon: View, name: 'Teacher', access: 'view only' },
+                { icon: Wallet, name: 'Support staff', access: 'fees payment status only' },
+              ]
+        }
+      />
     );
   }
 
+  // Named once, so the header row and the skeleton that stands in for it cannot disagree about how
+  // many columns there are or what they are called.
+  const columns = ([
+    ['Student ID', null],
+    ['Name', 'last_name'],
+    ['Grade', 'grade_level'],
+    ['GPA', 'gpa'],
+    ['Attendance', 'attendance_rate'],
+    ['Status', 'status'],
+    ['Subjects', null],
+    ...(canView ? [['Documents', null]] : []),
+    ...(canEdit ? [['Actions', null]] : []),
+  ] as [string, SortKey | null][]);
+
+  // The roster arrives from ChatContext, which mounts above the sign-in screen — so an empty list
+  // means "not yet" far more often than it means "no students".
+  const rosterPending = studentsLoading && students.length === 0;
+
   return (
-    <div className="flex flex-col h-full bg-gradient-to-b from-gray-50/50 to-white dark:from-gray-900/50 dark:to-gray-900">
-      {/* Top Stats */}
-      <div className="px-6 pt-6 pb-4 border-b border-gray-100 dark:border-gray-800">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h2 className="text-xl font-bold text-gray-800 dark:text-white flex items-center gap-2">
-              <Users className="w-6 h-6 text-indigo-500" />
-              Student Management
-            </h2>
-            <div className="flex items-center gap-2 mt-0.5">
-              <p className="text-xs text-gray-400">Manage student records — changes sync with AI assistant automatically</p>
-              {isViewOnly && (
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-800">
-                  <Eye className="w-2.5 h-2.5" /> View Only
-                </span>
-              )}
-              {isAdmin && (
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-purple-50 dark:bg-purple-900/20 text-purple-600 dark:text-purple-400 border border-purple-200 dark:border-purple-800">
-                  <Shield className="w-2.5 h-2.5" /> Full Access
-                </span>
-              )}
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() =>
-                downloadIdCards(
-                  `/api/id-cards.pdf?layout=a4${gradeFilter !== null ? `&grade=${gradeFilter}` : ''}`,
-                  `student-id-cards${gradeFilter !== null ? `-grade-${gradeFilter}` : ''}.pdf`,
-                )
-              }
-              title="Print QR ID cards for the current grade filter, ten per A4 sheet"
-              className="flex items-center gap-2 rounded-xl border border-gray-200 dark:border-gray-700 px-4 py-2.5 text-sm font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
-            >
-              <Printer className="w-4 h-4 text-emerald-500" />
-              Print ID Cards
-            </button>
-            {canEdit && (
-              <button
-                onClick={openAdd}
-                className="flex items-center gap-2 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-xl px-4 py-2.5 text-sm font-medium hover:shadow-lg hover:shadow-indigo-200 dark:hover:shadow-indigo-900/30 transition-all hover:scale-[1.02]"
-              >
-                <Plus className="w-4 h-4" /> Add Student
-              </button>
-            )}
-          </div>
-        </div>
+    <div className={styles.screen}>
+      <PageHeader title="Student management" illustration={<UserMultiple size={32} />}>
+        {isViewOnly && <Tag type="warm-gray" size="sm" renderIcon={View}>View only</Tag>}
+        {isAdmin && <Tag type="blue" size="sm" renderIcon={UserAdmin}>Full access</Tag>}
+        <Button
+          kind="ghost"
+          size="sm"
+          renderIcon={Printer}
+          onClick={() => setIdCardBatch({ ...emptyIdCardBatch, grade: gradeFilter === null ? '' : String(gradeFilter) })}
+          title="Print QR ID cards, ten per A4 sheet, for a class or an intake"
+        >
+          Print ID cards
+        </Button>
+        {canEdit && (
+          <Button kind="primary" size="sm" renderIcon={Add} onClick={openAdd}>
+            Add student
+          </Button>
+        )}
+      </PageHeader>
 
-        {/* Stats cards */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
-          <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-100 dark:border-gray-700 p-3">
-            <p className="text-[10px] text-gray-400 uppercase tracking-wider">Total Students</p>
-            <p className="text-2xl font-bold text-indigo-600">{students.length}</p>
-          </div>
-          <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-100 dark:border-gray-700 p-3">
-            <p className="text-[10px] text-gray-400 uppercase tracking-wider">Avg GPA</p>
-            <p className="text-2xl font-bold text-emerald-600">{avgGpa}</p>
-          </div>
-          <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-100 dark:border-gray-700 p-3">
-            <p className="text-[10px] text-gray-400 uppercase tracking-wider">Avg Attendance</p>
-            <p className="text-2xl font-bold text-purple-600">{avgAtt}%</p>
-          </div>
-          <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-100 dark:border-gray-700 p-3">
-            <p className="text-[10px] text-gray-400 uppercase tracking-wider">Active</p>
-            <p className="text-2xl font-bold text-blue-600">{students.filter(s => s.status === 'active').length}</p>
-          </div>
-        </div>
+      {studentsError && (
+        <ActionableNotification
+          inline
+          kind="error"
+          title="The student list could not be loaded"
+          subtitle={`${studentsError}. This is not an empty school — the records are there, they did not arrive.`}
+          lowContrast
+          actionButtonLabel="Try again"
+          onActionButtonClick={refreshStudents}
+        />
+      )}
 
-        {/* Search & Filter bar */}
-        <div className="flex flex-wrap gap-2">
-          <div className="relative flex-1 min-w-[200px]">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-            <input
-              type="text"
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder="Search by name, ID, or email..."
-              className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg pl-10 pr-3 py-2 text-sm focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-200"
-            />
-          </div>
-          <button
-            onClick={() => setScannerOpen(true)}
-            title="Scan a student ID card"
-            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
-          >
-            <ScanLine className="w-4 h-4 text-indigo-500" />
+      <div className={styles.controls}>
+        <StatRow>
+          {rosterPending ? (
+            // Four zeroes would be four confident, wrong figures. A skeleton says the same thing
+            // honestly, and keeps the band's height so nothing moves when the numbers land.
+            <>
+              <StatTileSkeleton />
+              <StatTileSkeleton />
+              <StatTileSkeleton />
+              <StatTileSkeleton />
+            </>
+          ) : (
+            <>
+              <StatTile label="Students" value={students.length} icon={UserMultiple} />
+              <StatTile label="Average GPA" value={avgGpa} icon={ChartLine} tone="success" />
+              <StatTile label="Average attendance" value={`${avgAtt}%`} icon={Calendar} />
+              <StatTile
+                label="Active"
+                value={students.filter(s => s.status === 'active').length}
+                icon={CheckmarkFilled}
+                tone="success"
+              />
+            </>
+          )}
+        </StatRow>
+
+        {/* Search and filters */}
+        <div className={styles.toolbar}>
+          <Search
+            id="student-search"
+            labelText="Search students"
+            placeholder="Search by name, ID, or email…"
+            size="lg"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            onClear={() => setSearch('')}
+          />
+
+          <Button kind="tertiary" size="lg" renderIcon={ScanIcon} onClick={() => setScannerOpen(true)}>
             Scan ID
-          </button>
-          <div className="flex items-center gap-1">
-            <Filter className="w-4 h-4 text-gray-400" />
-            <button
-              onClick={() => setGradeFilter(null)}
-              className={`px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
-                gradeFilter === null ? 'bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600' : 'bg-white dark:bg-gray-800 text-gray-500 border border-gray-200 dark:border-gray-700 hover:bg-gray-50'
-              }`}
-            >All</button>
-            {grades.map(g => (
-              <button
-                key={g}
-                onClick={() => setGradeFilter(gradeFilter === g ? null : g)}
-                className={`px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
-                  gradeFilter === g ? 'bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600' : 'bg-white dark:bg-gray-800 text-gray-500 border border-gray-200 dark:border-gray-700 hover:bg-gray-50'
-                }`}
-              >G{g}</button>
-            ))}
-          </div>
+          </Button>
+
+          {/* One grade at a time, which is what the row of buttons did.
+
+              A Dropdown rather than a ContentSwitcher: the switcher is built for a fixed handful of
+              options — it types its children as a single element and keeps its own selection state —
+              whereas the grade list is whatever grades the school actually has, and is driven from
+              gradeFilter. */}
+          <Dropdown
+            id="grade-filter"
+            className={styles.grades}
+            size="lg"
+            titleText="Grade"
+            hideLabel
+            label="All classes"
+            items={GRADE_ALL_ITEMS.concat(grades.map(option => option.value))}
+            selectedItem={gradeFilter === null ? ALL_GRADES : gradeFilter}
+            itemToString={(item) =>
+              item === ALL_GRADES || item === null
+                ? 'All classes'
+                : classLabel(settings.school_level, Number(item))
+            }
+            onChange={({ selectedItem }) =>
+              setGradeFilter(selectedItem === ALL_GRADES || selectedItem == null ? null : Number(selectedItem))
+            }
+          />
         </div>
       </div>
 
-      {/* Table */}
-      <div className="flex-1 overflow-auto px-6 py-4">
-        <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-100 dark:border-gray-700 overflow-hidden shadow-sm">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-gray-50 dark:bg-gray-750 border-b border-gray-100 dark:border-gray-700">
-                {([
-                  ['Student ID', null],
-                  ['Name', 'last_name'],
-                  ['Grade', 'grade_level'],
-                  ['GPA', 'gpa'],
-                  ['Attendance', 'attendance_rate'],
-                  ['Status', 'status'],
-                  ['Subjects', null],
-                  ...(canView ? [['Report Card', null]] : []),
-                  ...(canEdit ? [['Actions', null]] : []),
-                ] as [string, SortKey | null][]).map(([label, key]) => (
-                  <th
-                    key={label}
-                    onClick={key ? () => handleSort(key) : undefined}
-                    className={`px-4 py-3 text-left text-[10px] font-semibold uppercase tracking-wider text-gray-500 ${key ? 'cursor-pointer hover:text-indigo-600 select-none' : ''}`}
-                  >
-                    <span className="flex items-center gap-1">
-                      {label}
-                      {key && <SortIcon col={key} />}
+      {/* The roster.
+
+          Carbon's Table primitives rather than its DataTable: this component already owns search,
+          the grade filter and sorting, and DataTable wants to own all three through a render prop.
+          Handing them over would be a rewrite of working behaviour for no visible gain, so the
+          markup becomes Carbon and the logic stays put. */}
+      <div className={styles.tableWrap}>
+        {rosterPending ? (
+          <TableSkeleton
+            rowCount={ROSTER_PAGE_SIZE}
+            columnLabels={columns.map(([label]) => label)}
+            size="lg"
+          />
+        ) : (
+        <Table size="lg" useZebraStyles={false}>
+          <TableHead>
+            <TableRow>
+              {columns.map(([label, key]) => (
+                <TableHeader
+                  key={label}
+                  isSortable={Boolean(key)}
+                  isSortHeader={Boolean(key) && sortKey === key}
+                  sortDirection={sortAsc ? 'ASC' : 'DESC'}
+                  onClick={key ? () => handleSort(key) : undefined}
+                >
+                  {label}
+                </TableHeader>
+              ))}
+            </TableRow>
+          </TableHead>
+
+          <TableBody>
+            {filtered.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={7 + (canView ? 1 : 0) + (canEdit ? 1 : 0)}>
+                  <div className={styles.empty}>No students match this search.</div>
+                </TableCell>
+              </TableRow>
+            ) : (
+              pageRows.map((s) => (
+                <TableRow key={s.id}>
+                  <TableCell className={styles.mono}>{s.student_id}</TableCell>
+
+                  <TableCell>
+                    <div className={styles.name}>{s.first_name} {s.last_name}</div>
+                    <div className={styles.sub}>{s.email}</div>
+                  </TableCell>
+
+                  <TableCell>
+                    <Tag type="cool-gray" size="sm">
+                      {classAndSection(settings.school_level, s.grade_level, s.class_section)}
+                    </Tag>
+                  </TableCell>
+
+                  <TableCell>
+                    <span className={styles.gpa} data-band={gpaBand(s.gpa)}>
+                      {Number(s.gpa).toFixed(2)}
                     </span>
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-50 dark:divide-gray-700">
-              {filtered.length === 0 ? (
-                <tr>
-                  <td colSpan={7 + (canView ? 1 : 0) + (canEdit ? 1 : 0)} className="text-center py-12 text-gray-400">
-                    <Users className="w-10 h-10 mx-auto mb-2 text-gray-200" />
-                    <p className="text-sm">No students found</p>
-                  </td>
-                </tr>
-              ) : filtered.map(s => (
-                <tr key={s.id} className="hover:bg-gray-50 dark:hover:bg-gray-750 transition-colors group">
-                  <td className="px-4 py-3 text-xs font-mono text-gray-500">{s.student_id}</td>
-                  <td className="px-4 py-3">
-                    <div>
-                      <p className="font-medium text-gray-800 dark:text-white">{s.first_name} {s.last_name}</p>
-                      <p className="text-[10px] text-gray-400">{s.email}</p>
+                  </TableCell>
+
+                  <TableCell>
+                    <div className={styles.meterRow}>
+                      <span className={styles.meter} data-band={attendanceBand(s.attendance_rate)}>
+                        <span style={{ width: `${s.attendance_rate}%` }} />
+                      </span>
+                      {Number(s.attendance_rate).toFixed(1)}%
                     </div>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className="inline-flex items-center gap-1 bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 rounded-full px-2 py-0.5 text-xs font-medium">
-                      <GraduationCap className="w-3 h-3" /> {s.grade_level}-{s.class_section}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className={`font-semibold text-xs ${
-                      s.gpa >= 3.5 ? 'text-emerald-600' : s.gpa >= 3.0 ? 'text-blue-600' : s.gpa >= 2.5 ? 'text-amber-600' : 'text-red-500'
-                    }`}>{Number(s.gpa).toFixed(2)}</span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-2">
-                      <div className="w-16 h-1.5 bg-gray-100 dark:bg-gray-700 rounded-full overflow-hidden">
-                        <div
-                          className={`h-full rounded-full ${
-                            s.attendance_rate >= 95 ? 'bg-emerald-500' : s.attendance_rate >= 90 ? 'bg-blue-500' : s.attendance_rate >= 85 ? 'bg-amber-500' : 'bg-red-500'
-                          }`}
-                          style={{ width: `${s.attendance_rate}%` }}
-                        />
-                      </div>
-                      <span className="text-xs text-gray-500">{Number(s.attendance_rate).toFixed(1)}%</span>
-                    </div>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${
-                      s.status === 'active' ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400' : 'bg-gray-100 text-gray-500'
-                    }`}>{s.status}</span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex flex-wrap gap-1 max-w-[180px]">
-                      {(Array.isArray(s.subjects) ? s.subjects : []).slice(0, 3).map((sub, i) => (
-                        <span key={i} className="bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 rounded px-1.5 py-0.5 text-[10px]">{sub}</span>
+                  </TableCell>
+
+                  <TableCell>
+                    <Tag type={s.status === 'active' ? 'green' : 'gray'} size="sm">{s.status}</Tag>
+                  </TableCell>
+
+                  <TableCell>
+                    <div className={styles.subjects}>
+                      {(Array.isArray(s.subjects) ? s.subjects : []).slice(0, 3).map((sub, index) => (
+                        <Tag key={index} type="outline" size="sm">{sub}</Tag>
                       ))}
                       {(Array.isArray(s.subjects) ? s.subjects : []).length > 3 && (
-                        <span className="text-[10px] text-gray-400">+{s.subjects.length - 3}</span>
+                        <span className={styles.sub}>+{s.subjects.length - 3}</span>
                       )}
                     </div>
-                  </td>
+                  </TableCell>
+
                   {canView && (
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          onClick={() => openReportCardBuilder(s)}
-                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-indigo-200 dark:border-indigo-800 text-[11px] font-medium text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 transition-colors"
-                          title="Build report card PDF"
-                        >
-                          <FileText className="w-3.5 h-3.5" />
-                          PDF
-                        </button>
-                        <button
-                          onClick={() => setIdCardStudent(s)}
-                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-emerald-200 dark:border-emerald-800 text-[11px] font-medium text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 transition-colors"
-                          title="Preview and print the QR ID card"
-                        >
-                          <QrCode className="w-3.5 h-3.5" />
-                          ID
-                        </button>
+                    <TableCell>
+                      <div className={styles.rowActions}>
+                        <Button kind="ghost" size="sm" onClick={() => openReportCardBuilder(s)}>
+                          Report card
+                        </Button>
+                        <Button kind="ghost" size="sm" onClick={() => setIdCardStudent(s)}>
+                          ID card
+                        </Button>
                       </div>
-                    </td>
+                    </TableCell>
                   )}
+
                   {canEdit && (
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button onClick={() => openEdit(s)} className="p-1.5 rounded-lg hover:bg-indigo-50 dark:hover:bg-indigo-900/20 text-gray-400 hover:text-indigo-600 transition-colors" title="Edit">
-                          <Pencil className="w-3.5 h-3.5" />
-                        </button>
-                        <button onClick={() => setDeleteConfirm(s.id)} className="p-1.5 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 text-gray-400 hover:text-red-500 transition-colors" title="Delete">
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                    <TableCell>
+                      <div className={styles.rowActions}>
+                        <Button
+                          hasIconOnly
+                          kind="ghost"
+                          size="sm"
+                          renderIcon={EditIcon}
+                          iconDescription="Edit"
+                          tooltipPosition="left"
+                          onClick={() => openEdit(s)}
+                        />
+                        <Button
+                          hasIconOnly
+                          kind="danger--ghost"
+                          size="sm"
+                          renderIcon={TrashIcon}
+                          iconDescription="Delete"
+                          tooltipPosition="left"
+                          onClick={() => setDeleteConfirm(s.id)}
+                        />
                       </div>
-                    </td>
+                    </TableCell>
                   )}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <p className="text-[10px] text-gray-400 mt-2 px-1">
-          Showing {filtered.length} of {students.length} students
-          {isViewOnly && ' (view-only mode)'}
-          {isAdmin && ' (admin mode)'}
-        </p>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+        )}
+
+        {/* Held back while the roster is pending: "0 students" under a skeleton is the same false
+            certainty the skeleton is there to avoid. */}
+        {!rosterPending && (
+          <div className={styles.tableFoot}>
+            <span>
+              {filtered.length === students.length
+                ? `${students.length} student${students.length === 1 ? '' : 's'}`
+                : `${filtered.length} of ${students.length} students match`}
+              {isViewOnly && ' (view-only mode)'}
+              {isAdmin && ' (admin mode)'}
+            </span>
+            <TablePager
+              page={page}
+              pageCount={pageCount}
+              onPageChange={setPage}
+              firstOnPage={firstOnPage}
+              lastOnPage={lastOnPage}
+              total={filtered.length}
+              noun="student"
+            />
+          </div>
+        )}
       </div>
 
-      {/* ID Card Preview */}
+      {/* The QR code on a student's plastic card, big enough to test with a phone before a batch
+          of ten is printed — which is the whole reason this preview exists. */}
       {idCardStudent && (
-        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setIdCardStudent(null)}>
-          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl p-6 max-w-sm w-full" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-11 h-11 rounded-2xl bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center">
-                <QrCode className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-800 dark:text-white">Student ID Card</h3>
-                <p className="text-xs text-gray-400">
-                  {idCardStudent.first_name} {idCardStudent.last_name} • {idCardStudent.student_id}
-                </p>
-              </div>
-            </div>
-
-            <div className="flex flex-col items-center bg-gray-50 dark:bg-gray-900/40 border border-gray-100 dark:border-gray-700 rounded-xl p-4">
-              <img
-                src={buildApiUrl(`/api/id-cards/${idCardStudent.id}.png`)}
-                alt={`QR code for ${idCardStudent.student_id}`}
-                className="w-44 h-44 bg-white rounded-lg"
-              />
-              <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-3 text-center">
-                Point a phone camera at this code to check it scans before printing a batch.
-              </p>
-            </div>
-
-            <div className="flex gap-2 mt-5">
-              <button
-                onClick={() => setIdCardStudent(null)}
-                className="flex-1 px-4 py-2.5 rounded-xl border border-gray-200 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
-              >
-                Close
-              </button>
-              <button
-                onClick={() =>
-                  downloadIdCards(
-                    `/api/id-cards/${idCardStudent.id}.pdf`,
-                    `${idCardStudent.student_id}-id-card.pdf`,
-                  )
-                }
-                className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 text-white text-sm font-medium hover:shadow-lg transition-all"
-              >
-                <Download className="w-4 h-4" /> Card PDF
-              </button>
-            </div>
+        <Modal
+          open
+          passiveModal
+          modalHeading="Student ID card"
+          modalLabel={`${idCardStudent.first_name} ${idCardStudent.last_name} · ${idCardStudent.student_id}`}
+          onRequestClose={() => setIdCardStudent(null)}
+          size="sm"
+        >
+          <div className={styles.idCard}>
+            <img
+              src={buildApiUrl(`/api/id-cards/${idCardStudent.id}.png`)}
+              alt={`QR code for ${idCardStudent.student_id}`}
+              className={styles.qr}
+            />
+            <p className={styles.modalNote}>
+              Point a phone camera at this code to check it scans before printing a batch.
+            </p>
+            <Button
+              renderIcon={Download}
+              onClick={() =>
+                downloadIdCards(
+                  `/api/id-cards/${idCardStudent.id}.pdf`,
+                  `${idCardStudent.student_id}-id-card.pdf`,
+                )
+              }
+            >
+              Download card PDF
+            </Button>
           </div>
-        </div>
+        </Modal>
+      )}
+
+      {/* Who the batch is for. A dialog rather than the roster's own grade filter, because a range
+          of registration dates is not something the roster filter can express — and because
+          printing four hundred cards by accident is worth one deliberate step. */}
+      {idCardBatch && (
+        <Modal
+          open
+          modalHeading="Print ID cards"
+          modalLabel="Ten per A4 sheet"
+          primaryButtonText={`Print ${idCardMatches.length} card${idCardMatches.length === 1 ? '' : 's'}`}
+          secondaryButtonText="Cancel"
+          primaryButtonDisabled={idCardMatches.length === 0}
+          onRequestClose={() => setIdCardBatch(null)}
+          onSecondarySubmit={() => setIdCardBatch(null)}
+          onRequestSubmit={() => {
+            const query = new URLSearchParams({ layout: 'a4' });
+            if (idCardBatch.grade) query.set('grade', idCardBatch.grade);
+            if (idCardBatch.section) query.set('section', idCardBatch.section);
+            if (idCardBatch.registeredFrom) query.set('registeredFrom', idCardBatch.registeredFrom);
+            if (idCardBatch.registeredTo) query.set('registeredTo', idCardBatch.registeredTo);
+
+            const parts = [
+              idCardBatch.grade ? `grade-${idCardBatch.grade}` : '',
+              idCardBatch.section,
+              idCardBatch.registeredFrom || idCardBatch.registeredTo
+                ? `registered-${idCardBatch.registeredFrom || 'any'}-to-${idCardBatch.registeredTo || 'any'}`
+                : '',
+            ].filter(Boolean);
+
+            setIdCardBatch(null);
+            void downloadIdCards(
+              `/api/id-cards.pdf?${query.toString()}`,
+              `student-id-cards${parts.length ? `-${parts.join('-')}` : ''}.pdf`,
+            );
+          }}
+        >
+          <div className={styles.idCardFilters}>
+            <Dropdown
+              id="id-card-grade"
+              titleText="Class"
+              label="All classes"
+              items={GRADE_ALL_ITEMS.concat(grades.map(option => option.value))}
+              selectedItem={idCardBatch.grade === '' ? ALL_GRADES : Number(idCardBatch.grade)}
+              itemToString={(item) =>
+                item === ALL_GRADES || item === null
+                  ? 'All classes'
+                  : classLabel(settings.school_level, Number(item))
+              }
+              onChange={({ selectedItem }) =>
+                setIdCardBatch(current => current && ({
+                  ...current,
+                  grade: selectedItem === ALL_GRADES || selectedItem == null ? '' : String(selectedItem),
+                }))
+              }
+            />
+            <Dropdown
+              id="id-card-section"
+              titleText="Stream"
+              label="All streams"
+              items={['', ...idCardSections]}
+              selectedItem={idCardBatch.section}
+              itemToString={(item) => (item ? String(item) : 'All streams')}
+              onChange={({ selectedItem }) =>
+                setIdCardBatch(current => current && { ...current, section: selectedItem ? String(selectedItem) : '' })
+              }
+            />
+            <TextInput
+              id="id-card-registered-from"
+              labelText="Registered from"
+              type="date"
+              value={idCardBatch.registeredFrom}
+              onChange={event =>
+                setIdCardBatch(current => current && { ...current, registeredFrom: event.target.value })
+              }
+            />
+            <TextInput
+              id="id-card-registered-to"
+              labelText="Registered up to"
+              type="date"
+              value={idCardBatch.registeredTo}
+              onChange={event =>
+                setIdCardBatch(current => current && { ...current, registeredTo: event.target.value })
+              }
+            />
+          </div>
+
+          <p className={styles.modalNote}>
+            {idCardMatches.length === 0
+              ? 'No students match. Widen the class or the dates.'
+              : `${idCardMatches.length} student${idCardMatches.length === 1 ? '' : 's'} match, filling ${Math.ceil(idCardMatches.length / 10)} sheet${Math.ceil(idCardMatches.length / 10) === 1 ? '' : 's'}.`}
+          </p>
+
+          {(idCardBatch.registeredFrom || idCardBatch.registeredTo) && undatedCount > 0 && (
+            <InlineNotification
+              kind="info"
+              title={`${undatedCount} student${undatedCount === 1 ? ' has' : 's have'} no registration date on file`}
+              subtitle="They are left out of any date range. Clear the dates to include them."
+              lowContrast
+              hideCloseButton
+            />
+          )}
+        </Modal>
       )}
 
       <StudentIdScanner
@@ -789,342 +1199,150 @@ const StudentManagement: React.FC = () => {
         hint="Scan the QR code on the plastic card to jump straight to that student's record."
       />
 
-      {/* Delete Confirmation Modal */}
-      {deleteConfirm && canEdit && (
-        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setDeleteConfirm(null)}>
-          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl p-6 max-w-sm w-full" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center">
-                <AlertTriangle className="w-5 h-5 text-red-500" />
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-800 dark:text-white">Delete Student</h3>
-                <p className="text-xs text-gray-400">This action cannot be undone</p>
-              </div>
-            </div>
-            <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
-              Are you sure you want to permanently delete this student record? This action will be logged in the audit trail.
-            </p>
-            <div className="flex gap-2 justify-end">
-              <button onClick={() => setDeleteConfirm(null)} className="px-4 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">Cancel</button>
-              <button onClick={() => handleDelete(deleteConfirm)} className="px-4 py-2 rounded-lg text-sm bg-red-500 text-white hover:bg-red-600 transition-colors">Delete</button>
-            </div>
-          </div>
-        </div>
+      {/* Deleting a student.
+
+          Carbon's danger modal, which brings the destructive button treatment, the focus trap and
+          the escape handling that the hand-rolled overlay had to be trusted to get right. */}
+      {canEdit && (
+        <Modal
+          open={Boolean(deleteConfirm)}
+          danger
+          modalHeading="Delete this student?"
+          modalLabel="Student records"
+          primaryButtonText="Delete"
+          secondaryButtonText="Cancel"
+          onRequestSubmit={() => deleteConfirm && handleDelete(deleteConfirm)}
+          onRequestClose={() => setDeleteConfirm(null)}
+          size="sm"
+        >
+          <p className={styles.modalCopy}>
+            This permanently removes the student record. The deletion is written to the audit trail,
+            but the record itself cannot be brought back.
+          </p>
+        </Modal>
       )}
 
-      {/* Report Card Modal */}
+      {/* Building a report card.
+          Every field here overrides a school default; blank means "use the default", which is why
+          the placeholders name the default rather than showing an example. */}
       {reportCardStudent && (
-        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => !isBuildingReport && setReportCardStudent(null)}>
-          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-11 h-11 rounded-2xl bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center">
-                <FileText className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-800 dark:text-white">Build PDF Report Card</h3>
-                <p className="text-xs text-gray-400">
-                  {reportCardStudent.first_name} {reportCardStudent.last_name} • {reportCardStudent.student_id}
-                </p>
-              </div>
+        <Modal
+          open
+          modalHeading="Build a report card"
+          modalLabel={`${reportCardStudent.first_name} ${reportCardStudent.last_name} · ${reportCardStudent.student_id}`}
+          primaryButtonText={isBuildingReport ? 'Building the PDF…' : 'Download PDF'}
+          secondaryButtonText="Cancel"
+          primaryButtonDisabled={isBuildingReport}
+          onRequestSubmit={handleReportCardDownload}
+          onRequestClose={() => !isBuildingReport && setReportCardStudent(null)}
+          size="lg"
+          hasScrollingContent
+        >
+          <div className={styles.formStack}>
+            <div className={styles.grid2}>
+              <Field label="Report name" value={reportCardTitle} onChange={setReportCardTitle} placeholder="Student Report Card" />
+              <Field label="School name" value={reportCardSchoolName} onChange={setReportCardSchoolName} placeholder="The school's saved name" />
             </div>
 
-            <div className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Report Name</label>
-                  <input
-                    type="text"
-                    value={reportCardTitle}
-                    onChange={e => setReportCardTitle(e.target.value)}
-                    placeholder="Student Report Card"
-                    className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
-                  />
-                </div>
+            <Field label="School tagline" value={reportCardSchoolTagline} onChange={setReportCardSchoolTagline} placeholder="The school's saved tagline" />
+            <Field label="School address" value={reportCardAddress} onChange={setReportCardAddress} placeholder="P.O. Box 123, Kampala, Uganda" />
 
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">School Name</label>
-                  <input
-                    type="text"
-                    value={reportCardSchoolName}
-                    onChange={e => setReportCardSchoolName(e.target.value)}
-                    placeholder="Default school name"
-                    className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
-                  />
-                </div>
-              </div>
+            <ColorPicker
+              label="Theme colour"
+              value={reportCardThemeColor}
+              onChange={setReportCardThemeColor}
+              hint="Colours the school name, the headings and the results table on the report card."
+            />
 
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">School Tagline</label>
-                <input
-                  type="text"
-                  value={reportCardSchoolTagline}
-                  onChange={e => setReportCardSchoolTagline(e.target.value)}
-                  placeholder="Default school tagline"
-                  className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">School Address</label>
-                <input
-                  type="text"
-                  value={reportCardAddress}
-                  onChange={e => setReportCardAddress(e.target.value)}
-                  placeholder="P.O. Box 123, Kampala, Uganda"
-                  className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5 flex items-center gap-1.5">
-                  <Palette className="w-3.5 h-3.5 text-indigo-500" /> Theme Color
-                </label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="color"
-                    value={reportCardThemeColor}
-                    onChange={e => setReportCardThemeColor(e.target.value)}
-                    aria-label="Report theme color"
-                    className="h-10 w-12 rounded-lg border border-gray-200 dark:border-gray-600 bg-transparent cursor-pointer"
-                  />
-                  <input
-                    type="text"
-                    value={reportCardThemeColor}
-                    onChange={e => setReportCardThemeColor(e.target.value)}
-                    placeholder="#2952a3"
-                    className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
-                  />
-                </div>
-                <p className="text-[11px] text-gray-400 mt-1">Colours the school name, headings, and table on the report card.</p>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">School Logo</label>
-                  <div className="flex items-center gap-3">
-                    {reportCardLogo ? (
-                      <img src={reportCardLogo} alt="School logo preview" className="w-12 h-12 rounded-lg object-contain border border-gray-200 dark:border-gray-600 bg-white" />
-                    ) : (
-                      <div className="w-12 h-12 rounded-lg border border-dashed border-gray-300 dark:border-gray-600 flex items-center justify-center text-gray-300 dark:text-gray-600">
-                        <ImagePlus className="w-5 h-5" />
-                      </div>
-                    )}
-                    <div className="flex flex-col gap-1">
-                      <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 dark:border-gray-600 text-xs text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer w-fit">
-                        <ImagePlus className="w-3.5 h-3.5" /> {reportCardLogo ? 'Change' : 'Upload'}
-                        <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={e => handleReportImageUpload(e, setReportCardLogo)} />
-                      </label>
-                      {reportCardLogo && (
-                        <button type="button" onClick={() => setReportCardLogo('')} className="text-xs text-red-500 hover:underline text-left">Remove</button>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Student Photo</label>
-                  <div className="flex items-center gap-3">
-                    {reportCardPhoto ? (
-                      <img src={reportCardPhoto} alt="Student photo preview" className="w-12 h-14 rounded-lg object-cover border border-gray-200 dark:border-gray-600 bg-white" />
-                    ) : (
-                      <div className="w-12 h-14 rounded-lg border border-dashed border-gray-300 dark:border-gray-600 flex items-center justify-center text-gray-300 dark:text-gray-600">
-                        <ImagePlus className="w-5 h-5" />
-                      </div>
-                    )}
-                    <div className="flex flex-col gap-1">
-                      <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 dark:border-gray-600 text-xs text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer w-fit">
-                        <ImagePlus className="w-3.5 h-3.5" /> {reportCardPhoto ? 'Change' : 'Upload'}
-                        <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={e => handleReportImageUpload(e, setReportCardPhoto)} />
-                      </label>
-                      {reportCardPhoto && (
-                        <button type="button" onClick={() => setReportCardPhoto('')} className="text-xs text-red-500 hover:underline text-left">Remove</button>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Term</label>
-                <select
-                  value={reportCardTerm}
-                  onChange={e => setReportCardTerm(e.target.value)}
-                  className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
-                >
-                  <option value="Term 1">Term 1</option>
-                  <option value="Term 2">Term 2</option>
-                  <option value="Term 3">Term 3</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Academic Year</label>
-                <input
-                  type="text"
-                  value={reportCardYear}
-                  onChange={e => setReportCardYear(e.target.value)}
-                  placeholder="2026/2027"
-                  className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
-                />
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Country / System</label>
-                  <select
-                    value={reportCardGradingCountry}
-                    onChange={e => setReportCardGradingCountry(e.target.value)}
-                    className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
-                  >
-                    {GRADING_COUNTRIES.map(country => (
-                      <option key={country.value} value={country.value}>{country.label}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Academic Level</label>
-                  <select
-                    value={reportCardAcademicLevel}
-                    onChange={e => setReportCardAcademicLevel(e.target.value)}
-                    className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
-                  >
-                    {ACADEMIC_LEVELS.map(level => (
-                      <option key={level.value} value={level.value}>{level.label}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Class Teacher Name</label>
-                  <input
-                    type="text"
-                    value={reportCardTeacherName}
-                    onChange={e => setReportCardTeacherName(e.target.value)}
-                    placeholder="Class Teacher"
-                    className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Head Teacher Name</label>
-                  <input
-                    type="text"
-                    value={reportCardHeadTeacherName}
-                    onChange={e => setReportCardHeadTeacherName(e.target.value)}
-                    placeholder="Head of School"
-                    className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Teacher Comment</label>
-                <textarea
-                  value={reportCardTeacherComment}
-                  onChange={e => setReportCardTeacherComment(e.target.value)}
-                  rows={3}
-                  placeholder="Leave blank to generate a default comment from GPA and attendance."
-                  className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400 resize-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Report Notes</label>
-                <textarea
-                  value={reportCardNotes}
-                  onChange={e => setReportCardNotes(e.target.value)}
-                  rows={3}
-                  placeholder="Leave blank to use the student's saved notes."
-                  className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400 resize-none"
-                />
-              </div>
-
-              <div className="bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-800 rounded-xl px-3 py-3">
-                <p className="text-xs text-indigo-700 dark:text-indigo-300 leading-relaxed">
-                  Blank fields use the school defaults, generated teacher comment, or the student's saved notes.
-                </p>
-              </div>
+            <div className={styles.grid2}>
+              <ImagePicker label="School logo" value={reportCardLogo} onChange={setReportCardLogo} shape="logo" />
+              <ImagePicker label="Student photo" value={reportCardPhoto} onChange={setReportCardPhoto} shape="photo" />
             </div>
 
-            <div className="flex gap-2 justify-end mt-6">
-              <button
-                onClick={() => setReportCardStudent(null)}
-                disabled={isBuildingReport}
-                className="px-4 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleReportCardDownload}
-                disabled={isBuildingReport}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm bg-gradient-to-r from-indigo-600 to-purple-600 text-white hover:shadow-lg transition-all disabled:opacity-50"
-              >
-                {isBuildingReport ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                {isBuildingReport ? 'Building PDF...' : 'Download PDF'}
-              </button>
+            <div className={styles.grid2}>
+              <Field
+                label="Term"
+                value={reportCardTerm}
+                onChange={setReportCardTerm}
+                options={[
+                  { value: 'Term 1', label: 'Term 1' },
+                  { value: 'Term 2', label: 'Term 2' },
+                  { value: 'Term 3', label: 'Term 3' },
+                ]}
+              />
+              <Field label="Academic year" value={reportCardYear} onChange={setReportCardYear} placeholder="2026/2027" />
             </div>
+
+            <div className={styles.grid2}>
+              <Field label="Country / system" value={reportCardGradingCountry} onChange={setReportCardGradingCountry} options={GRADING_COUNTRIES} />
+              <Field label="Academic level" value={reportCardAcademicLevel} onChange={setReportCardAcademicLevel} options={ACADEMIC_LEVELS} />
+            </div>
+
+            <div className={styles.grid2}>
+              <Field label="Class teacher" value={reportCardTeacherName} onChange={setReportCardTeacherName} placeholder="Class Teacher" />
+              <Field label="Head teacher" value={reportCardHeadTeacherName} onChange={setReportCardHeadTeacherName} placeholder="Head of School" />
+            </div>
+
+            <Field
+              label="Teacher comment"
+              type="textarea"
+              value={reportCardTeacherComment}
+              onChange={setReportCardTeacherComment}
+              placeholder="Leave blank to generate one from GPA and attendance."
+            />
+
+            <Field
+              label="Report notes"
+              type="textarea"
+              value={reportCardNotes}
+              onChange={setReportCardNotes}
+              placeholder="Leave blank to use the student's saved notes."
+            />
+
+            <InlineNotification
+              kind="info"
+              title="Blank fields use the defaults"
+              subtitle="An empty field falls back to the school's saved setting, the generated teacher comment, or the student's own notes."
+              lowContrast
+              hideCloseButton
+            />
+
+            {isBuildingReport && <InlineLoading description="Building the PDF…" />}
           </div>
-        </div>
+        </Modal>
       )}
 
-      {/* Add/Edit Form Modal */}
-      {showForm && canEdit && (
-        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setShowForm(false)}>
-          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-            {/* Form Header */}
-            <div className="sticky top-0 bg-white dark:bg-gray-800 border-b border-gray-100 dark:border-gray-700 px-6 py-4 flex items-center justify-between rounded-t-2xl z-10">
-              <div>
-                <h3 className="text-lg font-bold text-gray-800 dark:text-white">
-                  {editingId ? 'Edit Student' : 'Add New Student'}
-                </h3>
-                <p className="text-[10px] text-gray-400 flex items-center gap-1 mt-0.5">
-                  <Shield className="w-2.5 h-2.5 text-purple-500" />
-                  Logged as {user?.display_name} (Admin)
-                </p>
-              </div>
-              <button onClick={() => setShowForm(false)} className="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-400">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
+      {/* Adding or editing a student.
 
-            <div className="px-6 py-5 space-y-6">
-              {/* Student photo — reused on ID cards and report cards */}
-              <div>
-                <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Student Photo</h4>
-                <div className="flex items-center gap-3">
-                  {form.photo_url ? (
-                    <img src={form.photo_url} alt="Student photo" className="w-16 h-20 rounded-lg object-cover border border-gray-200 dark:border-gray-600 bg-white" />
-                  ) : (
-                    <div className="w-16 h-20 rounded-lg border border-dashed border-gray-300 dark:border-gray-600 flex items-center justify-center text-gray-300 dark:text-gray-600">
-                      <ImagePlus className="w-6 h-6" />
-                    </div>
-                  )}
-                  <div className="flex flex-col gap-1">
-                    <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 dark:border-gray-600 text-xs text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer w-fit">
-                      <ImagePlus className="w-3.5 h-3.5" /> {form.photo_url ? 'Change' : 'Upload'}
-                      <input
-                        type="file"
-                        accept="image/png,image/jpeg"
-                        className="hidden"
-                        onChange={e => handleReportImageUpload(e, (value: string) => setForm(prev => ({ ...prev, photo_url: value })))}
-                      />
-                    </label>
-                    {form.photo_url && (
-                      <button type="button" onClick={() => setForm(prev => ({ ...prev, photo_url: '' }))} className="text-xs text-red-500 hover:underline text-left">Remove</button>
-                    )}
-                    <span className="text-[11px] text-gray-400">Appears on the student's ID card and report card.</span>
-                  </div>
-                </div>
-              </div>
+          Carbon's Modal owns the overlay, the focus trap, escape-to-close and the button row, so
+          the sticky header and footer this had to build by hand are gone. The fields inside are
+          already Carbon, through StudentField. */}
+      {canEdit && (
+        <Modal
+          open={showForm}
+          modalHeading={editingId ? 'Edit student' : 'Add a student'}
+          modalLabel={`Logged as ${user?.display_name ?? 'you'}`}
+          primaryButtonText={saving ? 'Saving…' : editingId ? 'Update student' : 'Add student'}
+          secondaryButtonText="Cancel"
+          primaryButtonDisabled={saving}
+          onRequestSubmit={handleSave}
+          onRequestClose={() => setShowForm(false)}
+          size="lg"
+          hasScrollingContent
+        >
+          <div className={styles.formStack}>
+            <ImagePicker
+              label="Student photo"
+              value={form.photo_url}
+              onChange={(value) => setForm(prev => ({ ...prev, photo_url: value }))}
+              shape="photo"
+              hint="Appears on the student's ID card and report card."
+            />
 
               {/* Basic Info */}
               <div>
-                <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Basic Information</h4>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <h4 className={styles.formSection}>Basic information</h4>
+                <div className={styles.grid2}>
                   <StudentField form={form} setForm={setForm} errors={errors} label="Student ID" name="student_id" required />
                   <StudentField form={form} setForm={setForm} errors={errors} label="Gender" name="gender" options={[
                     { value: 'Male', label: 'Male' }, { value: 'Female', label: 'Female' }, { value: 'Other', label: 'Other' }
@@ -1140,9 +1358,21 @@ const StudentManagement: React.FC = () => {
 
               {/* Academic Info */}
               <div>
-                <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Academic Information</h4>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <StudentField form={form} setForm={setForm} errors={errors} label="Class / Grade Level" name="grade_level" type="number" required min={0} max={20} />
+                <h4 className={styles.formSection}>Academic information</h4>
+                <div className={styles.grid3}>
+                  <StudentField
+                    form={form}
+                    setForm={setForm}
+                    errors={errors}
+                    label="Class"
+                    name="grade_level"
+                    required
+                    numeric
+                    options={classOptionsFor(settings.school_level).map(option => ({
+                      value: String(option.value),
+                      label: option.label,
+                    }))}
+                  />
                   <StudentField form={form} setForm={setForm} errors={errors} label="Section" name="class_section" options={[
                     { value: 'A', label: 'Section A' }, { value: 'B', label: 'Section B' }, { value: 'C', label: 'Section C' }
                   ]} />
@@ -1157,33 +1387,131 @@ const StudentManagement: React.FC = () => {
 
               {/* Subjects */}
               <div>
-                <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Subjects</h4>
-                <div className="flex gap-2 mb-2">
-                  <input
-                    type="text"
+                <h4 className={styles.formSection}>Subjects</h4>
+                <div className={styles.subjectEntry}>
+                  <TextInput
+                    id="subject-input"
+                    labelText="Add a subject"
+                    hideLabel
+                    size="md"
                     value={subjectInput}
                     onChange={e => setSubjectInput(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addSubject(); } }}
-                    placeholder="Type a subject and press Enter..."
-                    className="flex-1 bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        addSubject();
+                      }
+                    }}
+                    placeholder="Type a subject and press Enter…"
                   />
-                  <button onClick={addSubject} className="px-3 py-2 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 rounded-lg text-sm font-medium hover:bg-indigo-200 transition-colors">Add</button>
+                  <Button kind="tertiary" size="md" onClick={addSubject}>
+                    Add
+                  </Button>
                 </div>
-                <div className="flex flex-wrap gap-1.5">
+                <div className={styles.subjects}>
                   {form.subjects.map((sub, i) => (
-                    <span key={i} className="inline-flex items-center gap-1 bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 rounded-lg px-2.5 py-1 text-xs">
+                    <Tag key={i} type="blue" size="md" filter onClose={() => removeSubject(sub)}>
                       {sub}
-                      <button onClick={() => removeSubject(sub)} className="hover:text-red-500 transition-colors"><X className="w-3 h-3" /></button>
-                    </span>
+                    </Tag>
                   ))}
-                  {form.subjects.length === 0 && <span className="text-xs text-gray-400">No subjects added yet</span>}
+                  {form.subjects.length === 0 && (
+                    <span className={styles.modalNote}>No subjects yet.</span>
+                  )}
                 </div>
+              </div>
+
+              {/* Clubs. A student may join any number; a full one cannot be picked at all, which
+                  is a kinder way to say no than a refusal on save. */}
+              <div>
+                <h4 className={styles.formSection}>Clubs and societies</h4>
+                {clubCatalogue.length === 0 ? (
+                  <span className={styles.modalNote}>
+                    No clubs have been set up yet. An administrator adds them under School Life.
+                  </span>
+                ) : (
+                  <div className={styles.subjects}>
+                    {clubCatalogue.map(club => {
+                      const chosen = chosenClubs.includes(club.id);
+                      // A full club cannot be picked at all, which is a kinder way to say no than
+                      // letting somebody choose it and refusing on save.
+                      const blocked = club.full && !chosen;
+                      return (
+                        <SelectableTag
+                          key={club.id}
+                          id={`club-${club.id}`}
+                          size="md"
+                          disabled={blocked}
+                          selected={chosen}
+                          onChange={() =>
+                            setChosenClubs(prev =>
+                              chosen ? prev.filter(id => id !== club.id) : [...prev, club.id])
+                          }
+                          title={
+                            blocked
+                              ? `${club.name} is full (${club.member_count} of ${club.capacity})`
+                              : club.patron_name
+                                ? `${club.name} — ${club.patron_name}`
+                                : club.name
+                          }
+                          text={club.capacity ? `${club.name} · ${club.member_count}/${club.capacity}` : club.name}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* School requirements. The list is the one for this student's class, so it changes
+                  when the class above changes. */}
+              <div>
+                <h4 className={styles.formSection}>
+                  School requirements
+                  {requirementLevel && (
+                    <>
+                      {' '}
+                      <Tag type="blue" size="sm">{requirementLevel}</Tag>
+                    </>
+                  )}
+                </h4>
+                {requirementList.length === 0 ? (
+                  <span className={styles.modalNote}>
+                    Nothing is set for this class yet. An administrator publishes the list under
+                    School Life.
+                  </span>
+                ) : (
+                  <>
+                    <div className={styles.grid2}>
+                      {requirementList.map(item => (
+                        <Checkbox
+                          key={item.requirement_id}
+                          id={`req-${item.requirement_id}`}
+                          labelText={
+                            `${item.item_name}`
+                            + `${item.quantity_expected > 1 || item.unit ? ` — ${item.quantity_expected} ${item.unit}`.trimEnd() : ''}`
+                            + `${item.mandatory ? '' : ' (optional)'}`
+                          }
+                          checked={broughtItems.includes(item.requirement_id)}
+                          onChange={(_event, { checked }) =>
+                            setBroughtItems(prev =>
+                              checked
+                                ? [...prev, item.requirement_id]
+                                : prev.filter(id => id !== item.requirement_id))
+                          }
+                        />
+                      ))}
+                    </div>
+                    <p className={styles.modalNote}>
+                      Tick what has actually arrived. Everything else is recorded as still owed, so
+                      it shows up under Still owing rather than being forgotten.
+                    </p>
+                  </>
+                )}
               </div>
 
               {/* Parent Info */}
               <div>
-                <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Parent / Guardian</h4>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <h4 className={styles.formSection}>Parent or guardian</h4>
+                <div className={styles.grid3}>
                   <StudentField form={form} setForm={setForm} errors={errors} label="Parent Name" name="parent_name" />
                   <StudentField form={form} setForm={setForm} errors={errors} label="Parent Phone" name="parent_phone" />
                   <StudentField form={form} setForm={setForm} errors={errors} label="Parent Email" name="parent_email" type="email" />
@@ -1192,30 +1520,17 @@ const StudentManagement: React.FC = () => {
 
               {/* Notes */}
               <div>
-                <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Notes</h4>
+                <h4 className={styles.formSection}>Notes</h4>
                 <StudentField form={form} setForm={setForm} errors={errors} label="Additional Notes" name="notes" type="textarea" />
               </div>
             </div>
 
-            {/* Form Footer */}
-            <div className="sticky bottom-0 bg-white dark:bg-gray-800 border-t border-gray-100 dark:border-gray-700 px-6 py-4 flex items-center justify-between rounded-b-2xl">
-              <p className="text-[10px] text-gray-400">
-                {editingId ? 'Changes will be logged in the audit trail' : 'New student will be logged in the audit trail'}
-              </p>
-              <div className="flex gap-2">
-                <button onClick={() => setShowForm(false)} className="px-4 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">Cancel</button>
-                <button
-                  onClick={handleSave}
-                  disabled={saving}
-                  className="flex items-center gap-2 px-5 py-2 rounded-lg text-sm bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-medium hover:shadow-lg transition-all disabled:opacity-50"
-                >
-                  <Save className="w-4 h-4" />
-                  {saving ? 'Saving...' : editingId ? 'Update Student' : 'Add Student'}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+            <p className={styles.modalNote}>
+              {editingId
+                ? 'Changes are written to the audit trail.'
+                : 'The new student is written to the audit trail.'}
+            </p>
+        </Modal>
       )}
     </div>
   );

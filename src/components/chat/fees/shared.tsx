@@ -1,41 +1,45 @@
 import React from 'react';
-import { AlertTriangle, CheckCircle2, Clock, HelpCircle, ShieldAlert, TrendingUp } from 'lucide-react';
+import { Button, Tag } from '@carbon/react';
+import {
+  Checkmark,
+  CheckmarkFilled,
+  Download,
+  Printer,
+  Time,
+  Warning,
+  WarningAlt,
+  Help,
+} from '@carbon/react/icons';
+import { downloadFromUrl, printFromUrl } from '@/lib/download';
+import { feeDocumentUrl } from '@/lib/fees';
 import type { AgingBucketKey, EffectiveFeeStanding } from '@/types/feeAdmin';
+import type { UserProfile } from '@/types/auth';
+import styles from './shared.module.scss';
+
+/**
+ * The pieces every fees tab shares.
+ *
+ * Carbon components underneath, so a fee standing reads like a status anywhere else in the app and
+ * a button here behaves like a button there. The one thing written by hand is the ageing tone: how
+ * overdue a debt is has to be visible before the number is read, and Carbon has no token for that.
+ */
+
+// Carbon types Tag as a union of several tag flavours, so the colour prop cannot be read off the
+// component's props. The list is stable and documented, so it is named here.
+type TagType =
+  | 'red' | 'magenta' | 'purple' | 'blue' | 'cyan' | 'teal'
+  | 'green' | 'gray' | 'cool-gray' | 'warm-gray' | 'high-contrast' | 'outline';
 
 export const STANDING_STYLES: Record<
   EffectiveFeeStanding,
-  { label: string; badge: string; icon: React.ElementType }
+  { label: string; tag: TagType; icon: React.ElementType }
 > = {
-  excellent: {
-    label: 'Excellent',
-    badge: 'bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800',
-    icon: CheckCircle2,
-  },
-  good: {
-    label: 'Good',
-    badge: 'bg-teal-50 dark:bg-teal-900/20 text-teal-600 dark:text-teal-400 border-teal-200 dark:border-teal-800',
-    icon: TrendingUp,
-  },
-  fair: {
-    label: 'Fair',
-    badge: 'bg-amber-50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-800',
-    icon: Clock,
-  },
-  watch: {
-    label: 'Watch',
-    badge: 'bg-orange-50 dark:bg-orange-900/20 text-orange-600 dark:text-orange-400 border-orange-200 dark:border-orange-800',
-    icon: AlertTriangle,
-  },
-  delinquent: {
-    label: 'Delinquent',
-    badge: 'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 border-red-200 dark:border-red-800',
-    icon: ShieldAlert,
-  },
-  unrated: {
-    label: 'Unrated',
-    badge: 'bg-gray-50 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border-gray-200 dark:border-gray-700',
-    icon: HelpCircle,
-  },
+  excellent: { label: 'Excellent', tag: 'green', icon: CheckmarkFilled },
+  good: { label: 'Good', tag: 'teal', icon: Checkmark },
+  fair: { label: 'Fair', tag: 'cyan', icon: Time },
+  watch: { label: 'Watch', tag: 'magenta', icon: WarningAlt },
+  delinquent: { label: 'Delinquent', tag: 'red', icon: Warning },
+  unrated: { label: 'Unrated', tag: 'cool-gray', icon: Help },
 };
 
 export const STANDING_OPTIONS = (['excellent', 'good', 'fair', 'watch', 'delinquent'] as const).map(
@@ -43,59 +47,117 @@ export const STANDING_OPTIONS = (['excellent', 'good', 'fair', 'watch', 'delinqu
 );
 
 export const AGING_COLUMNS: { key: AgingBucketKey; label: string; tone: string }[] = [
-  { key: 'current', label: 'Not yet due', tone: 'text-gray-600 dark:text-gray-300' },
-  { key: 'days_1_30', label: '1–30 days', tone: 'text-amber-600 dark:text-amber-400' },
-  { key: 'days_31_60', label: '31–60 days', tone: 'text-orange-600 dark:text-orange-400' },
-  { key: 'days_61_90', label: '61–90 days', tone: 'text-red-500' },
-  { key: 'days_90_plus', label: '90+ days', tone: 'text-red-600 dark:text-red-400 font-semibold' },
+  { key: 'current', label: 'Not yet due', tone: styles.ageCurrent },
+  { key: 'days_1_30', label: '1–30 days', tone: styles.ageWarn },
+  { key: 'days_31_60', label: '31–60 days', tone: styles.ageHot },
+  { key: 'days_61_90', label: '61–90 days', tone: styles.ageOverdue },
+  { key: 'days_90_plus', label: '90+ days', tone: styles.ageCritical },
 ];
 
 export const StandingBadge = ({ standing, source }: { standing: EffectiveFeeStanding; source?: string }) => {
   const style = STANDING_STYLES[standing] ?? STANDING_STYLES.unrated;
-  const Icon = style.icon;
   return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${style.badge}`}>
-      <Icon className="w-2.5 h-2.5" />
+    <Tag type={style.tag} size="sm" renderIcon={style.icon}>
       {style.label}
-      {source === 'manual' && <span className="opacity-70">· set by admin</span>}
-    </span>
+      {source === 'manual' && <span className={styles.standingSource}> · set by admin</span>}
+    </Tag>
   );
 };
 
 export const PrimaryButton = ({
   children,
-  className = '',
+  className,
   ...props
 }: React.ButtonHTMLAttributes<HTMLButtonElement>) => (
-  <button
-    {...props}
-    className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 text-white text-sm font-medium hover:shadow-lg transition-all disabled:opacity-50 ${className}`}
-  >
+  <Button kind="primary" size="sm" className={className} {...props}>
     {children}
-  </button>
+  </Button>
 );
 
 export const SecondaryButton = ({
   children,
-  className = '',
+  className,
   ...props
 }: React.ButtonHTMLAttributes<HTMLButtonElement>) => (
-  <button
-    {...props}
-    className={`inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50 ${className}`}
-  >
+  <Button kind="tertiary" size="sm" className={className} {...props}>
     {children}
-  </button>
+  </Button>
 );
 
-export const Panel = ({ children, className = '' }: { children: React.ReactNode; className?: string }) => (
-  <div className={`bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 rounded-lg ${className}`}>
+/** A destructive action — deleting a bursary, voiding a payment. */
+export const DangerButton = ({
+  children,
+  className,
+  ...props
+}: React.ButtonHTMLAttributes<HTMLButtonElement>) => (
+  <Button kind="danger--ghost" size="sm" className={className} {...props}>
     {children}
-  </div>
+  </Button>
+);
+
+/** A quiet action that sits inside a row — edit, retire, view. */
+export const GhostButton = ({
+  children,
+  className,
+  ...props
+}: React.ButtonHTMLAttributes<HTMLButtonElement>) => (
+  <Button kind="ghost" size="sm" className={className} {...props}>
+    {children}
+  </Button>
+);
+
+/**
+ * Print and save, for a screen that has a printable version.
+ *
+ * Both, rather than one: printing is what happens when a bursar walks into a meeting, and saving is
+ * what happens when a sponsor has to be emailed. The pair appears on every fees tab, so it is one
+ * component — five copies would be five chances for one screen to offer only half of it.
+ *
+ * `params` is spread into the query string, so a caller passes the filters the list is being shown
+ * under and the paper matches the screen it came from.
+ */
+export const PrintButtons = ({
+  path,
+  filename,
+  params = {},
+  user,
+  disabled = false,
+  runAction,
+}: {
+  path: string;
+  filename: string;
+  params?: Record<string, string>;
+  user: UserProfile | null;
+  disabled?: boolean;
+  runAction: (label: string, handler: () => Promise<void>) => Promise<void>;
+}) => {
+  const url = () => feeDocumentUrl(path, user, params);
+
+  return (
+    <>
+      <SecondaryButton
+        onClick={() => runAction('Preparing the document', () => printFromUrl(url()))}
+        disabled={disabled}
+      >
+        <Printer size={16} /> Print
+      </SecondaryButton>
+      <SecondaryButton
+        onClick={() => runAction('Building the PDF', () => downloadFromUrl(url(), filename))}
+        disabled={disabled}
+      >
+        <Download size={16} /> PDF
+      </SecondaryButton>
+    </>
+  );
+};
+
+export const Panel = ({ children, className = '' }: { children: React.ReactNode; className?: string }) => (
+  <div className={`${styles.panel} ${className}`}>{children}</div>
 );
 
 export const EmptyState = ({ message }: { message: string }) => (
-  <p className="px-4 py-10 text-center text-sm text-gray-400">{message}</p>
+  <p className={styles.empty}>{message}</p>
 );
 
-export const zebra = 'odd:bg-white even:bg-gray-50/70 dark:odd:bg-gray-800 dark:even:bg-gray-900/30';
+/** Applied to a row in a hand-built list to get Carbon's alternating shading. */
+export const zebra = styles.zebra;

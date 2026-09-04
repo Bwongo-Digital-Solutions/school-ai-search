@@ -1,0 +1,83 @@
+@use '@carbon/layout';
+@use '@carbon/type';
+@use '../../../styles/vars' as *;
+
+// A white pane on the page grey — the same card the rest of the app is built from, exported from
+// here because every fees tab reaches for it.
+.panel {
+  background: $ui-02;
+  border: 1px solid $ui-03;
+}
+
+.empty {
+  @include type.type-style('body-compact-01');
+  padding: layout.$spacing-09 layout.$spacing-05;
+  text-align: center;
+  color: $text-02;
+}
+
+// Alternating row shading. Carbon's own zebra striping only applies inside a DataTable; these lists
+// are hand-built, so the stripe is drawn here with the same value Carbon uses.
+.zebra {
+  &:nth-child(odd) {
+    background: $ui-02;
+  }
+
+  &:nth-child(even) {
+    background: $ui-01;
+  }
+}
+
+// Ageing buckets, oldest debt loudest. The tone is the point of the column: a number in the
+// 90-plus bucket needs to look different from the same number sitting in "not yet due".
+.ageCurrent {
+  color: $text-02;
+}
+
+.ageWarn {
+  color: $caution-text;
+}
+
+.ageHot {
+  color: $caution-strong;
+}
+
+.ageOverdue {
+  color: $support-error;
+}
+
+.ageCritical {
+  color: $support-error;
+  font-weight: 600;
+}
+
+.standingSource {
+  opacity: 0.7;
+}
+
+:global(.cds--g100) {
+  .panel {
+    background: $ui-02-dark;
+    border-color: $ui-03-dark;
+  }
+
+  .empty {
+    color: $text-02-dark;
+  }
+
+  .zebra:nth-child(odd) {
+    background: $ui-02-dark;
+  }
+
+  .zebra:nth-child(even) {
+    background: $ui-01-dark;
+  }
+
+  .ageCurrent {
+    color: $text-02-dark;
+  }
+
+  .ageWarn {
+    color: $support-warning;
+  }
+}

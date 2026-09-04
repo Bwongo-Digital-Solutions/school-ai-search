@@ -1,3 +1,5 @@
+import { credentialFor } from './credential-store.mjs';
+
 const createDefaultModelCatalog = () => [
   {
     id: 'local-rules',
@@ -136,7 +138,9 @@ const providerHasCredentials = (provider) => {
   if (provider === 'ollama') return true;
 
   const env = PROVIDER_ENV[provider];
-  return Boolean(env?.apiKey && process.env[env.apiKey]);
+  // credentialFor, not process.env: a school that supplied its own key is configured even when the
+  // platform has none, and the model picker has to say so.
+  return Boolean(env?.apiKey && credentialFor(env.apiKey));
 };
 
 export const publicModel = (model) => ({
@@ -214,10 +218,10 @@ export const createMessages = ({ message, students, hasImage, contextBlocks = ''
     {
       role: 'system',
       content: [
-        'You are SchoolBot AI, a school information assistant.',
+        'You are SchoolBot AI, The eSchool AI information assistant.',
         'Answer only from the provided records and reference material.',
-        'Use concise Markdown. If the answer is not in the records, say so.',
-        'Never invent student records, grades, payments, health details, or attendance.',
+        'Use concise Markdown. If the answer is not in the records, say so. ',
+        'Never invent student records, grades, payments, health details, or attendance. Always provide a source of your findings, if it actually does not exist, say so.',
         hasImage
           ? 'The user attached an image, but local OCR is not available unless the selected model can interpret it.'
           : '',
@@ -276,7 +280,7 @@ export const postJson = async (httpClient, url, { headers = {}, body }) => {
 };
 
 const describeOllamaConnectionError = (error) => {
-  const baseUrl = process.env.OLLAMA_BASE_URL || PROVIDER_ENV.ollama.defaultBaseUrl;
+  const baseUrl = credentialFor('OLLAMA_BASE_URL') || PROVIDER_ENV.ollama.defaultBaseUrl;
   const model = process.env.OLLAMA_MODEL || 'qwen2.5-coder:0.5b';
   const detail = error instanceof Error && error.message ? error.message : 'Unknown connection error';
 
@@ -294,10 +298,10 @@ const describeOllamaConnectionError = (error) => {
 
 const callOpenAiCompatible = async ({ model, messages, httpClient }) => {
   const env = PROVIDER_ENV[model.provider];
-  const apiKey = process.env[env.apiKey];
+  const apiKey = credentialFor(env.apiKey);
   if (!apiKey) throw new Error(`${env.apiKey} is required for ${model.label}`);
 
-  const baseUrl = process.env[env.baseUrl] || env.defaultBaseUrl;
+  const baseUrl = credentialFor(env.baseUrl) || env.defaultBaseUrl;
   const headers = {
     Authorization: `Bearer ${apiKey}`,
   };
@@ -337,10 +341,10 @@ export const anthropicSamplingParams = (modelName) =>
     : { temperature: Number(process.env.AI_TEMPERATURE || 0.2) };
 
 const callAnthropic = async ({ model, messages, httpClient }) => {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = credentialFor('ANTHROPIC_API_KEY');
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY is required for Anthropic Claude');
 
-  const baseUrl = process.env.ANTHROPIC_BASE_URL || PROVIDER_ENV.anthropic.defaultBaseUrl;
+  const baseUrl = credentialFor('ANTHROPIC_BASE_URL') || PROVIDER_ENV.anthropic.defaultBaseUrl;
   const system = messages.find((item) => item.role === 'system')?.content || '';
   const chatMessages = messages
     .filter((item) => item.role !== 'system')
@@ -368,10 +372,10 @@ const callAnthropic = async ({ model, messages, httpClient }) => {
 };
 
 const callGoogle = async ({ model, messages, httpClient }) => {
-  const apiKey = process.env.GOOGLE_GEMINI_API_KEY;
+  const apiKey = credentialFor('GOOGLE_GEMINI_API_KEY');
   if (!apiKey) throw new Error('GOOGLE_GEMINI_API_KEY is required for Google Gemini');
 
-  const baseUrl = process.env.GOOGLE_GEMINI_BASE_URL || PROVIDER_ENV.google.defaultBaseUrl;
+  const baseUrl = credentialFor('GOOGLE_GEMINI_BASE_URL') || PROVIDER_ENV.google.defaultBaseUrl;
   const data = await postJson(
     httpClient,
     `${baseUrl.replace(/\/$/, '')}/models/${encodeURIComponent(model.model)}:generateContent`,
@@ -405,7 +409,7 @@ const callGoogle = async ({ model, messages, httpClient }) => {
 };
 
 const callOllama = async ({ model, messages, httpClient }) => {
-  const baseUrl = process.env.OLLAMA_BASE_URL || PROVIDER_ENV.ollama.defaultBaseUrl;
+  const baseUrl = credentialFor('OLLAMA_BASE_URL') || PROVIDER_ENV.ollama.defaultBaseUrl;
   let data;
   try {
     data = await postJson(httpClient, `${baseUrl.replace(/\/$/, '')}/api/chat`, {
