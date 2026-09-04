@@ -123,6 +123,21 @@ CREATE TABLE IF NOT EXISTS school_settings (
 -- secondary school runs both O-Level and A-Level. Defaults to 'secondary' so an existing database
 -- keeps grading exactly as it did before this column existed.
 ALTER TABLE school_settings ADD COLUMN IF NOT EXISTS school_level TEXT NOT NULL DEFAULT 'secondary';
+
+-- What this school has paid for, and how it is installed.
+--
+-- Only consulted on a one-off install. A cloud tenant's plan is the control plane's tenants.plan --
+-- what the billing system actually charges against -- and a copy here could only ever be a stale
+-- second opinion of it.
+--
+-- The default is 'enterprise', and the direction is the whole point. This system ran for a long
+-- time with no notion of a plan, and every school on it had everything. A default of 'essential'
+-- would switch features off on deploy, for schools already using them, with no warning and nothing
+-- on screen to say what happened. Somebody has to choose to sell a smaller tier before anyone
+-- loses anything.
+ALTER TABLE school_settings ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT 'enterprise';
+ALTER TABLE school_settings ADD COLUMN IF NOT EXISTS deployment TEXT NOT NULL DEFAULT 'cloud';
+
 ALTER TABLE school_settings DROP CONSTRAINT IF EXISTS school_settings_level_check;
 ALTER TABLE school_settings ADD CONSTRAINT school_settings_level_check
   CHECK (school_level IN (
@@ -218,13 +233,24 @@ CREATE TABLE IF NOT EXISTS school_backups (
   id TEXT PRIMARY KEY,
   filename TEXT NOT NULL,
   size_bytes BIGINT NOT NULL DEFAULT 0,
-  kind TEXT NOT NULL DEFAULT 'manual' CHECK (kind IN ('manual', 'scheduled')),
+  kind TEXT NOT NULL DEFAULT 'manual' CHECK (kind IN ('manual', 'scheduled', 'uploaded')),
   status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'complete', 'failed')),
   error TEXT NOT NULL DEFAULT '',
   encrypted BOOLEAN NOT NULL DEFAULT FALSE,
   created_by TEXT NOT NULL DEFAULT '',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- A dump brought in from elsewhere: an old server, a laptop, a hosting provider's export. Neither
+-- manual nor scheduled, and it must not claim to be either -- the pruning that keeps the last N
+-- scheduled backups would otherwise be entitled to delete a file this school cannot take again.
+--
+-- 'uploaded' is in the CREATE TABLE above as well as here. A database that already exists takes it
+-- from this ALTER; a fresh one takes it inline, because pg-mem auto-names an inline column CHECK
+-- differently from Postgres and so never sees the DROP below.
+ALTER TABLE school_backups DROP CONSTRAINT IF EXISTS school_backups_kind_check;
+ALTER TABLE school_backups ADD CONSTRAINT school_backups_kind_check
+  CHECK (kind IN ('manual', 'scheduled', 'uploaded'));
 
 -- When this school takes an unattended backup, and how many of them to keep.
 --

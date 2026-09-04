@@ -8,7 +8,8 @@
  *
  *   - the dormitory head count, which is not the class register: it is asked at night, about beds
  *   - the sick bay book, so "was my child seen on Tuesday?" has an answer
- *   - beds: who sleeps where, and which are free
+ *   - beds: who sleeps where, which are free, and the room list itself — she keeps it, because she
+ *     is the person standing in the room who knows it holds six beds and not four
  *   - welfare: the boarders who still owe their requirements, and who is signed out of the gate
  *
  * ## Who may open it
@@ -333,19 +334,6 @@ const discharge = async (database, body, actor) => {
 };
 
 /**
- * How many students each room currently holds.
- *
- * A grouped query merged in Node rather than a correlated subquery beside `r.*` — pg-mem cannot
- * resolve the outer alias inside one, and it backs the tests and the hosted demo.
- */
-const occupancy = async (database) => {
-  const { rows } = await database.query(
-    `SELECT room_id, COUNT(*)::int AS n FROM hostel_assignments WHERE status = 'active' GROUP BY room_id`,
-  );
-  return new Map(rows.map((row) => [row.room_id, row.n]));
-};
-
-/**
  * Where one student sleeps, or null for a day student.
  *
  * Exported as a plain function rather than as an action, and deliberately: every action in this
@@ -392,18 +380,44 @@ const roomWithOccupancy = async (database, roomId) => {
   return { ...rows[0], occupied: counted.rows[0].n };
 };
 
-/** The dormitories and how full they are. */
+/**
+ * The dormitories, how full they are, and who is in them.
+ *
+ * The occupants are the point. A count alone tells the matron a room is full but not which child to
+ * move, so the one thing she wants to do standing in the corridor — take this boy out of that bed —
+ * could not be reached from the list at all. One extra query rather than one per room: this is
+ * opened on a handset, and a request per dormitory is a screen that never loads.
+ */
 const rooms = async (database) => {
   const { rows } = await database.query(
     'SELECT * FROM hostel_rooms ORDER BY hostel_name ASC, room_number ASC',
   );
-  const counts = await occupancy(database);
+
+  const { rows: beds } = await database.query(
+    `
+      SELECT a.id AS assignment_id, a.room_id, a.bed_number, a.start_date,
+             s.id AS student_id, s.student_id AS student_number,
+             s.first_name, s.last_name, s.grade_level, s.class_section
+      FROM hostel_assignments a
+      JOIN students s ON s.id = a.student_id
+      WHERE a.status = 'active'
+      ORDER BY s.last_name ASC, s.first_name ASC
+    `,
+  );
+
+  const byRoom = new Map();
+  for (const bed of beds) {
+    if (!byRoom.has(bed.room_id)) byRoom.set(bed.room_id, []);
+    byRoom.get(bed.room_id).push(bed);
+  }
 
   return {
     rooms: rows.map((row) => {
-      const occupied = counts.get(row.id) || 0;
+      const occupants = byRoom.get(row.id) || [];
+      const occupied = occupants.length;
       return {
         ...row,
+        occupants,
         occupied,
         free: Math.max(0, Number(row.capacity) - occupied),
         full: occupied >= Number(row.capacity),
@@ -470,6 +484,94 @@ const releaseBed = async (database, body) => {
 };
 
 /**
+ * Adding a dormitory room, or changing one.
+ *
+ * The matron is the person who knows a room has six beds in it and not four, so she keeps this list
+ * rather than filing a request with the office and waiting. Capacity cannot be cut below the number
+ * of children already sleeping there: the alternative is a room that reports itself over-full, and
+ * a roll call that cannot be reconciled against it.
+ */
+const saveRoom = async (database, body) => {
+  const hostelName = trimmed(body.hostelName);
+  const roomNumber = trimmed(body.roomNumber);
+  if (!hostelName) return { error: 'Which hostel?' };
+  if (!roomNumber) return { error: 'Which room?' };
+
+  const capacity = Number(body.capacity);
+  if (!Number.isInteger(capacity) || capacity < 1) {
+    return { error: 'How many beds? A whole number, at least one.' };
+  }
+
+  const id = trimmed(body.roomId);
+
+  /* Same hostel, same room number, two rows: they cannot be told apart on any screen that lists
+     them, and the beds in one room would report as two half-empty ones. */
+  const clash = await database.query(
+    `SELECT id, hostel_name, room_number FROM hostel_rooms
+      WHERE UPPER(hostel_name) = UPPER($1) AND UPPER(room_number) = UPPER($2) AND id <> $3 LIMIT 1`,
+    [hostelName, roomNumber, id || ''],
+  );
+  /* The stored spelling, not the typed one. The match is case-insensitive, so telling a matron who
+     typed "nile house" that "nile house already has a room 12" leaves her looking for a hostel by
+     that name and not finding it. */
+  if (clash.rows[0]) {
+    return { error: `${clash.rows[0].hostel_name} already has a room ${clash.rows[0].room_number}` };
+  }
+
+  if (!id) {
+    const { rows } = await database.query(
+      `INSERT INTO hostel_rooms (id, hostel_name, room_number, capacity)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [randomUUID(), hostelName, roomNumber, capacity],
+    );
+    return { room: { ...rows[0], occupants: [], occupied: 0, free: capacity, full: false } };
+  }
+
+  const existing = await roomWithOccupancy(database, id);
+  if (!existing) return { error: 'That room no longer exists' };
+
+  const occupied = Number(existing.occupied);
+  if (capacity < occupied) {
+    return {
+      error: `${occupied} ${occupied === 1 ? 'child sleeps' : 'children sleep'} in ${existing.hostel_name} ${existing.room_number}. Move them before cutting it to ${capacity} ${capacity === 1 ? 'bed' : 'beds'}.`,
+    };
+  }
+
+  const { rows } = await database.query(
+    'UPDATE hostel_rooms SET hostel_name = $2, room_number = $3, capacity = $4 WHERE id = $1 RETURNING *',
+    [id, hostelName, roomNumber, capacity],
+  );
+  return {
+    room: { ...rows[0], occupied, free: Math.max(0, capacity - occupied), full: occupied >= capacity },
+  };
+};
+
+/**
+ * Taking a room off the list.
+ *
+ * Refused while anyone still sleeps there — and not merely for tidiness. `hostel_assignments`
+ * references `hostel_rooms` ON DELETE CASCADE, so deleting an occupied room would take the
+ * assignments with it and erase the record of who slept where, silently and with no way back.
+ */
+const removeRoom = async (database, body) => {
+  const id = trimmed(body.roomId);
+  if (!id) return { error: 'Which room?' };
+
+  const room = await roomWithOccupancy(database, id);
+  if (!room) return { error: 'That room no longer exists' };
+
+  const occupied = Number(room.occupied);
+  if (occupied > 0) {
+    return {
+      error: `${occupied} ${occupied === 1 ? 'child still sleeps' : 'children still sleep'} in ${room.hostel_name} ${room.room_number}. Move them out first.`,
+    };
+  }
+
+  await database.query('DELETE FROM hostel_rooms WHERE id = $1', [id]);
+  return { removed: id };
+};
+
+/**
  * The boarders who still owe a mandatory requirement.
  *
  * The matron is usually the person who notices — she is the one in the dormitory looking at whether
@@ -515,6 +617,8 @@ const ACTIONS = {
   rooms,
   assign_bed: assignBed,
   release_bed: releaseBed,
+  save_room: saveRoom,
+  remove_room: removeRoom,
   welfare,
 };
 

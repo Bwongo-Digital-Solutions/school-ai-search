@@ -1,0 +1,63 @@
+# What a change has to survive before it lands, and after it lands.
+#
+# This repository had no CI at all. That is how a merge conflict resolution came to delete the
+# licence gate's definitions from server/local-backend.mjs while keeping every call to them,
+# putting `featureForRequest is not defined` in front of every request — sign-in included — on a
+# deploy nobody had reason to doubt. 122 of 156 tests failed on main at that moment. Nothing ran
+# them.
+#
+# The push trigger is the part that matters most here. That breakage was created *by the merge
+# commit itself*: both sides of the conflict were fine on their own, and a check that only ever
+# looks at pull requests would have gone green on each of them and still let main go down.
+
+name: Checks
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+# A second push should replace the run in flight, not queue behind it.
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint, types and backend tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 22, not 20, and not by taste: pdfjs-dist declares `node >=22.13.0`, and reading marks off
+      # a PDF fails *silently* below that — the text layer comes back empty and the extraction
+      # reports nothing rather than erroring. Pinning 20 here is what first surfaced it, since
+      # nothing in the repo said which node it needed. package.json now says so too.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      # Catches a call to something that no longer exists on the TypeScript side, which is the
+      # front-end half of exactly the failure above.
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      # The one that would have caught it. The licensing, fees, backup and matron suites all run
+      # the real request path against an in-memory Postgres, so a missing definition anywhere in
+      # server/ fails here rather than in front of a school.
+      - name: Backend tests
+        run: npm run test:backend
+
+      - name: Build
+        run: npm run build

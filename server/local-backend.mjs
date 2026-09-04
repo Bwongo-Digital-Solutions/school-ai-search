@@ -17,6 +17,7 @@ import {
   listTenants,
   lookupTenantRoute,
   publicTenant,
+  setTenantPlan,
   setTenantStatus,
 } from './db/control.mjs';
 import { isPlatformOwner, platformOwnerRefusal } from './auth/platform-owner.mjs';
@@ -73,6 +74,9 @@ import { buildIdCardPdf, buildQrPayload, buildQrPng } from './reports/id-card.mj
 import { buildFeeReceiptPdf, buildFeeStatementPdf } from './reports/fee-receipt.mjs';
 import { buildFinanceReportPdf } from './reports/finance-report.mjs';
 import { buildFeesTablePdf } from './reports/fees-table.mjs';
+import { featureRefusal, entitlements as entitlementsFor, TIERS } from './licensing/plans.mjs';
+import { clearLicenceCache, licenceFor } from './licensing/licence.mjs';
+import { handlePlanFunction } from './licensing/self-service.mjs';
 import { APP_VERSION, BUILD_NUMBER, DEVELOPER_CONTACTS } from './version.mjs';
 import { getPublicGradingOptions } from './reports/grading-config.mjs';
 import { generateLlmSearchReply, getPublicModelCatalog, resolveModelSelection } from './services/llm-models.mjs';
@@ -3205,6 +3209,27 @@ const handleTeacherPerformanceFunction = async (database, body = {}, { actor: au
     };
   }
 
+  /* The allocations themselves, one row per class-and-subject.
+     `summary` groups them by class and drops the subject id, the year and the term — enough to read
+     a report, not enough to take one back. Removing an allocation needs all three, so the Users
+     screen reads them from here. */
+  if (action === 'allocations') {
+    if (!person.teacher_id) return { allocations: [] };
+
+    const { rows } = await database.query(
+      `
+        SELECT DISTINCT a.subject_id, a.grade_level, a.class_section, a.academic_year, a.term,
+               c.name AS subject_name
+        FROM subject_allocations a
+        LEFT JOIN subjects_catalog c ON c.id = a.subject_id
+        WHERE a.teacher_id = $1
+        ORDER BY a.grade_level, a.class_section, c.name
+      `,
+      [person.teacher_id],
+    );
+    return { allocations: rows };
+  }
+
   if (action === 'unallocate') {
     if (!isAdmin) return { error: 'Unauthorized' };
     if (!person.teacher_id) return { error: 'That member of staff has no allocations' };
@@ -4934,6 +4959,132 @@ const feesTableDocument = async (database, kind, searchParams, { school, brandin
   return pdfResponse(pdfBytes, `${spec.filename || kind}.pdf`);
 };
 
+/* ---------------------------------------------------------------------------- */
+/* What each endpoint is worth                                                   */
+/* ---------------------------------------------------------------------------- */
+
+/**
+ * Which feature an endpoint belongs to.
+ *
+ * Absent means ungated, and that is the safe direction: a new endpoint is open until somebody
+ * decides what it is worth, rather than dark until somebody remembers to add it here. Signing in,
+ * the health check and the entitlements themselves are never listed — a school that has let its
+ * subscription lapse still has to be able to log in and read why.
+ */
+const FEATURE_BY_ROUTE = {
+  '/api/functions/fee-status': 'fees_core',
+  '/api/functions/student-card': 'scanning',
+  '/api/functions/student-summary': 'students',
+  '/api/functions/messages': 'messages',
+  '/api/functions/roll-call': 'attendance',
+  '/api/functions/exam-clearance': 'fees_core',
+  '/api/functions/gate-permission': 'gate',
+  '/api/functions/gate-log': 'gate',
+  '/api/functions/gate-pass': 'gate',
+  '/api/functions/meal-record': 'meals',
+  '/api/functions/monitoring': 'monitoring',
+  '/api/functions/marks': 'marks',
+  '/api/functions/student-registry': 'registration',
+  '/api/functions/clubs': 'school_life',
+  '/api/functions/requirements': 'school_life',
+  '/api/functions/matron': 'matron',
+  '/api/functions/teacher-performance': 'teaching',
+  '/api/functions/student-report': 'records',
+  '/api/functions/settings': 'settings',
+  '/api/functions/backup': 'school_data',
+  '/api/functions/data': 'school_data',
+  '/api/functions/integrations': 'integrations',
+  '/api/functions/mcp': 'integrations',
+  '/api/mcp': 'integrations',
+  '/api/functions/fees': 'fees_core',
+  '/api/functions/ai-chat': 'assistant',
+  '/api/functions/ai-models': 'assistant',
+  '/api/functions/voice-to-text': 'assistant',
+  '/api/functions/search': 'search',
+  '/api/functions/chat-report': 'ai_documents',
+  '/api/functions/lesson-planner': 'lessons',
+  '/api/functions/curriculum': 'lessons',
+  '/api/functions/digital-examiner': 'examiner',
+};
+
+/** The generated documents, which are GETs and so are not in the map above. */
+const featureForDocument = (pathname) => {
+  if (/^\/api\/fees\/(structures|billing-run|arrears|bursaries|ratings)\.pdf$/.test(pathname)) return 'fees_billing';
+  if (pathname === '/api/fees/report.pdf') return 'finance';
+  if (/^\/api\/fees\/(receipts|statements)\//.test(pathname)) return 'fees_core';
+  if (/^\/api\/backups\//.test(pathname)) return 'school_data';
+  if (/^\/api\/id-cards\.pdf$/.test(pathname)) return 'scanning';
+  if (/^\/api\/exam-papers\//.test(pathname)) return 'examiner';
+  if (/^\/api\/lesson-plans\//.test(pathname)) return 'lessons';
+  if (/^\/api\/chat-reports\//.test(pathname)) return 'ai_documents';
+  return null;
+};
+
+/**
+ * Where one endpoint spans two tiers.
+ *
+ * The fees screen is Essential — a school on any plan has to be able to take money and issue a
+ * receipt — but the billing runs, arrears and bursaries behind the same endpoint are Professional.
+ * Recording marks is Standard; reading them off a photograph is the AI feature. Gating the whole
+ * endpoint either way would sell somebody a screen with half of it broken.
+ */
+const ACTION_FEATURE = {
+  '/api/functions/fees': {
+    summary: 'finance',
+    preview_billing_run: 'fees_billing',
+    run_billing: 'fees_billing',
+    bill_student: 'fees_billing',
+    arrears_report: 'fees_billing',
+    list_bursaries: 'fees_billing',
+    save_bursary: 'fees_billing',
+    delete_bursary: 'fees_billing',
+    list_standings: 'fees_billing',
+    set_standing: 'fees_billing',
+    clear_standing: 'fees_billing',
+  },
+  '/api/functions/marks': {
+    extract: 'mark_extraction',
+  },
+  /* Attaching a teacher to a class is staff administration, not the teaching analytics the rest of
+     this endpoint serves. Left on 'teaching' it would be unreachable on Essential, so a school
+     could hire a teacher and have no way to give them a class — and marks would never appear on
+     the phone. The report itself stays where it is. */
+  '/api/functions/teacher-performance': {
+    allocate: 'users',
+    unallocate: 'users',
+    allocations: 'users',
+    staff: 'users',
+  },
+};
+
+const featureForRequest = (pathname, body = {}) => {
+  const byAction = ACTION_FEATURE[pathname];
+  const action = byAction && typeof body?.action === 'string' ? byAction[body.action] : null;
+  return action || FEATURE_BY_ROUTE[pathname] || featureForDocument(pathname);
+};
+
+/**
+ * 402 rather than 403.
+ *
+ * "You are not allowed" and "this school has not bought that" are different answers, and a client
+ * that cannot tell them apart will offer to log the user in again over a billing problem.
+ */
+const licenceRefusalResponse = (refusal) => ({
+  type: 'json',
+  status: 402,
+  body: {
+    error: refusal.message,
+    licence: {
+      feature: refusal.feature,
+      reason: refusal.reason,
+      plan: refusal.plan,
+      requiredPlan: refusal.requiredPlan,
+      requiredPlanLabel: refusal.requiredPlanLabel,
+    },
+    data: null,
+  },
+});
+
 const handleFeeDocumentRequest = async (database, pathname, searchParams, { actor } = {}) => {
   const receiptMatch = pathname.match(/^\/api\/fees\/receipts\/([^/]+)\.pdf$/);
   const statementMatch = pathname.match(/^\/api\/fees\/statements\/([^/]+)\.pdf$/);
@@ -5065,7 +5216,7 @@ const handleFeeDocumentRequest = async (database, pathname, searchParams, { acto
  * Inert (returns an error) unless a control database is configured.
  */
 // Actions that act on the platform, not on one school. Gated by the owner token, never by a role.
-const OWNER_ACTIONS = ['list', 'sweep', 'create', 'set_status'];
+const OWNER_ACTIONS = ['list', 'sweep', 'create', 'set_status', 'set_plan'];
 const TENANT_STATUSES = ['pending', 'active', 'past_due', 'suspended'];
 
 const handleProvisionFunction = async (provisioning, body = {}, httpClient, headers = {}) => {
@@ -5139,7 +5290,36 @@ const handleProvisionFunction = async (provisioning, body = {}, httpClient, head
         provisioning.provisionOptions,
       );
       provisioning.onProvisioned(tenant?.subdomain || normalizeSubdomain(body.subdomain));
-      return { tenant: publicTenant(tenant), created: true };
+
+      /* A school is usually sold a tier before it is created, so the operator says so here rather
+         than creating it and immediately changing it. Omitted means the column default, which is
+         Enterprise — see the note on liftPrePlanTenants. */
+      const wanted = String(body.plan || '').trim().toLowerCase();
+      if (wanted && !TIERS.includes(wanted)) {
+        return { error: `Unsupported plan: ${body.plan}. Use one of ${TIERS.join(', ')}.` };
+      }
+      const withPlan = wanted && tenant
+        ? await setTenantPlan(control, tenant.subdomain, wanted)
+        : tenant;
+
+      return { tenant: publicTenant(withPlan || tenant), created: true };
+    }
+
+    if (action === 'set_plan') {
+      const plan = String(body.plan || '').trim().toLowerCase();
+      if (!TIERS.includes(plan)) {
+        return { error: `Unsupported plan: ${body.plan}. Use one of ${TIERS.join(', ')}.` };
+      }
+      const tenant = await setTenantPlan(control, normalizeSubdomain(body.subdomain), plan);
+      if (!tenant) return { error: 'Unknown school' };
+
+      /* The licence is cached for a minute, and a plan changed from the owner console should be in
+         force by the time the operator has finished telling the school it is. */
+      /* The subdomain, because that is what a tenant is keyed by everywhere — it is what
+         resolveTenantId hands to the request path. Clearing both keys was hedging against a
+         confusion now settled in licence.mjs. */
+      clearLicenceCache(tenant.subdomain);
+      return { tenant: publicTenant(tenant) };
     }
 
     if (action === 'set_status') {
@@ -5287,6 +5467,26 @@ export const createAppRuntime = async ({
       // those fall back to the role in the body. See resolveActor.
       actor,
     }) {
+      /* The licence is checked here rather than inside each handler, for the same reason the fees
+         role check sits ahead of its action table: a gate a handler can forget to call is a gate
+         that will eventually be forgotten. */
+      const gatedFeature = featureForRequest(pathname, body);
+      if (gatedFeature) {
+        const licence = await licenceFor(database, { tenantId, control });
+        const refusal = featureRefusal(licence, gatedFeature);
+        if (refusal) return licenceRefusalResponse(refusal);
+      }
+
+      // What this school has, so a client can draw a navigation before it knows what to ask for.
+      // Never gated: a school whose subscription has lapsed still has to be able to read why.
+      if (method === 'GET' && pathname === '/api/entitlements') {
+        return {
+          type: 'json',
+          status: 200,
+          body: { data: entitlementsFor(await licenceFor(database, { tenantId, control })) },
+        };
+      }
+
       const reportCardResponse = await handleReportCardRequest(database, pathname, searchParams, { method, body, actor });
       if (reportCardResponse) {
         return reportCardResponse;
@@ -5527,6 +5727,15 @@ export const createAppRuntime = async ({
         const data = await handleStudentReportFunction(database, body, { actor });
         return data?.error
           ? { type: 'json', status: 400, body: { error: data.error, data: null } }
+          : { type: 'json', status: 200, body: { data } };
+      }
+
+      /* Deliberately absent from FEATURE_BY_ROUTE: whatever tier a school is on, it has to be able
+         to reach the screen that changes the tier. Gating this would be a door locked from inside. */
+      if (method === 'POST' && pathname === '/api/functions/plan') {
+        const data = await handlePlanFunction(database, body, { actor, tenantId, control, setTenantPlan });
+        return data?.error
+          ? { type: 'json', status: data.error === 'Unauthorized' ? 403 : 400, body: { error: data.error, data: null } }
           : { type: 'json', status: 200, body: { data } };
       }
 
