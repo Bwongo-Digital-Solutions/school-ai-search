@@ -3431,6 +3431,60 @@ test('the four tiers decide what a school can reach, and the server is what says
 });
 
 
+test('tenants who predate plans are lifted onto Enterprise once, and never demoted again', async () => {
+  const { initializeControlSchema } = await import('../server/db/control.mjs');
+
+  /* A stand-in for the control database that answers the one question the migration asks and
+     records what it was told to do. The real thing needs a Postgres; what has to be proven here is
+     the decision, not the SQL engine. */
+  const fakeControl = (columnDefault) => {
+    const statements = [];
+    return {
+      statements,
+      query: async (sql) => {
+        statements.push(sql.replace(/\s+/g, ' ').trim());
+        if (sql.includes('information_schema.columns')) {
+          return { rows: columnDefault === null ? [] : [{ column_default: columnDefault }] };
+        }
+        return { rows: [] };
+      },
+    };
+  };
+
+  const didLift = (control) => control.statements.some((sql) => sql.startsWith('UPDATE tenants SET plan'));
+  const didMoveDefault = (control) => control.statements.some((sql) => sql.includes('ALTER COLUMN plan SET DEFAULT'));
+
+  /* The state every existing deployment is in: the column still carries the old default, and every
+     row carries a 'standard' nobody ever chose. Without this the licence gate would take the
+     examiner, finance, billing, audit, monitoring, the assistant and search away from every cloud
+     tenant on the deploy that introduced it. */
+  const old = fakeControl("'standard'::text");
+  await initializeControlSchema(old);
+  assert.equal(didLift(old), true, 'the rows are lifted');
+  assert.equal(didMoveDefault(old), true, 'and the default moves, which is what stops it running twice');
+
+  // Second boot: the default has moved, so there is nothing left to do.
+  const migrated = fakeControl("'enterprise'::text");
+  await initializeControlSchema(migrated);
+  assert.equal(didLift(migrated), false, 'a school genuinely sold Standard keeps it across a restart');
+  assert.equal(didMoveDefault(migrated), false);
+
+  // A control database that cannot answer at all must not take start-up down with it.
+  const mute = {
+    statements: [],
+    query: async (sql) => {
+      if (sql.includes('information_schema.columns')) throw new Error('no such table');
+      return { rows: [] };
+    },
+  };
+  await initializeControlSchema(mute);
+
+  const empty = fakeControl(null);
+  await initializeControlSchema(empty);
+  assert.equal(didLift(empty), false);
+});
+
+
 test('a student summary shows each role its own share of one student, and no more', async () => {
   const { runtime, cleanup } = await startTestRuntime();
 

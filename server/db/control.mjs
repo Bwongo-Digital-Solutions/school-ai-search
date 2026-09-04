@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS tenants (
   db_name TEXT NOT NULL DEFAULT '',
   db_url TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'active', 'past_due', 'suspended')),
-  plan TEXT NOT NULL DEFAULT 'standard',
+  plan TEXT NOT NULL DEFAULT 'enterprise',
   current_period_end TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   activated_at TIMESTAMPTZ,
@@ -45,8 +45,45 @@ export const createControlConnection = ({ connectionString = process.env.CONTROL
   return createDatabaseConnection({ connectionString, useInMemoryDatabase });
 };
 
+/**
+ * Lift the tenants who predate plans onto Enterprise, once.
+ *
+ * `plan` has been on this table since it was written, defaulting to 'standard', and until the
+ * licensing work nothing ever read it or deliberately set it. So every row carrying 'standard'
+ * carries a value nobody chose — and the moment the licence gate started reading this column, all
+ * of them would have been demoted on deploy: no examiner, no finance, no billing runs, no audit, no
+ * monitoring, no assistant, no search. Schools would have lost screens they use daily, at a deploy
+ * they did not ask for, with nothing on screen to explain it.
+ *
+ * The whole design says a tier is something somebody sells, never something a migration decides, so
+ * the rows are lifted rather than the gate loosened.
+ *
+ * It runs exactly once, and the old column default is the marker: the first pass rewrites the rows
+ * and then moves the default to 'enterprise', after which the condition is false forever. A school
+ * genuinely sold Standard afterwards keeps it — which a blunt `UPDATE ... WHERE plan = 'standard'`
+ * on every boot would quietly undo, every time the server restarted.
+ */
+const liftPrePlanTenants = async (control) => {
+  try {
+    const { rows } = await control.query(
+      `SELECT column_default FROM information_schema.columns
+        WHERE table_name = 'tenants' AND column_name = 'plan' LIMIT 1`,
+    );
+    const columnDefault = String(rows[0]?.column_default ?? '');
+    if (!columnDefault.includes('standard')) return;
+
+    await control.query(`UPDATE tenants SET plan = 'enterprise' WHERE plan = 'standard'`);
+    await control.query(`ALTER TABLE tenants ALTER COLUMN plan SET DEFAULT 'enterprise'`);
+  } catch {
+    /* An in-memory control database has no information_schema to consult, and a fresh one is
+       already on the new default with no rows to lift. Never a reason to fail start-up: the cost of
+       skipping is that the CREATE TABLE default above is already correct. */
+  }
+};
+
 export const initializeControlSchema = async (control) => {
   await control.query(CONTROL_SCHEMA_SQL);
+  await liftPrePlanTenants(control);
 };
 
 /* -------------------------------------------------------------------------- */
