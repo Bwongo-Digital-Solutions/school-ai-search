@@ -33,9 +33,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 22, not 20, and not by taste: pdfjs-dist declares `node >=22.13.0`, and reading marks off
+      # a PDF fails *silently* below that — the text layer comes back empty and the extraction
+      # reports nothing rather than erroring. Pinning 20 here is what first surfaced it, since
+      # nothing in the repo said which node it needed. package.json now says so too.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
