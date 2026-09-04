@@ -233,13 +233,24 @@ CREATE TABLE IF NOT EXISTS school_backups (
   id TEXT PRIMARY KEY,
   filename TEXT NOT NULL,
   size_bytes BIGINT NOT NULL DEFAULT 0,
-  kind TEXT NOT NULL DEFAULT 'manual' CHECK (kind IN ('manual', 'scheduled')),
+  kind TEXT NOT NULL DEFAULT 'manual' CHECK (kind IN ('manual', 'scheduled', 'uploaded')),
   status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'complete', 'failed')),
   error TEXT NOT NULL DEFAULT '',
   encrypted BOOLEAN NOT NULL DEFAULT FALSE,
   created_by TEXT NOT NULL DEFAULT '',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- A dump brought in from elsewhere: an old server, a laptop, a hosting provider's export. Neither
+-- manual nor scheduled, and it must not claim to be either -- the pruning that keeps the last N
+-- scheduled backups would otherwise be entitled to delete a file this school cannot take again.
+--
+-- 'uploaded' is in the CREATE TABLE above as well as here. A database that already exists takes it
+-- from this ALTER; a fresh one takes it inline, because pg-mem auto-names an inline column CHECK
+-- differently from Postgres and so never sees the DROP below.
+ALTER TABLE school_backups DROP CONSTRAINT IF EXISTS school_backups_kind_check;
+ALTER TABLE school_backups ADD CONSTRAINT school_backups_kind_check
+  CHECK (kind IN ('manual', 'scheduled', 'uploaded'));
 
 -- When this school takes an unattended backup, and how many of them to keep.
 --
