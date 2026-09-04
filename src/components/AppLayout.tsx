@@ -21,6 +21,7 @@ import MatronDashboard from './chat/MatronDashboard';
 import TeacherPerformance from './chat/TeacherPerformance';
 import AppFooter from './common/AppFooter';
 import styles from './app-layout.module.scss';
+import { useLicence } from '@/contexts/LicenceContext';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { AccessDenied, PageHeader } from './common';
@@ -96,9 +97,41 @@ const VIEW_ROLES: Partial<Record<ActiveView, readonly string[]>> = {
   settings: ACCOUNT_ADMIN_ROLES,
 };
 
+/**
+ * Which feature each screen belongs to, mirroring FEATURE_BY_ROUTE on the server.
+ *
+ * Two lists rather than one because they answer different questions — the server gates endpoints,
+ * this gates screens, and several screens share an endpoint — but they must agree about what a tier
+ * includes. A screen missing from here is simply never hidden, which is the safe direction: the
+ * server still refuses the request behind it.
+ */
+const VIEW_FEATURE: Record<string, string> = {
+  chat: 'assistant',
+  students: 'students',
+  student: 'students',
+  records: 'records',
+  users: 'users',
+  audit: 'audit',
+  finance: 'fees_billing',
+  lessons: 'lessons',
+  examiner: 'examiner',
+  monitoring: 'monitoring',
+  teaching: 'monitoring',
+  messages: 'messages',
+  data: 'school_data',
+  elearning: 'elearning',
+  erp: 'erp',
+  'school-life': 'school_life',
+  matron: 'matron',
+  settings: 'settings',
+  /* 'fees' is deliberately absent. Seeing whether a family has paid is Essential, and it is the one
+     screen every signed-in role can open — the finance workspace above it is what costs. */
+};
+
 const AppLayout: React.FC = () => {
   const { activeView } = useChatContext();
   const { user, isAuthenticated, isSupportStaff, isMatron } = useAuth();
+  const { entitlement } = useLicence();
 
   const renderMainContent = () => {
     /* The matron is support staff, but she runs the dormitories: the head count at night, the sick
@@ -130,6 +163,15 @@ const AppLayout: React.FC = () => {
           message={`This section is not part of what a ${getRoleLabel(user.role).toLowerCase()} does here. If you need it, ask an administrator.`}
         />
       );
+    }
+
+    /* A screen the school has not bought. The nav does not offer it, so this is reached by a saved
+       link or a bookmark — which is exactly when saying why matters, because there is nothing on
+       screen to explain where the entry went. The same card as a role refusal: a wall is a wall,
+       and the difference is in the words. */
+    const licensed = entitlement(VIEW_FEATURE[activeView]);
+    if (licensed && !licensed.allowed) {
+      return <AccessDenied title={`${licensed.label} is not part of this plan`} message={licensed.message} />;
     }
 
     switch (activeView) {

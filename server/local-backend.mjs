@@ -72,6 +72,8 @@ import { buildReportCardPdf } from './reports/report-card.mjs';
 import { buildIdCardPdf, buildQrPayload, buildQrPng } from './reports/id-card.mjs';
 import { buildFeeReceiptPdf, buildFeeStatementPdf } from './reports/fee-receipt.mjs';
 import { buildFinanceReportPdf } from './reports/finance-report.mjs';
+import { featureRefusal, entitlements as entitlementsFor } from './licensing/plans.mjs';
+import { licenceFor } from './licensing/licence.mjs';
 import { APP_VERSION, BUILD_NUMBER, DEVELOPER_CONTACTS } from './version.mjs';
 import { getPublicGradingOptions } from './reports/grading-config.mjs';
 import { generateLlmSearchReply, getPublicModelCatalog, resolveModelSelection } from './services/llm-models.mjs';
@@ -4613,6 +4615,122 @@ const handleExamPaperRequest = async (database, pathname, searchParams, { actor 
  * carries no body — the same trust-the-client model as every other role check here, but it does
  * stop a support-staff browser from pulling a student's full fee history.
  */
+/* ---------------------------------------------------------------------------- */
+/* What each endpoint is worth                                                   */
+/* ---------------------------------------------------------------------------- */
+
+/**
+ * Which feature an endpoint belongs to.
+ *
+ * Absent means ungated, and that is the safe direction: a new endpoint is open until somebody
+ * decides what it is worth, rather than dark until somebody remembers to add it here. Signing in,
+ * the health check and the entitlements themselves are never listed — a school that has let its
+ * subscription lapse still has to be able to log in and read why.
+ */
+const FEATURE_BY_ROUTE = {
+  '/api/functions/fee-status': 'fees_core',
+  '/api/functions/student-card': 'scanning',
+  '/api/functions/student-summary': 'students',
+  '/api/functions/messages': 'messages',
+  '/api/functions/roll-call': 'attendance',
+  '/api/functions/exam-clearance': 'fees_core',
+  '/api/functions/gate-permission': 'gate',
+  '/api/functions/gate-log': 'gate',
+  '/api/functions/gate-pass': 'gate',
+  '/api/functions/meal-record': 'meals',
+  '/api/functions/monitoring': 'monitoring',
+  '/api/functions/marks': 'marks',
+  '/api/functions/student-registry': 'registration',
+  '/api/functions/clubs': 'school_life',
+  '/api/functions/requirements': 'school_life',
+  '/api/functions/matron': 'matron',
+  '/api/functions/teacher-performance': 'teaching',
+  '/api/functions/student-report': 'records',
+  '/api/functions/settings': 'settings',
+  '/api/functions/backup': 'school_data',
+  '/api/functions/data': 'school_data',
+  '/api/functions/integrations': 'integrations',
+  '/api/functions/mcp': 'integrations',
+  '/api/mcp': 'integrations',
+  '/api/functions/fees': 'fees_core',
+  '/api/functions/ai-chat': 'assistant',
+  '/api/functions/ai-models': 'assistant',
+  '/api/functions/voice-to-text': 'assistant',
+  '/api/functions/search': 'search',
+  '/api/functions/chat-report': 'ai_documents',
+  '/api/functions/lesson-planner': 'lessons',
+  '/api/functions/curriculum': 'lessons',
+  '/api/functions/digital-examiner': 'examiner',
+};
+
+/** The generated documents, which are GETs and so are not in the map above. */
+const featureForDocument = (pathname) => {
+  if (/^\/api\/fees\/(structures|billing-run|arrears|bursaries|ratings)\.pdf$/.test(pathname)) return 'fees_billing';
+  if (pathname === '/api/fees/report.pdf') return 'finance';
+  if (/^\/api\/fees\/(receipts|statements)\//.test(pathname)) return 'fees_core';
+  if (/^\/api\/backups\//.test(pathname)) return 'school_data';
+  if (/^\/api\/id-cards\.pdf$/.test(pathname)) return 'scanning';
+  if (/^\/api\/exam-papers\//.test(pathname)) return 'examiner';
+  if (/^\/api\/lesson-plans\//.test(pathname)) return 'lessons';
+  if (/^\/api\/chat-reports\//.test(pathname)) return 'ai_documents';
+  return null;
+};
+
+/**
+ * Where one endpoint spans two tiers.
+ *
+ * The fees screen is Essential — a school on any plan has to be able to take money and issue a
+ * receipt — but the billing runs, arrears and bursaries behind the same endpoint are Professional.
+ * Recording marks is Standard; reading them off a photograph is the AI feature. Gating the whole
+ * endpoint either way would sell somebody a screen with half of it broken.
+ */
+const ACTION_FEATURE = {
+  '/api/functions/fees': {
+    summary: 'finance',
+    preview_billing_run: 'fees_billing',
+    run_billing: 'fees_billing',
+    bill_student: 'fees_billing',
+    arrears_report: 'fees_billing',
+    list_bursaries: 'fees_billing',
+    save_bursary: 'fees_billing',
+    delete_bursary: 'fees_billing',
+    list_standings: 'fees_billing',
+    set_standing: 'fees_billing',
+    clear_standing: 'fees_billing',
+  },
+  '/api/functions/marks': {
+    extract: 'mark_extraction',
+  },
+};
+
+const featureForRequest = (pathname, body = {}) => {
+  const byAction = ACTION_FEATURE[pathname];
+  const action = byAction && typeof body?.action === 'string' ? byAction[body.action] : null;
+  return action || FEATURE_BY_ROUTE[pathname] || featureForDocument(pathname);
+};
+
+/**
+ * 402 rather than 403.
+ *
+ * "You are not allowed" and "this school has not bought that" are different answers, and a client
+ * that cannot tell them apart will offer to log the user in again over a billing problem.
+ */
+const licenceRefusalResponse = (refusal) => ({
+  type: 'json',
+  status: 402,
+  body: {
+    error: refusal.message,
+    licence: {
+      feature: refusal.feature,
+      reason: refusal.reason,
+      plan: refusal.plan,
+      requiredPlan: refusal.requiredPlan,
+      requiredPlanLabel: refusal.requiredPlanLabel,
+    },
+    data: null,
+  },
+});
+
 const handleFeeDocumentRequest = async (database, pathname, searchParams, { actor } = {}) => {
   const receiptMatch = pathname.match(/^\/api\/fees\/receipts\/([^/]+)\.pdf$/);
   const statementMatch = pathname.match(/^\/api\/fees\/statements\/([^/]+)\.pdf$/);
@@ -4958,6 +5076,26 @@ export const createAppRuntime = async ({
       // those fall back to the role in the body. See resolveActor.
       actor,
     }) {
+      /* The licence is checked here rather than inside each handler, for the same reason the fees
+         role check sits ahead of its action table: a gate a handler can forget to call is a gate
+         that will eventually be forgotten. */
+      const gatedFeature = featureForRequest(pathname, body);
+      if (gatedFeature) {
+        const licence = await licenceFor(database, { tenantId, control });
+        const refusal = featureRefusal(licence, gatedFeature);
+        if (refusal) return licenceRefusalResponse(refusal);
+      }
+
+      // What this school has, so a client can draw a navigation before it knows what to ask for.
+      // Never gated: a school whose subscription has lapsed still has to be able to read why.
+      if (method === 'GET' && pathname === '/api/entitlements') {
+        return {
+          type: 'json',
+          status: 200,
+          body: { data: entitlementsFor(await licenceFor(database, { tenantId, control })) },
+        };
+      }
+
       const reportCardResponse = await handleReportCardRequest(database, pathname, searchParams, { method, body, actor });
       if (reportCardResponse) {
         return reportCardResponse;

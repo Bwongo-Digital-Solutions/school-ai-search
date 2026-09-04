@@ -27,6 +27,7 @@ import {
   Wallet,
 } from '@carbon/react/icons';
 import { useAuth } from '@/contexts/AuthContext';
+import { useLicence } from '@/contexts/LicenceContext';
 import { useChatContext } from '@/contexts/ChatContext';
 import { useLive } from '@/contexts/LiveContext';
 import { loadIntegrations, type Integration } from '@/lib/integrations';
@@ -55,6 +56,7 @@ const AppSideNav: React.FC<AppSideNavProps> = ({ expanded, onOverlayClick }) => 
   const {
     isAuthenticated, isAdmin, isSupportStaff, isMatron, isPrivileged, canSeeStudents, canSeeFinance,
   } = useAuth();
+  const { allows: has } = useLicence();
   const [systems, setSystems] = useState<Integration[]>([]);
 
   // Which external systems this school has connected decides whether those entries exist at all —
@@ -123,30 +125,30 @@ const AppSideNav: React.FC<AppSideNavProps> = ({ expanded, onOverlayClick }) => 
     >
       <SideNavItems>
         {/* The assistant answers from full student records, so it follows the same fence they do. */}
-        {canSeeStudents && (
+        {canSeeStudents && has('assistant') && (
           <SideNavLink renderIcon={Chat} isActive={isCurrent('chat')} href="#" onClick={go('chat')}>
             Chat
           </SideNavLink>
         )}
-        {canSeeStudents && (
+        {canSeeStudents && has('students') && (
           <SideNavLink renderIcon={Group} isActive={isCurrent('students')} href="#" onClick={go('students')}>
             Students
           </SideNavLink>
         )}
-        {canSeeStudents && (
+        {canSeeStudents && has('records') && (
           <SideNavLink renderIcon={ListChecked} isActive={isCurrent('records')} href="#" onClick={go('records')}>
             Records
           </SideNavLink>
         )}
         {/* Clubs and what a student was asked to bring — one entry, because at the desk it is one
             conversation: what is this child joining, and what have they brought. */}
-        {canSeeStudents && (
+        {canSeeStudents && has('school_life') && (
           <SideNavLink renderIcon={Events} isActive={isCurrent('school-life')} href="#" onClick={go('school-life')}>
             School Life
           </SideNavLink>
         )}
         {/* Somebody has to cover the dormitories when the matron is off. */}
-        {isPrivileged && (
+        {isPrivileged && has('matron') && (
           <SideNavLink renderIcon={Home} isActive={isCurrent('matron')} href="#" onClick={go('matron')}>
             Dormitories
           </SideNavLink>
@@ -161,32 +163,39 @@ const AppSideNav: React.FC<AppSideNavProps> = ({ expanded, onOverlayClick }) => 
 
         {canSeeStudents && <SideNavDivider />}
 
-        {canSeeStudents && (
+        {/* The two items sit on different tiers — the lesson planner is Standard, the examiner is
+            Professional — so they are guarded one at a time, and the menu disappears only when a
+            school has neither rather than when it lacks one. */}
+        {canSeeStudents && (has('lessons') || has('examiner')) && (
           <SideNavMenu renderIcon={Notebook} title="Teaching" defaultExpanded={['lessons', 'examiner'].includes(activeView)}>
-            <SideNavMenuItem isActive={isCurrent('lessons')} href="#" onClick={go('lessons')}>
-              Lesson Planner
-            </SideNavMenuItem>
-            <SideNavMenuItem isActive={isCurrent('examiner')} href="#" onClick={go('examiner')}>
-              Digital Examiner
-            </SideNavMenuItem>
+            {has('lessons') && (
+              <SideNavMenuItem isActive={isCurrent('lessons')} href="#" onClick={go('lessons')}>
+                Lesson Planner
+              </SideNavMenuItem>
+            )}
+            {has('examiner') && (
+              <SideNavMenuItem isActive={isCurrent('examiner')} href="#" onClick={go('examiner')}>
+                Digital Examiner
+              </SideNavMenuItem>
+            )}
           </SideNavMenu>)}
 
         <SideNavLink renderIcon={Wallet} isActive={isCurrent('fees')} href="#" onClick={go('fees')}>
           Fees
         </SideNavLink>
-        {canSeeFinance && (
+        {canSeeFinance && has('fees_billing') && (
           <SideNavLink renderIcon={Money} isActive={isCurrent('finance')} href="#" onClick={go('finance')}>
             Fee Management
           </SideNavLink>
         )}
 
         {/* Only offered once the school has actually connected something. */}
-        {elearning && (
+        {elearning && has('elearning') && (
           <SideNavLink renderIcon={Education} isActive={isCurrent('elearning')} href="#" onClick={go('elearning')}>
             E-Learning
           </SideNavLink>
         )}
-        {erp && isPrivileged && (
+        {erp && isPrivileged && has('erp') && (
           <SideNavLink renderIcon={Application} isActive={isCurrent('erp')} href="#" onClick={go('erp')}>
             {erp.label}
           </SideNavLink>
@@ -194,17 +203,17 @@ const AppSideNav: React.FC<AppSideNavProps> = ({ expanded, onOverlayClick }) => 
 
         {isPrivileged && <SideNavDivider />}
 
-        {isPrivileged && (
+        {isPrivileged && has('school_data') && (
           <SideNavLink renderIcon={DataBase} isActive={isCurrent('data')} href="#" onClick={go('data')}>
             School Data
           </SideNavLink>
         )}
-        {isPrivileged && (
+        {isPrivileged && has('monitoring') && (
           <SideNavLink renderIcon={ArrowsHorizontal} isActive={isCurrent('monitoring')} href="#" onClick={go('monitoring')}>
             Monitoring
           </SideNavLink>
         )}
-        {isPrivileged && (
+        {isPrivileged && has('audit') && (
           <SideNavLink renderIcon={Time} isActive={isCurrent('audit')} href="#" onClick={go('audit')}>
             Audit Log
           </SideNavLink>
@@ -212,12 +221,12 @@ const AppSideNav: React.FC<AppSideNavProps> = ({ expanded, onOverlayClick }) => 
 
         {isAdmin && <SideNavDivider />}
 
-        {isAdmin && (
+        {isAdmin && has('users') && (
           <SideNavLink renderIcon={UserAdmin} isActive={isCurrent('users')} href="#" onClick={go('users')}>
             Staff Access
           </SideNavLink>
         )}
-        {isAdmin && (
+        {isAdmin && has('settings') && (
           <SideNavLink renderIcon={SettingsIcon} isActive={isCurrent('settings')} href="#" onClick={go('settings')}>
             Settings
           </SideNavLink>

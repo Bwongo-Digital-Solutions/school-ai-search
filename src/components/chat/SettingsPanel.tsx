@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { Button, InlineNotification, Tab, TabList, Tabs } from '@carbon/react';
+import { Button, InlineNotification, Tab, TabList, Tabs, Tag } from '@carbon/react';
 import { Education, Plug, Save, Search, Settings as SettingsIcon, Password } from '@carbon/react/icons';
 import McpServersPanel from './McpServersPanel';
 import AiKeysPanel from './AiKeysPanel';
 import LibreChatPanel from './LibreChatPanel';
 import IntegrationsPanel from './IntegrationsPanel';
 import { useAuth } from '@/contexts/AuthContext';
+import { useLicence } from '@/contexts/LicenceContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useNotifications } from '@/contexts/NotificationContext';
 import {
@@ -45,6 +46,7 @@ const BLURB: Record<(typeof TABS)[number]['key'], string> = {
 
 const SettingsPanel: React.FC = () => {
   const { user, isAdmin } = useAuth();
+  const { entitlements } = useLicence();
   const { settings, refreshSettings } = useSettings();
   const { notify } = useNotifications();
   const [form, setForm] = useState<SchoolSettings>(settings);
@@ -207,6 +209,32 @@ const SettingsPanel: React.FC = () => {
                   shape="logo"
                   hint="Appears on report cards, receipts, statements and ID cards."
                 />
+              </div>
+            </WidgetCard>
+
+            {/* Read-only, and deliberately. What a school has paid for is settled by whoever sold it
+                — the control plane for a subscription, LICENCE_PLAN for a one-off install — and a
+                plan an administrator could raise from inside the product is not a plan. What this
+                does is answer "why can I not see the examiner?", which otherwise has no answer
+                anywhere in the application. */}
+            <WidgetCard>
+              <CardHeader title="Plan" />
+              <div className={styles.section}>
+                <p className={styles.blurb}>
+                  <strong>{entitlements.planLabel}</strong> · {entitlements.deploymentLabel}
+                  {entitlements.deployment === 'onsite' && !entitlements.ownModel
+                    && ' · no model of your own is configured, so the AI features are off'}
+                </p>
+                <div className={styles.planGrid}>
+                  {Object.entries(entitlements.features).map(([key, feature]) => (
+                    <Tag key={key} type={feature.allowed ? 'green' : 'cool-gray'} size="sm">
+                      {feature.label}
+                    </Tag>
+                  ))}
+                </div>
+                <p className={styles.note}>
+                  To change what is included, speak to whoever supplied the system.
+                </p>
               </div>
             </WidgetCard>
 

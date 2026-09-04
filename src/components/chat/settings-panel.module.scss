@@ -127,3 +127,12 @@
     padding-inline: layout.$spacing-03;
   }
 }
+
+/* The feature list on the Plan card: tags that wrap, rather than a table nobody reads. Whether a
+   feature is on is carried by the tag's own colour, so this only has to give them room. */
+.planGrid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin: 0.5rem 0;
+}

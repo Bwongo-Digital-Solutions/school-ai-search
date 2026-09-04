@@ -3305,6 +3305,132 @@ test('a backup names the right file and records who took it', async () => {
   }
 });
 
+test('the four tiers decide what a school can reach, and the server is what says no', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const { clearLicenceCache } = await import('../server/licensing/licence.mjs');
+
+  const setPlan = async (plan, deployment = 'cloud') => {
+    await runtime.database.query(
+      "UPDATE school_settings SET plan = $1, deployment = $2 WHERE id = 'default'",
+      [plan, deployment],
+    );
+    // The licence is cached for a minute so a busy screen does not open a connection per click.
+    clearLicenceCache();
+  };
+  const call = (pathname, body = {}) =>
+    runtime.dispatch({ method: 'POST', pathname, body: { requesterRole: 'admin', ...body } });
+
+  try {
+    /* An existing school has no plan column until this migration runs, and the column defaults to
+       enterprise. Nothing may go dark on deploy for a school already using it. */
+    const asShipped = await runtime.database.query("SELECT plan, deployment FROM school_settings WHERE id = 'default'");
+    assert.equal(asShipped.rows[0].plan, 'enterprise');
+    assert.equal(asShipped.rows[0].deployment, 'cloud');
+
+    await setPlan('essential');
+
+    // Essential runs the office: the roll, the money coming in, the records.
+    assert.notEqual((await call('/api/functions/messages', { action: 'inbox' })).status, 402);
+    assert.notEqual((await call('/api/functions/student-registry', { action: 'next_number' })).status, 402);
+
+    // And stops at the school day.
+    const matron = await call('/api/functions/matron', { action: 'dashboard' });
+    assert.equal(matron.status, 402, 'a payment problem, not a permission one');
+    assert.equal(matron.body.licence.requiredPlan, 'standard');
+    assert.equal(matron.body.licence.plan, 'essential');
+    assert.match(matron.body.error, /part of Standard/);
+    assert.match(matron.body.error, /on Essential/);
+
+    for (const [pathname, plan] of [
+      ['/api/functions/matron', 'standard'],
+      ['/api/functions/roll-call', 'standard'],
+      ['/api/functions/digital-examiner', 'professional'],
+      ['/api/functions/monitoring', 'professional'],
+      ['/api/functions/ai-chat', 'enterprise'],
+      ['/api/functions/search', 'enterprise'],
+    ]) {
+      const refused = await call(pathname, { action: 'anything' });
+      assert.equal(refused.status, 402, pathname);
+      assert.equal(refused.body.licence.requiredPlan, plan, pathname);
+    }
+
+    /* Signing in is never gated. A school whose subscription has lapsed still has to be able to log
+       in and read why — the alternative is a locked door with no sign on it. */
+    for (const pathname of ['/api/functions/auth']) {
+      assert.notEqual((await call(pathname, { action: 'login' })).status, 402);
+    }
+    assert.notEqual((await runtime.dispatch({ method: 'GET', pathname: '/api/health', searchParams: new URLSearchParams() })).status, 402);
+
+    // The entitlements themselves are readable at every tier, for the same reason.
+    const seen = await runtime.dispatch({ method: 'GET', pathname: '/api/entitlements', searchParams: new URLSearchParams() });
+    assert.equal(seen.status, 200);
+    assert.equal(seen.body.data.plan, 'essential');
+    assert.equal(seen.body.data.features.matron.allowed, false);
+    assert.equal(seen.body.data.features.matron.reason, 'plan');
+    assert.equal(seen.body.data.features.students.allowed, true);
+    // Every key is present whether it is on or off: a nav deciding what to hide should not have to
+    // tell "this school does not have it" from "the server forgot to mention it".
+    assert.ok(Object.keys(seen.body.data.features).length > 20);
+
+    /* One endpoint, two tiers. Taking money is Essential; the billing runs behind the same endpoint
+       are Professional, and gating the whole thing either way sells a half-broken screen. */
+    await setPlan('standard');
+    assert.notEqual((await call('/api/functions/fees', { action: 'record_payment' })).status, 402);
+    assert.equal((await call('/api/functions/fees', { action: 'arrears_report' })).status, 402);
+    assert.equal((await call('/api/functions/fees', { action: 'run_billing' })).body.licence.requiredPlan, 'professional');
+    // Recording marks is Standard; reading them off a photograph is the AI feature.
+    assert.notEqual((await call('/api/functions/marks', { action: 'roster' })).status, 402);
+    assert.equal((await call('/api/functions/marks', { action: 'extract' })).body.licence.requiredPlan, 'enterprise');
+
+    await setPlan('professional');
+    assert.notEqual((await call('/api/functions/fees', { action: 'arrears_report' })).status, 402);
+    assert.notEqual((await call('/api/functions/digital-examiner', { action: 'list' })).status, 402);
+    assert.equal((await call('/api/functions/ai-chat', { action: 'send' })).status, 402);
+
+    // The printable fees documents follow their screen, not the endpoint they happen to share.
+    const printed = await runtime.dispatch({
+      method: 'GET', pathname: '/api/fees/arrears.pdf', searchParams: new URLSearchParams({ requesterRole: 'admin' }),
+    });
+    assert.notEqual(printed.status, 402, 'Professional includes the arrears list, printed or not');
+
+    await setPlan('essential');
+    assert.equal((await runtime.dispatch({
+      method: 'GET', pathname: '/api/fees/arrears.pdf', searchParams: new URLSearchParams({ requesterRole: 'admin' }),
+    })).status, 402, 'and Essential does not, by either route');
+
+    /* On-premise. The AI features run on hosted models this deployment meters, and a one-off
+       install is not on that meter — but a school pointing at a model of its own is paying for the
+       inference itself, and there is nothing left to meter. */
+    await setPlan('enterprise', 'onsite');
+    const noModel = await call('/api/functions/ai-chat', { action: 'send' });
+    assert.equal(noModel.status, 402);
+    assert.equal(noModel.body.licence.reason, 'hosted_model', 'the tier is right; the deployment is not');
+    assert.match(noModel.body.error, /model of your own/);
+    // Everything that is not AI is untouched by the deployment.
+    assert.notEqual((await call('/api/functions/matron', { action: 'dashboard' })).status, 402);
+    assert.notEqual((await call('/api/functions/digital-examiner', { action: 'list' })).status, 402);
+
+    await runtime.database.query(
+      "INSERT INTO provider_credentials (provider, base_url) VALUES ('ollama', 'http://school-box:11434')",
+    );
+    clearLicenceCache();
+    assert.notEqual((await call('/api/functions/ai-chat', { action: 'send' })).status, 402, 'their own model, their own inference');
+
+    // Enterprise on cloud is exactly what every school had before any of this existed.
+    await setPlan('enterprise', 'cloud');
+    for (const pathname of [
+      '/api/functions/matron', '/api/functions/ai-chat', '/api/functions/digital-examiner',
+      '/api/functions/fees', '/api/functions/search', '/api/functions/monitoring',
+    ]) {
+      assert.notEqual((await call(pathname, { action: 'anything' })).status, 402, pathname);
+    }
+  } finally {
+    clearLicenceCache();
+    await cleanup();
+  }
+});
+
+
 test('a student summary shows each role its own share of one student, and no more', async () => {
   const { runtime, cleanup } = await startTestRuntime();
 
