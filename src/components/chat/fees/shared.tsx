@@ -3,12 +3,17 @@ import { Button, Tag } from '@carbon/react';
 import {
   Checkmark,
   CheckmarkFilled,
+  Download,
+  Printer,
   Time,
   Warning,
   WarningAlt,
   Help,
 } from '@carbon/react/icons';
+import { downloadFromUrl, printFromUrl } from '@/lib/download';
+import { feeDocumentUrl } from '@/lib/fees';
 import type { AgingBucketKey, EffectiveFeeStanding } from '@/types/feeAdmin';
+import type { UserProfile } from '@/types/auth';
 import styles from './shared.module.scss';
 
 /**
@@ -100,6 +105,51 @@ export const GhostButton = ({
     {children}
   </Button>
 );
+
+/**
+ * Print and save, for a screen that has a printable version.
+ *
+ * Both, rather than one: printing is what happens when a bursar walks into a meeting, and saving is
+ * what happens when a sponsor has to be emailed. The pair appears on every fees tab, so it is one
+ * component — five copies would be five chances for one screen to offer only half of it.
+ *
+ * `params` is spread into the query string, so a caller passes the filters the list is being shown
+ * under and the paper matches the screen it came from.
+ */
+export const PrintButtons = ({
+  path,
+  filename,
+  params = {},
+  user,
+  disabled = false,
+  runAction,
+}: {
+  path: string;
+  filename: string;
+  params?: Record<string, string>;
+  user: UserProfile | null;
+  disabled?: boolean;
+  runAction: (label: string, handler: () => Promise<void>) => Promise<void>;
+}) => {
+  const url = () => feeDocumentUrl(path, user, params);
+
+  return (
+    <>
+      <SecondaryButton
+        onClick={() => runAction('Preparing the document', () => printFromUrl(url()))}
+        disabled={disabled}
+      >
+        <Printer size={16} /> Print
+      </SecondaryButton>
+      <SecondaryButton
+        onClick={() => runAction('Building the PDF', () => downloadFromUrl(url(), filename))}
+        disabled={disabled}
+      >
+        <Download size={16} /> PDF
+      </SecondaryButton>
+    </>
+  );
+};
 
 export const Panel = ({ children, className = '' }: { children: React.ReactNode; className?: string }) => (
   <div className={`${styles.panel} ${className}`}>{children}</div>
