@@ -9768,3 +9768,82 @@ test('the matron works from the dormitory: a roll, a sick bay and beds', async (
     await cleanup();
   }
 });
+
+test('the matron keeps the room list herself, and the list says who is in each bed', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const matronCall = (body, actor) => runtime.dispatch({
+    method: 'POST', pathname: '/api/functions/matron', body, actor, headers: { host: 'localhost' },
+  });
+  const matron = { id: 'm1', role: 'support_staff', designation: 'matron', name: 'Matron Grace', email: 'grace@school.test' };
+  const cook = { id: 'm2', role: 'support_staff', designation: 'cook', name: 'Cook', email: 'cook@school.test' };
+
+  try {
+    // Keeping the list is the matron's job and only hers — the same post gate as the rest of the
+    // screen, so the cook cannot rearrange the dormitories.
+    assert.equal(
+      (await matronCall({ action: 'save_room', hostelName: 'Nile House', roomNumber: '1', capacity: 2 }, cook)).body.error,
+      'Unauthorized',
+    );
+
+    const made = (await matronCall({ action: 'save_room', hostelName: 'Nile House', roomNumber: '12', capacity: 2 }, matron)).body.data.room;
+    assert.ok(made.id);
+    assert.equal(made.capacity, 2);
+    assert.equal(made.free, 2);
+    assert.deepEqual(made.occupants, [], 'a new room is empty, in the shape the list expects');
+
+    // Two rooms with one name cannot be told apart on any screen that lists them.
+    assert.equal(
+      (await matronCall({ action: 'save_room', hostelName: 'nile house', roomNumber: '12', capacity: 4 }, matron)).body.error,
+      'Nile House already has a room 12',
+    );
+
+    // Half a bed is not a thing, and neither is a room with none.
+    assert.match((await matronCall({ action: 'save_room', hostelName: 'Nile House', roomNumber: '13', capacity: 0 }, matron)).body.error, /at least one/);
+    assert.match((await matronCall({ action: 'save_room', hostelName: 'Nile House', roomNumber: '13', capacity: 2.5 }, matron)).body.error, /whole number/);
+    assert.match((await matronCall({ action: 'save_room', hostelName: '', roomNumber: '13', capacity: 2 }, matron)).body.error, /Which hostel/);
+
+    const students = (await runtime.database.query(
+      'SELECT id, student_id, first_name, last_name FROM students ORDER BY last_name LIMIT 2',
+    )).rows;
+    for (const student of students) {
+      assert.ok((await matronCall({ action: 'assign_bed', studentId: student.student_id, roomId: made.id, bedNumber: '1' }, matron)).body.data.assignment);
+    }
+
+    /* The occupants are the point of the change: a count tells her the room is full, but only a
+       name tells her which child to move. */
+    const listed = (await matronCall({ action: 'rooms' }, matron)).body.data.rooms;
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0].occupied, 2);
+    assert.equal(listed[0].full, true);
+    assert.deepEqual(
+      listed[0].occupants.map((o) => o.student_number).sort(),
+      students.map((s) => s.student_id).sort(),
+      'the room names the children in it',
+    );
+    assert.ok(listed[0].occupants[0].last_name, 'and by name, not only by id');
+
+    // Cutting the beds out from under a sleeping child is refused in words rather than done.
+    const shrunk = await matronCall({ action: 'save_room', roomId: made.id, hostelName: 'Nile House', roomNumber: '12', capacity: 1 }, matron);
+    assert.match(shrunk.body.error, /2 children sleep in Nile House 12/);
+    assert.equal((await matronCall({ action: 'rooms' }, matron)).body.data.rooms[0].capacity, 2, 'and nothing changed');
+
+    // Deleting it would cascade the assignments away and lose the record of who slept where.
+    assert.match((await matronCall({ action: 'remove_room', roomId: made.id }, matron)).body.error, /2 children still sleep/);
+
+    // Renaming and growing a room she has in front of her.
+    const grown = (await matronCall({ action: 'save_room', roomId: made.id, hostelName: 'Nile House', roomNumber: '12A', capacity: 4 }, matron)).body.data.room;
+    assert.equal(grown.room_number, '12A');
+    assert.equal(grown.capacity, 4);
+    assert.equal(grown.free, 2);
+    assert.equal(grown.full, false);
+
+    for (const student of students) {
+      await matronCall({ action: 'release_bed', studentId: student.student_id }, matron);
+    }
+    assert.equal((await matronCall({ action: 'remove_room', roomId: made.id }, matron)).body.data.removed, made.id);
+    assert.equal((await matronCall({ action: 'rooms' }, matron)).body.data.rooms.length, 0);
+    assert.equal((await matronCall({ action: 'remove_room', roomId: made.id }, matron)).body.error, 'That room no longer exists');
+  } finally {
+    await cleanup();
+  }
+});

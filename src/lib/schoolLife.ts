@@ -183,11 +183,26 @@ export interface SickBayRecord {
   open: boolean;
 }
 
+/** A child in a bed, as the room list reports them. */
+export interface RoomOccupant {
+  assignment_id: string;
+  room_id: string;
+  bed_number: string | null;
+  start_date: string;
+  student_id: string;
+  student_number: string;
+  first_name: string;
+  last_name: string;
+  grade_level: number | string | null;
+  class_section: string | null;
+}
+
 export interface HostelRoom {
   id: string;
   hostel_name: string;
   room_number: string;
   capacity: number;
+  occupants: RoomOccupant[];
   occupied: number;
   free: number;
   full: boolean;
@@ -287,6 +302,10 @@ export const matronApi = {
     call<{ assignment: unknown; already?: boolean }>('matron', { action: 'assign_bed', studentId, roomId, bedNumber }),
   releaseBed: (studentId: string) =>
     call<{ assignment: unknown }>('matron', { action: 'release_bed', studentId }),
+  saveRoom: (room: { roomId?: string; hostelName: string; roomNumber: string; capacity: number }) =>
+    call<{ room: HostelRoom }>('matron', { action: 'save_room', ...room }),
+  removeRoom: (roomId: string) =>
+    call<{ removed: string }>('matron', { action: 'remove_room', roomId }),
   welfare: (hostel?: string) =>
     call<{ students: OwingStudent[] }>('matron', { action: 'welfare', hostel }),
 };
