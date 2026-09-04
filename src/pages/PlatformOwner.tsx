@@ -39,6 +39,19 @@ const STATUSES = ['active', 'past_due', 'suspended', 'pending'] as const;
 const formatDate = (value: string | null) =>
   value ? new Date(value).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '—';
 
+/* Cheapest first, matching TIERS in server/licensing/plans.mjs. Duplicated rather than fetched
+   because this console is reached with an owner token and no school context, so there is no
+   entitlements endpoint to ask — but it must not drift from the server, which decides what a tier
+   actually includes. */
+const PLANS = ['essential', 'standard', 'professional', 'enterprise'];
+
+const PLAN_LABELS: Record<string, string> = {
+  essential: 'Essential',
+  standard: 'Standard',
+  professional: 'Professional',
+  enterprise: 'Enterprise',
+};
+
 const PlatformOwner: React.FC = () => {
   const [token, setToken] = useState('');
   const [unlocked, setUnlocked] = useState(false);
@@ -46,7 +59,7 @@ const PlatformOwner: React.FC = () => {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const [form, setForm] = useState({ subdomain: '', schoolName: '', contactEmail: '' });
+  const [form, setForm] = useState({ subdomain: '', schoolName: '', contactEmail: '', plan: 'enterprise' });
 
   const run = useCallback(
     async (label: string, handler: () => Promise<string | void>) => {
@@ -79,10 +92,10 @@ const PlatformOwner: React.FC = () => {
     () =>
       run('Creating the school', async () => {
         const data = await callProvision<{ tenant: PlatformTenant }>('create', form, token);
-        setForm({ subdomain: '', schoolName: '', contactEmail: '' });
+        setForm({ subdomain: '', schoolName: '', contactEmail: '', plan: 'enterprise' });
         const list = await callProvision<{ tenants: PlatformTenant[] }>('list', {}, token);
         setTenants(list.tenants || []);
-        return `${data.tenant.subdomain} is live. Open it and create the first (administrator) account.`;
+        return `${data.tenant.subdomain} is live on ${PLAN_LABELS[data.tenant.plan ?? ''] ?? data.tenant.plan}. Open it and create the first (administrator) account.`;
       }),
     [form, run, token],
   );
@@ -94,6 +107,19 @@ const PlatformOwner: React.FC = () => {
         const list = await callProvision<{ tenants: PlatformTenant[] }>('list', {}, token);
         setTenants(list.tenants || []);
         return `${subdomain} is now ${status.replace('_', ' ')}.`;
+      }),
+    [run, token],
+  );
+
+  /* What a school has been sold, beside what it owes. Two different questions — a suspended school
+     on Enterprise and an active one on Essential are both ordinary — so two controls. */
+  const setPlan = useCallback(
+    (subdomain: string, plan: string) =>
+      run('Changing the plan', async () => {
+        await callProvision('set_plan', { subdomain, plan }, token);
+        const list = await callProvision<{ tenants: PlatformTenant[] }>('list', {}, token);
+        setTenants(list.tenants || []);
+        return `${subdomain} is now on ${PLAN_LABELS[plan] ?? plan}. It takes effect within a minute.`;
       }),
     [run, token],
   );
@@ -252,6 +278,20 @@ const PlatformOwner: React.FC = () => {
                       <SelectItem key={status} value={status} text={status.replace('_', ' ')} />
                     ))}
                   </Select>
+                  <Select
+                    id={`plan-${tenant.id}`}
+                    className={styles.statusPicker}
+                    labelText="Plan"
+                    hideLabel
+                    size="sm"
+                    value={tenant.plan ?? 'enterprise'}
+                    disabled={Boolean(busy)}
+                    onChange={event => setPlan(tenant.subdomain, event.target.value)}
+                  >
+                    {PLANS.map(plan => (
+                      <SelectItem key={plan} value={plan} text={PLAN_LABELS[plan]} />
+                    ))}
+                  </Select>
                 </div>
               </div>
             ))
@@ -286,6 +326,18 @@ const PlatformOwner: React.FC = () => {
                 value={form.contactEmail}
                 onChange={event => setForm({ ...form, contactEmail: event.target.value })}
               />
+              {/* Set at creation rather than created-then-changed: a school is normally sold a tier
+                  before it exists, and two steps is one more chance to forget the second. */}
+              <Select
+                id="new-plan"
+                labelText="Plan"
+                value={form.plan}
+                onChange={event => setForm({ ...form, plan: event.target.value })}
+              >
+                {PLANS.map(plan => (
+                  <SelectItem key={plan} value={plan} text={PLAN_LABELS[plan]} />
+                ))}
+              </Select>
             </div>
 
             <div>

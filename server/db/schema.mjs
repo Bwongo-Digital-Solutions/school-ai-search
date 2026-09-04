@@ -123,6 +123,21 @@ CREATE TABLE IF NOT EXISTS school_settings (
 -- secondary school runs both O-Level and A-Level. Defaults to 'secondary' so an existing database
 -- keeps grading exactly as it did before this column existed.
 ALTER TABLE school_settings ADD COLUMN IF NOT EXISTS school_level TEXT NOT NULL DEFAULT 'secondary';
+
+-- What this school has paid for, and how it is installed.
+--
+-- Only consulted on a one-off install. A cloud tenant's plan is the control plane's tenants.plan --
+-- what the billing system actually charges against -- and a copy here could only ever be a stale
+-- second opinion of it.
+--
+-- The default is 'enterprise', and the direction is the whole point. This system ran for a long
+-- time with no notion of a plan, and every school on it had everything. A default of 'essential'
+-- would switch features off on deploy, for schools already using them, with no warning and nothing
+-- on screen to say what happened. Somebody has to choose to sell a smaller tier before anyone
+-- loses anything.
+ALTER TABLE school_settings ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT 'enterprise';
+ALTER TABLE school_settings ADD COLUMN IF NOT EXISTS deployment TEXT NOT NULL DEFAULT 'cloud';
+
 ALTER TABLE school_settings DROP CONSTRAINT IF EXISTS school_settings_level_check;
 ALTER TABLE school_settings ADD CONSTRAINT school_settings_level_check
   CHECK (school_level IN (

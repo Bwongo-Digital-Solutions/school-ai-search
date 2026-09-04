@@ -3305,145 +3305,289 @@ test('a backup names the right file and records who took it', async () => {
   }
 });
 
-test('a dump can be brought in from elsewhere, and put back', async () => {
+test('the four tiers decide what a school can reach, and the server is what says no', async () => {
   const { runtime, cleanup } = await startTestRuntime();
-  const { handleBackupFunction } = await import('../server/services/backup.mjs');
+  const { clearLicenceCache } = await import('../server/licensing/licence.mjs');
 
-  const database = {
-    ...runtime.database,
-    kind: 'postgres',
-    pool: { options: { connectionString: 'postgres://user:pw@db:5432/school' } },
+  const setPlan = async (plan, deployment = 'cloud') => {
+    await runtime.database.query(
+      "UPDATE school_settings SET plan = $1, deployment = $2 WHERE id = 'default'",
+      [plan, deployment],
+    );
+    // The licence is cached for a minute so a busy screen does not open a connection per click.
+    clearLicenceCache();
   };
-  const call = (body, context = {}) =>
-    handleBackupFunction(database, { requesterRole: 'admin', ...body }, { tenantId: 'kampala-high', ...context });
+  const call = (pathname, body = {}) =>
+    runtime.dispatch({ method: 'POST', pathname, body: { requesterRole: 'admin', ...body } });
 
-  process.env.BACKUP_DIR = '/tmp/eschool-upload-test';
   try {
-    /* The magic bytes of a custom-format archive. Without this check a spreadsheet dragged into the
-       wrong box sits on the list looking restorable, and the difference only surfaces at a recovery
-       — the worst possible moment to learn it. */
-    const notADump = await call({ action: 'upload', content: Buffer.from('id,name\n1,Ali').toString('base64'), filename: 'students.csv' });
-    assert.match(notADump.error, /not a PostgreSQL custom-format dump/);
-    assert.match((await call({ action: 'upload', content: '' })).error, /No file arrived/);
+    /* An existing school has no plan column until this migration runs, and the column defaults to
+       enterprise. Nothing may go dark on deploy for a school already using it. */
+    const asShipped = await runtime.database.query("SELECT plan, deployment FROM school_settings WHERE id = 'default'");
+    assert.equal(asShipped.rows[0].plan, 'enterprise');
+    assert.equal(asShipped.rows[0].deployment, 'cloud');
 
-    const dump = Buffer.concat([Buffer.from('PGDMP'), Buffer.alloc(64, 7)]);
-    const uploaded = await call({ action: 'upload', content: dump.toString('base64'), filename: 'from-the-old-server.dump' });
+    await setPlan('essential');
 
-    const [row] = uploaded.backups;
-    assert.equal(row.status, 'complete');
-    assert.equal(row.kind, 'uploaded', 'neither manual nor scheduled, so pruning leaves it alone');
-    assert.equal(Number(row.size_bytes), dump.length);
-    // The name on disk is this server's own: an uploaded filename is attacker-controlled text, and
-    // the filename is the only thing tying a file to a tenant here.
-    assert.match(row.filename, /^kampala-high-[\dTZ-]+\.dump$/);
+    // Essential runs the office: the roll, the money coming in, the records.
+    assert.notEqual((await call('/api/functions/messages', { action: 'inbox' })).status, 402);
+    assert.notEqual((await call('/api/functions/student-registry', { action: 'next_number' })).status, 402);
 
-    const uploadAudit = await runtime.database.query(
-      "SELECT user_role, changes FROM audit_logs WHERE action = 'backup_uploaded'",
+    // And stops at the school day.
+    const matron = await call('/api/functions/matron', { action: 'dashboard' });
+    assert.equal(matron.status, 402, 'a payment problem, not a permission one');
+    assert.equal(matron.body.licence.requiredPlan, 'standard');
+    assert.equal(matron.body.licence.plan, 'essential');
+    assert.match(matron.body.error, /part of Standard/);
+    assert.match(matron.body.error, /on Essential/);
+
+    for (const [pathname, plan] of [
+      ['/api/functions/matron', 'standard'],
+      ['/api/functions/roll-call', 'standard'],
+      ['/api/functions/digital-examiner', 'professional'],
+      ['/api/functions/monitoring', 'professional'],
+      ['/api/functions/ai-chat', 'enterprise'],
+      ['/api/functions/search', 'enterprise'],
+    ]) {
+      const refused = await call(pathname, { action: 'anything' });
+      assert.equal(refused.status, 402, pathname);
+      assert.equal(refused.body.licence.requiredPlan, plan, pathname);
+    }
+
+    /* Signing in is never gated. A school whose subscription has lapsed still has to be able to log
+       in and read why — the alternative is a locked door with no sign on it. */
+    for (const pathname of ['/api/functions/auth']) {
+      assert.notEqual((await call(pathname, { action: 'login' })).status, 402);
+    }
+    assert.notEqual((await runtime.dispatch({ method: 'GET', pathname: '/api/health', searchParams: new URLSearchParams() })).status, 402);
+
+    // The entitlements themselves are readable at every tier, for the same reason.
+    const seen = await runtime.dispatch({ method: 'GET', pathname: '/api/entitlements', searchParams: new URLSearchParams() });
+    assert.equal(seen.status, 200);
+    assert.equal(seen.body.data.plan, 'essential');
+    assert.equal(seen.body.data.features.matron.allowed, false);
+    assert.equal(seen.body.data.features.matron.reason, 'plan');
+    assert.equal(seen.body.data.features.students.allowed, true);
+    // Every key is present whether it is on or off: a nav deciding what to hide should not have to
+    // tell "this school does not have it" from "the server forgot to mention it".
+    assert.ok(Object.keys(seen.body.data.features).length > 20);
+
+    /* One endpoint, two tiers. Taking money is Essential; the billing runs behind the same endpoint
+       are Professional, and gating the whole thing either way sells a half-broken screen. */
+    await setPlan('standard');
+    assert.notEqual((await call('/api/functions/fees', { action: 'record_payment' })).status, 402);
+    assert.equal((await call('/api/functions/fees', { action: 'arrears_report' })).status, 402);
+    assert.equal((await call('/api/functions/fees', { action: 'run_billing' })).body.licence.requiredPlan, 'professional');
+    // Recording marks is Standard; reading them off a photograph is the AI feature.
+    assert.notEqual((await call('/api/functions/marks', { action: 'roster' })).status, 402);
+    assert.equal((await call('/api/functions/marks', { action: 'extract' })).body.licence.requiredPlan, 'enterprise');
+
+    await setPlan('professional');
+    assert.notEqual((await call('/api/functions/fees', { action: 'arrears_report' })).status, 402);
+    assert.notEqual((await call('/api/functions/digital-examiner', { action: 'list' })).status, 402);
+    assert.equal((await call('/api/functions/ai-chat', { action: 'send' })).status, 402);
+
+    // The printable fees documents follow their screen, not the endpoint they happen to share.
+    const printed = await runtime.dispatch({
+      method: 'GET', pathname: '/api/fees/arrears.pdf', searchParams: new URLSearchParams({ requesterRole: 'admin' }),
+    });
+    assert.notEqual(printed.status, 402, 'Professional includes the arrears list, printed or not');
+
+    await setPlan('essential');
+    assert.equal((await runtime.dispatch({
+      method: 'GET', pathname: '/api/fees/arrears.pdf', searchParams: new URLSearchParams({ requesterRole: 'admin' }),
+    })).status, 402, 'and Essential does not, by either route');
+
+    /* On-premise. The AI features run on hosted models this deployment meters, and a one-off
+       install is not on that meter — but a school pointing at a model of its own is paying for the
+       inference itself, and there is nothing left to meter. */
+    await setPlan('enterprise', 'onsite');
+    const noModel = await call('/api/functions/ai-chat', { action: 'send' });
+    assert.equal(noModel.status, 402);
+    assert.equal(noModel.body.licence.reason, 'hosted_model', 'the tier is right; the deployment is not');
+    assert.match(noModel.body.error, /model of your own/);
+    // Everything that is not AI is untouched by the deployment.
+    assert.notEqual((await call('/api/functions/matron', { action: 'dashboard' })).status, 402);
+    assert.notEqual((await call('/api/functions/digital-examiner', { action: 'list' })).status, 402);
+
+    await runtime.database.query(
+      "INSERT INTO provider_credentials (provider, base_url) VALUES ('ollama', 'http://school-box:11434')",
     );
-    assert.equal(uploadAudit.rows.length, 1);
-    // The name it arrived under is kept even though it is not the name on disk: it is how the
-    // person who uploaded it will refer to it.
-    const changes = uploadAudit.rows[0].changes;
-    assert.equal((typeof changes === 'string' ? JSON.parse(changes) : changes).uploaded_as, 'from-the-old-server.dump');
+    clearLicenceCache();
+    assert.notEqual((await call('/api/functions/ai-chat', { action: 'send' })).status, 402, 'their own model, their own inference');
 
-    // Restoring replaces everything, so it asks for the word — a stray `true` cannot do it.
-    assert.match((await call({ action: 'restore', id: row.id })).error, /Confirm it to continue/);
-    assert.match((await call({ action: 'restore', id: row.id, confirm: true })).error, /Confirm it to continue/);
-    assert.match((await call({ action: 'restore', id: 'nope', confirm: 'restore' })).error, /not on file/);
-
-    const restores = [];
-    const runPgRestore = async (options) => { restores.push(options); return { warnings: 'dropping extension failed' }; };
-    const restored = await call({ action: 'restore', id: row.id, confirm: 'restore' }, { runPgRestore });
-
-    assert.equal(restored.restored, true);
-    assert.equal(restores.length, 1);
-    assert.equal(restores[0].connectionString, 'postgres://user:pw@db:5432/school');
-    assert.match(restores[0].source, /^\/tmp\/eschool-upload-test\/kampala-high-[\dTZ-]+\.dump$/);
-    assert.equal(restored.warnings, 'dropping extension failed', "pg_restore's grumbles are shown, not swallowed");
-
-    /* Audited before it runs, not after: a restore that goes wrong may take the audit table with it
-       and leave no trace of who asked for it. Asserted by failing the restore and checking the row
-       survives anyway. */
-    const failing = await call(
-      { action: 'restore', id: row.id, confirm: 'restore' },
-      { runPgRestore: async () => { throw new Error('server went away'); } },
-    );
-    assert.match(failing.error, /Restore failed: server went away/);
-    const restoreAudit = await runtime.database.query(
-      "SELECT id FROM audit_logs WHERE action = 'backup_restored'",
-    );
-    assert.equal(restoreAudit.rows.length, 2, 'both attempts are on the record, the failed one included');
-
-    // A copy of the school is not a teacher's to take, nor to put back.
-    for (const action of ['upload', 'restore']) {
-      const denied = await handleBackupFunction(database, { action, requesterRole: 'teacher', id: row.id }, {});
-      assert.equal(denied.error, 'Unauthorized', `${action} for a teacher`);
+    // Enterprise on cloud is exactly what every school had before any of this existed.
+    await setPlan('enterprise', 'cloud');
+    for (const pathname of [
+      '/api/functions/matron', '/api/functions/ai-chat', '/api/functions/digital-examiner',
+      '/api/functions/fees', '/api/functions/search', '/api/functions/monitoring',
+    ]) {
+      assert.notEqual((await call(pathname, { action: 'anything' })).status, 402, pathname);
     }
   } finally {
-    delete process.env.BACKUP_DIR;
+    clearLicenceCache();
     await cleanup();
   }
 });
 
-test('a spreadsheet taken out of the school can be brought back in', async () => {
+
+test('tenants who predate plans are lifted onto Enterprise once, and never demoted again', async () => {
+  const { initializeControlSchema } = await import('../server/db/control.mjs');
+
+  /* A stand-in for the control database that answers the one question the migration asks and
+     records what it was told to do. The real thing needs a Postgres; what has to be proven here is
+     the decision, not the SQL engine. */
+  const fakeControl = (columnDefault) => {
+    const statements = [];
+    return {
+      statements,
+      query: async (sql) => {
+        statements.push(sql.replace(/\s+/g, ' ').trim());
+        if (sql.includes('information_schema.columns')) {
+          return { rows: columnDefault === null ? [] : [{ column_default: columnDefault }] };
+        }
+        return { rows: [] };
+      },
+    };
+  };
+
+  const didLift = (control) => control.statements.some((sql) => sql.startsWith('UPDATE tenants SET plan'));
+  const didMoveDefault = (control) => control.statements.some((sql) => sql.includes('ALTER COLUMN plan SET DEFAULT'));
+
+  /* The state every existing deployment is in: the column still carries the old default, and every
+     row carries a 'standard' nobody ever chose. Without this the licence gate would take the
+     examiner, finance, billing, audit, monitoring, the assistant and search away from every cloud
+     tenant on the deploy that introduced it. */
+  const old = fakeControl("'standard'::text");
+  await initializeControlSchema(old);
+  assert.equal(didLift(old), true, 'the rows are lifted');
+  assert.equal(didMoveDefault(old), true, 'and the default moves, which is what stops it running twice');
+
+  // Second boot: the default has moved, so there is nothing left to do.
+  const migrated = fakeControl("'enterprise'::text");
+  await initializeControlSchema(migrated);
+  assert.equal(didLift(migrated), false, 'a school genuinely sold Standard keeps it across a restart');
+  assert.equal(didMoveDefault(migrated), false);
+
+  // A control database that cannot answer at all must not take start-up down with it.
+  const mute = {
+    statements: [],
+    query: async (sql) => {
+      if (sql.includes('information_schema.columns')) throw new Error('no such table');
+      return { rows: [] };
+    },
+  };
+  await initializeControlSchema(mute);
+
+  const empty = fakeControl(null);
+  await initializeControlSchema(empty);
+  assert.equal(didLift(empty), false);
+});
+
+
+test('a school changes its own tier, and only an administrator may', async () => {
   const { runtime, cleanup } = await startTestRuntime();
-  const transfer = (body) =>
-    dispatch(runtime, 'POST', '/api/functions/data', { requesterRole: 'admin', actorName: 'Admin', ...body });
+  const { clearLicenceCache } = await import('../server/licensing/licence.mjs');
+
+  const plan = (body) => dispatch(runtime, 'POST', '/api/functions/plan', body);
+  const call = (pathname, body = {}) =>
+    runtime.dispatch({ method: 'POST', pathname, body: { requesterRole: 'admin', ...body } });
 
   try {
-    const exported = (await transfer({ action: 'export', format: 'csv', tables: ['students'] })).body.data;
-    const file = exported.files.find((entry) => entry.table === 'students');
-    assert.ok(file, 'students exports as CSV');
-    assert.ok(file.rows > 0);
+    await runtime.database.query("UPDATE school_settings SET plan = 'essential' WHERE id = 'default'");
+    clearLicenceCache();
 
-    const before = (await runtime.database.query('SELECT COUNT(*)::int AS n FROM students')).rows[0].n;
+    // Reading the plan is open to any signed-in member of staff: it is on the Settings screen and
+    // it is not a secret.
+    const seen = (await plan({ action: 'view', requesterRole: 'teacher' })).body.data;
+    assert.equal(seen.plan, 'essential');
+    assert.equal(seen.changeable, true);
+    assert.equal(seen.target, 'settings', 'no control plane here, so the licence lives in the school');
 
-    /* The round trip is the point. Export wrote CSV and import understood only JSON, so a bursar
-       could take the roll out as a spreadsheet, correct it, and have nowhere to put it back. */
-    const checked = (await transfer({ action: 'check_import', files: [{ name: 'students.csv', content: file.content }] })).body.data;
-    assert.deepEqual(checked.problems, [], 'a file this system wrote should come back without complaint');
-    assert.equal(checked.token, 'ready');
-    assert.equal(checked.summary.find((entry) => entry.table === 'students').rows, file.rows);
-
-    const imported = (await transfer({
-      action: 'import', confirm: 'ready', files: [{ name: 'students.csv', content: file.content }],
-    })).body.data;
-    assert.equal(imported.imported, true);
-    assert.equal(imported.rowsWritten, file.rows);
+    // Changing it is the account administrator's, the same fence as adding a user.
+    for (const role of ['teacher', 'bursar', 'head_teacher', 'support_staff']) {
+      const denied = await plan({ action: 'change', plan: 'enterprise', requesterRole: role });
+      assert.equal(denied.status, 403, role);
+      assert.equal(denied.body.error, 'Unauthorized');
+    }
     assert.equal(
-      (await runtime.database.query('SELECT COUNT(*)::int AS n FROM students')).rows[0].n,
-      before,
-      're-importing the same roll updates rows rather than duplicating them',
+      (await runtime.database.query("SELECT plan FROM school_settings WHERE id = 'default'")).rows[0].plan,
+      'essential',
+      'and nothing moved',
     );
 
-    // A comma inside a field is the whole reason this is parsed rather than split on commas.
-    const student = (await runtime.database.query('SELECT id FROM students ORDER BY last_name LIMIT 1')).rows[0];
-    const withComma = [
-      '"id","address"',
-      `"${student.id}","Plot 4, Kira Road, Kampala"`,
-    ].join('\n');
-    const commaCheck = (await transfer({ action: 'check_import', files: [{ name: 'students.csv', content: withComma }] })).body.data;
-    assert.deepEqual(commaCheck.problems, []);
-    await transfer({ action: 'import', confirm: 'ready', files: [{ name: 'students.csv', content: withComma }] });
-    assert.equal(
-      (await runtime.database.query('SELECT address FROM students WHERE id = $1', [student.id])).rows[0].address,
-      'Plot 4, Kira Road, Kampala',
-      'one field, not three',
+    // Essential cannot reach the dormitories.
+    assert.equal((await call('/api/functions/matron', { action: 'dashboard' })).status, 402);
+
+    // An upgrade takes effect for the next request, not after a cache expiry somebody waits out.
+    const upgraded = (await plan({ action: 'change', plan: 'professional', requesterRole: 'admin' })).body.data;
+    assert.equal(upgraded.changed, true);
+    assert.equal(upgraded.from, 'essential');
+    assert.equal(upgraded.to, 'professional');
+    assert.equal(upgraded.plan, 'professional');
+    assert.notEqual((await call('/api/functions/matron', { action: 'dashboard' })).status, 402);
+    assert.notEqual((await call('/api/functions/digital-examiner', { action: 'list' })).status, 402);
+    // Professional stops short of the AI.
+    assert.equal((await call('/api/functions/ai-chat', { action: 'send' })).status, 402);
+
+    // A downgrade takes the screens away just as promptly — no grace period, which the UI says.
+    const downgraded = (await plan({ action: 'change', plan: 'standard', requesterRole: 'admin' })).body.data;
+    assert.equal(downgraded.to, 'standard');
+    assert.equal((await call('/api/functions/digital-examiner', { action: 'list' })).status, 402);
+    assert.notEqual((await call('/api/functions/matron', { action: 'dashboard' })).status, 402);
+
+    // Who moved a school off Professional is exactly the question asked three months later.
+    const audit = await runtime.database.query(
+      "SELECT entity_name, changes, user_role FROM audit_logs WHERE action = 'plan_changed' ORDER BY entity_name",
     );
+    assert.equal(audit.rows.length, 2);
+    const directions = audit.rows.map((row) => {
+      const changes = typeof row.changes === 'string' ? JSON.parse(row.changes) : row.changes;
+      return changes.direction;
+    }).sort();
+    assert.deepEqual(directions, ['downgrade', 'upgrade']);
 
-    // A file nobody can read is a reason to refuse, the same as a bad column.
-    const rubbish = (await transfer({ action: 'check_import', files: [{ name: 'students.csv', content: '' }] })).body.data;
-    assert.ok(rubbish.problems.length > 0);
-    assert.equal(rubbish.token, '', 'and it cannot be waved through to the writer');
-    // The route turns a service-level { error } into a 400 with the message at the body level.
-    const refused = await transfer({ action: 'import', confirm: 'ready', files: [{ name: 'students.csv', content: '' }] });
-    assert.equal(refused.status, 400);
-    assert.match(refused.body.error, /problems/);
+    assert.match((await plan({ action: 'change', plan: 'platinum', requesterRole: 'admin' })).body.error, /Unsupported plan/);
+    assert.equal((await plan({ action: 'change', plan: 'standard', requesterRole: 'admin' })).body.data.unchanged, true);
 
-    /* The role fence is not re-asserted here: 'exporting the school leaves the credentials behind'
-       already walks every action in DATA_TRANSFER_ACTIONS against a teacher, support staff and an
-       anonymous caller, which covers both paths this test uses. */
+    /* Whatever tier a school is on it must be able to reach the screen that changes the tier —
+       gating this would be a door locked from inside. */
+    await runtime.database.query("UPDATE school_settings SET plan = 'essential' WHERE id = 'default'");
+    clearLicenceCache();
+    assert.notEqual((await plan({ action: 'view', requesterRole: 'admin' })).status, 402);
+    assert.notEqual((await plan({ action: 'change', plan: 'standard', requesterRole: 'admin' })).status, 402);
   } finally {
+    clearLicenceCache();
+    await cleanup();
+  }
+});
+
+test('a plan pinned in the environment cannot be moved from inside the school', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const { clearLicenceCache } = await import('../server/licensing/licence.mjs');
+
+  process.env.LICENCE_PLAN = 'standard';
+  clearLicenceCache();
+  try {
+    const view = (await dispatch(runtime, 'POST', '/api/functions/plan', { action: 'view', requesterRole: 'admin' })).body.data;
+    assert.equal(view.plan, 'standard');
+    assert.equal(view.changeable, false, 'the screen can say why the buttons are dead');
+    assert.equal(view.target, 'environment');
+
+    /* Refused rather than written somewhere that will never be read: the operator who typed the
+       plan into the process meant it, and a save that silently does nothing is worse than a no. */
+    const refused = await dispatch(runtime, 'POST', '/api/functions/plan', {
+      action: 'change', plan: 'enterprise', requesterRole: 'admin',
+    });
+    assert.match(refused.body.error, /pins its plan in its configuration/);
+    assert.equal(
+      (await runtime.database.query("SELECT plan FROM school_settings WHERE id = 'default'")).rows[0].plan,
+      'enterprise',
+      'the settings row is untouched',
+    );
+  } finally {
+    delete process.env.LICENCE_PLAN;
+    clearLicenceCache();
     await cleanup();
   }
 });
@@ -9908,6 +10052,85 @@ test('the matron works from the dormitory: a roll, a sick bay and beds', async (
     assert.ok((await matronCall({ action: 'release_bed', studentId: students[0].student_id }, matron)).body.data.assignment);
     assert.equal((await matronCall({ action: 'rooms' }, matron)).body.data.rooms[0].free, 1);
     assert.ok((await matronCall({ action: 'assign_bed', studentId: students[1].student_id, roomId: room.id }, matron)).body.data.assignment);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('the matron keeps the room list herself, and the list says who is in each bed', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const matronCall = (body, actor) => runtime.dispatch({
+    method: 'POST', pathname: '/api/functions/matron', body, actor, headers: { host: 'localhost' },
+  });
+  const matron = { id: 'm1', role: 'support_staff', designation: 'matron', name: 'Matron Grace', email: 'grace@school.test' };
+  const cook = { id: 'm2', role: 'support_staff', designation: 'cook', name: 'Cook', email: 'cook@school.test' };
+
+  try {
+    // Keeping the list is the matron's job and only hers — the same post gate as the rest of the
+    // screen, so the cook cannot rearrange the dormitories.
+    assert.equal(
+      (await matronCall({ action: 'save_room', hostelName: 'Nile House', roomNumber: '1', capacity: 2 }, cook)).body.error,
+      'Unauthorized',
+    );
+
+    const made = (await matronCall({ action: 'save_room', hostelName: 'Nile House', roomNumber: '12', capacity: 2 }, matron)).body.data.room;
+    assert.ok(made.id);
+    assert.equal(made.capacity, 2);
+    assert.equal(made.free, 2);
+    assert.deepEqual(made.occupants, [], 'a new room is empty, in the shape the list expects');
+
+    // Two rooms with one name cannot be told apart on any screen that lists them.
+    assert.equal(
+      (await matronCall({ action: 'save_room', hostelName: 'nile house', roomNumber: '12', capacity: 4 }, matron)).body.error,
+      'Nile House already has a room 12',
+    );
+
+    // Half a bed is not a thing, and neither is a room with none.
+    assert.match((await matronCall({ action: 'save_room', hostelName: 'Nile House', roomNumber: '13', capacity: 0 }, matron)).body.error, /at least one/);
+    assert.match((await matronCall({ action: 'save_room', hostelName: 'Nile House', roomNumber: '13', capacity: 2.5 }, matron)).body.error, /whole number/);
+    assert.match((await matronCall({ action: 'save_room', hostelName: '', roomNumber: '13', capacity: 2 }, matron)).body.error, /Which hostel/);
+
+    const students = (await runtime.database.query(
+      'SELECT id, student_id, first_name, last_name FROM students ORDER BY last_name LIMIT 2',
+    )).rows;
+    for (const student of students) {
+      assert.ok((await matronCall({ action: 'assign_bed', studentId: student.student_id, roomId: made.id, bedNumber: '1' }, matron)).body.data.assignment);
+    }
+
+    /* The occupants are the point of the change: a count tells her the room is full, but only a
+       name tells her which child to move. */
+    const listed = (await matronCall({ action: 'rooms' }, matron)).body.data.rooms;
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0].occupied, 2);
+    assert.equal(listed[0].full, true);
+    assert.deepEqual(
+      listed[0].occupants.map((o) => o.student_number).sort(),
+      students.map((s) => s.student_id).sort(),
+      'the room names the children in it',
+    );
+    assert.ok(listed[0].occupants[0].last_name, 'and by name, not only by id');
+
+    // Cutting the beds out from under a sleeping child is refused in words rather than done.
+    const shrunk = await matronCall({ action: 'save_room', roomId: made.id, hostelName: 'Nile House', roomNumber: '12', capacity: 1 }, matron);
+    assert.match(shrunk.body.error, /2 children sleep in Nile House 12/);
+    assert.equal((await matronCall({ action: 'rooms' }, matron)).body.data.rooms[0].capacity, 2, 'and nothing changed');
+
+    // Deleting it would cascade the assignments away and lose the record of who slept where.
+    assert.match((await matronCall({ action: 'remove_room', roomId: made.id }, matron)).body.error, /2 children still sleep/);
+
+    // Renaming and growing a room she has in front of her.
+    const grown = (await matronCall({ action: 'save_room', roomId: made.id, hostelName: 'Nile House', roomNumber: '12A', capacity: 4 }, matron)).body.data.room;
+    assert.equal(grown.room_number, '12A');
+    assert.equal(grown.capacity, 4);
+    assert.equal(grown.free, 2);
+    assert.equal(grown.full, false);
+
+    for (const student of students) {
+      await matronCall({ action: 'release_bed', studentId: student.student_id }, matron);
+    }
+    assert.equal((await matronCall({ action: 'remove_room', roomId: made.id }, matron)).body.data.removed, made.id);
+    assert.equal((await matronCall({ action: 'rooms' }, matron)).body.data.rooms.length, 0);
+    assert.equal((await matronCall({ action: 'remove_room', roomId: made.id }, matron)).body.error, 'That room no longer exists');
   } finally {
     await cleanup();
   }
