@@ -3658,6 +3658,184 @@ test('a plan pinned in the environment cannot be moved from inside the school', 
 });
 
 
+test('a cloud tenant is read on the plan it was sold, not the one it defaults to', async () => {
+  const { createDatabaseConnection } = await import('../server/db/connection.mjs');
+  const { initializeDatabase } = await import('../server/db/schema.mjs');
+  const { clearLicenceCache } = await import('../server/licensing/licence.mjs');
+
+  /* A control plane, because that is the only place this fails. Single-tenant deployments have no
+     tenants row at all and correctly fall through to school_settings, which is why every existing
+     test passes while a real cloud school stays on Enterprise whatever it is sold. */
+  const tenantDbs = new Map();
+  const initialized = new WeakSet();
+  const runtime = await createAppRuntime({
+    useInMemoryDatabase: true,
+    useInMemoryControl: true,
+    provisionOptions: {
+      createPhysicalDatabase: async () => {},
+      createConnection: ({ connectionString }) => {
+        if (!tenantDbs.has(connectionString)) {
+          tenantDbs.set(connectionString, createDatabaseConnection({ useInMemoryDatabase: true }));
+        }
+        return tenantDbs.get(connectionString);
+      },
+      init: async (db) => {
+        if (initialized.has(db)) return;
+        initialized.add(db);
+        await initializeDatabase(db);
+      },
+    },
+  });
+
+  const savedOwnerToken = process.env.PLATFORM_OWNER_TOKEN;
+  process.env.PLATFORM_OWNER_TOKEN = 'owner-token-for-tests-0123456789abcdef';
+  const owner = { authorization: `Bearer ${process.env.PLATFORM_OWNER_TOKEN}` };
+  const provision = (body) => runtime.dispatch({ method: 'POST', pathname: '/api/provision', body, headers: owner });
+
+  /* The tenant id *is* the subdomain: resolveTenantId returns the first label of the Host, so a
+     request to kampala-high.eschool.ink arrives here as 'kampala-high'. It is passed directly
+     because deriving it from the Host is the HTTP layer's job, above dispatch. */
+  const asSchool = (method, pathname, body) => runtime.dispatch({
+    method, pathname, body, tenantId: 'kampala-high', searchParams: new URLSearchParams(),
+  });
+
+  try {
+    await provision({ action: 'create', subdomain: 'kampala-high', schoolName: 'Kampala High', contactEmail: 'head@kampala.test' });
+    assert.equal((await provision({ action: 'set_plan', subdomain: 'kampala-high', plan: 'essential' })).body.data.tenant.plan, 'essential');
+    clearLicenceCache();
+
+    /* The heart of it. The plan was written to tenants.plan by subdomain, and the licence has to
+       read it from the same place — otherwise it silently falls through to school_settings, whose
+       default is Enterprise, and the school keeps everything it was never sold. */
+    const seen = (await asSchool('GET', '/api/entitlements')).body.data;
+    assert.equal(seen.plan, 'essential', 'the plan the tenant was sold');
+    assert.equal(seen.source, 'control-plane', 'read from the registry, not from the tenant database');
+
+    // And the gate follows it: Essential stops short of the dormitories.
+    const gated = await asSchool('POST', '/api/functions/matron', { action: 'dashboard', requesterRole: 'admin' });
+    assert.equal(gated.status, 402);
+    assert.equal(gated.body.licence.requiredPlan, 'standard');
+
+    // Selling them a bigger tier takes effect, which is the whole point of the console.
+    await provision({ action: 'set_plan', subdomain: 'kampala-high', plan: 'professional' });
+    assert.equal((await asSchool('GET', '/api/entitlements')).body.data.plan, 'professional');
+    assert.notEqual((await asSchool('POST', '/api/functions/matron', { action: 'dashboard', requesterRole: 'admin' })).status, 402);
+    assert.notEqual((await asSchool('POST', '/api/functions/digital-examiner', { action: 'list', requesterRole: 'admin' })).status, 402);
+    // Professional still stops short of the AI.
+    assert.equal((await asSchool('POST', '/api/functions/ai-chat', { action: 'send', requesterRole: 'admin' })).status, 402);
+  } finally {
+    if (savedOwnerToken === undefined) delete process.env.PLATFORM_OWNER_TOKEN;
+    else process.env.PLATFORM_OWNER_TOKEN = savedOwnerToken;
+    clearLicenceCache();
+    await runtime.close();
+  }
+});
+
+
+test('an administrator gives a member of staff a post, and a teacher a class', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const { clearLicenceCache } = await import('../server/licensing/licence.mjs');
+
+  const auth = (body) => dispatch(runtime, 'POST', '/api/functions/auth', { requesterRole: 'admin', ...body });
+  const perf = (body) => dispatch(runtime, 'POST', '/api/functions/teacher-performance', { requesterRole: 'admin', ...body });
+
+  try {
+    /* The seed carries no accounts, so the two are made the way a school makes them: the first
+       signup is the founding administrator, and the rest are approved and given a role by them. */
+    await auth({ action: 'signup', email: 'head@school.local', password: 'password123', displayName: 'Head' });
+
+    const make = async (email, name, role) => {
+      const created = await auth({ action: 'signup', email, password: 'password123', displayName: name });
+      const id = created.body.data.user.id;
+      await auth({ action: 'approve_account', userId: id });
+      await auth({ action: 'update_role', userId: id, newRole: role });
+      return { id, auth_email: email };
+    };
+
+    const support = await make('cook@school.local', 'Grace', 'support_staff');
+    const teacher = await make('teacher@school.local', 'Opolot', 'teacher');
+
+    /* The matron. Nothing on the server was missing — update_account has validated designations all
+       along — but no screen offered it, so nobody could ever be made one. */
+    const made = await auth({ action: 'update_account', userId: support.id, designation: 'matron' });
+    assert.equal(made.body.data.user.designation, 'matron');
+
+    // A designation belongs to the roles that have one; the server says so rather than storing it.
+    const refused = await auth({ action: 'update_account', userId: teacher.id, designation: 'matron' });
+    assert.match(refused.body.error || refused.body.data?.error || '', /cannot be a matron/);
+
+    // And it can be taken off again.
+    assert.equal((await auth({ action: 'update_account', userId: support.id, designation: '' })).body.data.user.designation, null);
+    await auth({ action: 'update_account', userId: support.id, designation: 'matron' });
+
+    /* The class. This is the loop the phone was stuck in: no allocation, so no classes, so no marks
+       — and the only way to make one was buried in a report. */
+    assert.deepEqual((await perf({ action: 'allocations', userId: teacher.id })).body.data.allocations, []);
+
+    const klass = (await runtime.database.query(
+      "SELECT grade_level, class_section FROM students WHERE status = 'active' GROUP BY grade_level, class_section LIMIT 1",
+    )).rows[0];
+
+    const allocated = await perf({
+      action: 'allocate', userId: teacher.id, subject: 'Biology',
+      gradeLevel: klass.grade_level, classSection: klass.class_section,
+      academicYear: '2026', term: 'Term 1',
+    });
+    assert.ok(allocated.body.data.allocated.students > 0, 'the class has students to mark');
+
+    /* One row per class and subject, carrying the subject id, year and term — summary groups them
+       and drops all three, which is enough to read a report and not enough to take one back. */
+    const rows = (await perf({ action: 'allocations', userId: teacher.id })).body.data.allocations;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].subject_name, 'Biology');
+    assert.equal(rows[0].term, 'Term 1');
+    assert.ok(rows[0].subject_id);
+
+    /* Allocating links users.teacher_id, and that is what actually makes the class show on the
+       phone: marks reads allocations through it and returns nothing at all when it is null. */
+    const linked = (await runtime.database.query('SELECT teacher_id FROM users WHERE id = $1', [teacher.id])).rows[0];
+    assert.ok(linked.teacher_id, 'the login is tied to a teachers row');
+
+    const marks = await runtime.dispatch({
+      method: 'POST',
+      pathname: '/api/functions/marks',
+      // 'roster' with no class named is what the phone sends to ask "which classes are mine?"
+      body: { action: 'roster' },
+      // A real signed-in teacher, because marks reads the allocations off the actor's own account.
+      actor: { id: teacher.id, role: 'teacher', email: teacher.auth_email, name: 'Opolot' },
+    });
+    const listed = marks.body.data.classes;
+    assert.equal(listed.length, 1, 'the class the administrator just assigned');
+    assert.equal(listed[0].subject_name, 'Biology');
+    assert.equal(Number(listed[0].grade_level), Number(klass.grade_level));
+
+    // Taking it back.
+    assert.equal((await perf({
+      action: 'unallocate', userId: teacher.id, subjectId: rows[0].subject_id,
+      gradeLevel: klass.grade_level, classSection: klass.class_section,
+      academicYear: '2026', term: 'Term 1',
+    })).body.data.removed > 0, true);
+    assert.deepEqual((await perf({ action: 'allocations', userId: teacher.id })).body.data.allocations, []);
+
+    /* Assigning staff to classes is administration, not teaching analytics: a school on Essential
+       must still be able to hire a teacher and give them a class, or marks never work at all. */
+    await runtime.database.query("UPDATE school_settings SET plan = 'essential' WHERE id = 'default'");
+    clearLicenceCache();
+    assert.notEqual((await perf({ action: 'staff' })).status, 402, 'the staff list stays reachable');
+    assert.notEqual((await perf({
+      action: 'allocate', userId: teacher.id, subject: 'Biology',
+      gradeLevel: klass.grade_level, classSection: klass.class_section,
+      academicYear: '2026', term: 'Term 1',
+    })).status, 402, 'and so does assigning a class');
+    // The report behind the same endpoint is still Standard.
+    assert.equal((await perf({ action: 'summary', userId: teacher.id })).status, 402);
+  } finally {
+    clearLicenceCache();
+    await cleanup();
+  }
+});
+
+
 test('a student summary shows each role its own share of one student, and no more', async () => {
   const { runtime, cleanup } = await startTestRuntime();
 

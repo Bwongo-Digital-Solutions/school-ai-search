@@ -21,6 +21,8 @@
  * held for a minute — long enough that a busy screen does not open a connection per click, short
  * enough that an upgrade takes effect while the person who paid for it is still on the phone.
  */
+import { getTenantBySubdomain } from '../db/control.mjs';
+import { DEFAULT_TENANT } from '../db/tenants.mjs';
 import { normaliseLicence } from './plans.mjs';
 
 const CACHE_MS = 60_000;
@@ -60,13 +62,26 @@ const hasOwnModel = async (database) => {
   }
 };
 
+/**
+ * What the registry says this school was sold.
+ *
+ * Looked up through `getTenantBySubdomain` rather than a query of its own, and that is the whole
+ * point of the indirection: a tenantId *is* a subdomain — `resolveTenantId` returns the first label
+ * of the Host — and every other control-plane query keys on `subdomain`, `setTenantPlan` included.
+ * This one asked `WHERE id = $1`, which is a randomUUID and never matches, so the read found
+ * nothing and fell through to the tenant database, whose plan defaults to Enterprise.
+ *
+ * The effect was silent and total: the owner console, set-plan.sh and the in-app upgrade all wrote
+ * the right row, reported success, and changed nothing. Sharing one lookup means the reader and the
+ * writer can no longer disagree about what identifies a tenant.
+ */
 const fromControlPlane = async (control, tenantId) => {
-  if (!control || !tenantId) return null;
+  if (!control || !tenantId || tenantId === DEFAULT_TENANT) return null;
   try {
-    const { rows } = await control.query('SELECT plan, status FROM tenants WHERE id = $1 LIMIT 1', [tenantId]);
-    if (rows.length === 0) return null;
+    const tenant = await getTenantBySubdomain(control, tenantId);
+    if (!tenant) return null;
     // A cloud tenant is by definition hosted, whatever anything else says.
-    return { plan: String(rows[0].plan || '').toLowerCase(), deployment: 'cloud', source: 'control-plane' };
+    return { plan: String(tenant.plan || '').toLowerCase(), deployment: 'cloud', source: 'control-plane' };
   } catch {
     return null;
   }

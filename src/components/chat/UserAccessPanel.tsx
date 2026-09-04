@@ -30,7 +30,9 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useNotifications } from '@/contexts/NotificationContext';
 import { ROLE_DESCRIPTIONS, ROLE_LABELS, USER_ROLES } from '@/lib/roles';
-import type { UserProfile, UserRole } from '@/types/auth';
+import { DESIGNATION_LABELS, designationsForRole } from '@/lib/staffAssignment';
+import ClassAssignment from './ClassAssignment';
+import type { UserDesignation, UserProfile, UserRole } from '@/types/auth';
 
 // Role is the one thing this list is scanned for, so each row carries it as a tinted square before
 // the name — read before the text is, and still there once the reader has stopped reading names.
@@ -50,6 +52,7 @@ const UserAccessPanel: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [savingUserId, setSavingUserId] = useState<string | null>(null);
   const [rejecting, setRejecting] = useState<UserProfile | null>(null);
+  const [assigningClasses, setAssigningClasses] = useState<UserProfile | null>(null);
   const [deleting, setDeleting] = useState<UserProfile | null>(null);
   const [editing, setEditing] = useState<UserProfile | null>(null);
   const [editForm, setEditForm] = useState({ displayName: '', email: '' });
@@ -71,6 +74,25 @@ const UserAccessPanel: React.FC = () => {
   // Only the staff list pages. The approval queue above is something an administrator drains rather
   // than browses, and burying half of it behind a pager would be hiding work that is waiting.
   const { page, setPage, pageCount, pageRows, firstOnPage, lastOnPage } = usePagedRows(active, 25);
+
+  /* What post this person holds. The server validates it against the role and refuses a mismatch in
+     words — a teacher cannot be a matron — so this only offers what that role allows and lets the
+     refusal speak for itself if anything slips through. */
+  const handleDesignationChange = async (person: UserProfile, designation: string) => {
+    setSavingUserId(person.id);
+    const result = await updateAccount(person.id, { designation: designation || null });
+    if (!result.success) {
+      notify.error('Could not change the post', result.error || undefined);
+    } else {
+      notify.success(
+        designation
+          ? `${person.display_name} is now the ${DESIGNATION_LABELS[designation as UserDesignation].toLowerCase()}`
+          : `${person.display_name} no longer holds a post`,
+      );
+      await fetchUsers();
+    }
+    setSavingUserId(null);
+  };
 
   const handleRoleChange = async (userId: string, role: UserRole) => {
     setSavingUserId(userId);
@@ -287,7 +309,43 @@ const UserAccessPanel: React.FC = () => {
                         <SelectItem key={role} value={role} text={ROLE_LABELS[role]} />
                       ))}
                     </Select>
+                    {/* Only for the roles that have posts. An empty select reads as "this person
+                        should have one and does not", which is not true of a head teacher. */}
+                    {designationsForRole(person.role).length > 0 && (
+                      <Select
+                        id={`designation-${person.id}`}
+                        labelText="Post"
+                        hideLabel
+                        size="sm"
+                        value={person.designation ?? ''}
+                        disabled={savingUserId === person.id}
+                        onChange={(event) => handleDesignationChange(person, event.target.value)}
+                      >
+                        <SelectItem value="" text="No post" />
+                        {designationsForRole(person.role).map((designation) => (
+                          <SelectItem
+                            key={designation}
+                            value={designation}
+                            text={DESIGNATION_LABELS[designation]}
+                          />
+                        ))}
+                      </Select>
+                    )}
                     <div className={styles.rowActions}>
+                      {/* Only the roles that stand in front of a class. A bursar has no marks to
+                          enter, so offering them classes would be noise. */}
+                      {(person.role === 'teacher' || person.role === 'head_teacher') && (
+                        <Button
+                          hasIconOnly
+                          kind="ghost"
+                          size="sm"
+                          renderIcon={Education}
+                          iconDescription={`Classes for ${person.display_name}`}
+                          tooltipPosition="left"
+                          disabled={savingUserId === person.id}
+                          onClick={() => setAssigningClasses(person)}
+                        />
+                      )}
                       <Button
                         hasIconOnly
                         kind="ghost"
@@ -411,6 +469,10 @@ const UserAccessPanel: React.FC = () => {
           This removes the account from the database. The person would have to sign up again.
         </p>
       </Modal>
+
+      {assigningClasses && (
+        <ClassAssignment person={assigningClasses} onClose={() => setAssigningClasses(null)} />
+      )}
     </div>
   );
 };
