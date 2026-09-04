@@ -11,6 +11,11 @@ import { withTransaction } from '../db/connection.mjs';
  * this database. An export is readable: CSV a bursar can open in a spreadsheet, or JSON another
  * system can read. They answer different questions, so neither replaces the other.
  *
+ * It goes both ways. Export wrote CSV and JSON but import understood only JSON, so a bursar could
+ * take the roll out as a spreadsheet, correct three phone numbers in it, and have nowhere to put it
+ * back. Uploaded files are parsed here and then go through the same validate and the same writer as
+ * before — the file's name says which table it holds, and nothing else about the path changed.
+ *
  * What is deliberately left out, and why:
  *
  *   - `users.password_hash` — a hash is still a credential, and one that survives leaving here.
@@ -84,7 +89,14 @@ export const exportableTables = (tables) =>
  */
 const csvCell = (value) => {
   if (value === null || value === undefined) return '""';
-  const text = typeof value === 'object' ? JSON.stringify(value) : String(value);
+  /* A Date is an object, so JSON.stringify would wrap it in quotes of its own and leave a cell
+     reading "2011-07-07T00:00:00.000Z" — quote marks and all — which is not a date any spreadsheet
+     or any import can read back. Every date column exported was coming out that way. */
+  const text = value instanceof Date
+    ? value.toISOString()
+    : typeof value === 'object'
+      ? JSON.stringify(value)
+      : String(value);
   return `"${text.replace(/"/g, '""')}"`;
 };
 
@@ -94,6 +106,134 @@ const toCsv = (columns, rows) =>
 const readTable = async (database, name, columns) => {
   const { rows } = await database.query(`SELECT ${columns.join(', ')} FROM ${name}`);
   return rows;
+};
+
+/**
+ * Read a CSV back into rows.
+ *
+ * Hand-written rather than pulled in, because the shape this has to read is the shape `toCsv` above
+ * writes, and the two belong together: every field quoted, `""` for a literal quote, newlines and
+ * commas living happily inside a field. A split on commas gets a bursar's "Kampala, Uganda" wrong
+ * in a way nobody notices until an address is missing half of itself.
+ *
+ * Accepts unquoted fields too, since the file may well have been through a spreadsheet on its way
+ * back, and a spreadsheet quotes only what it must.
+ */
+export const parseCsv = (text) => {
+  const source = String(text ?? '').replace(/^﻿/, '');
+  const rows = [];
+  let row = [];
+  let field = '';
+  let quoted = false;
+  let started = false;
+
+  const endField = () => { row.push(field); field = ''; started = false; };
+  const endRow = () => {
+    endField();
+    // A trailing newline is a line ending, not an empty final record.
+    if (row.length > 1 || row[0] !== '') rows.push(row);
+    row = [];
+  };
+
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+
+    if (quoted) {
+      if (char === '"') {
+        if (source[index + 1] === '"') { field += '"'; index += 1; }
+        else quoted = false;
+      } else {
+        field += char;
+      }
+      continue;
+    }
+
+    if (char === '"' && !started) { quoted = true; started = true; continue; }
+    if (char === ',') { endField(); continue; }
+    if (char === '\r') continue;
+    if (char === '\n') { endRow(); continue; }
+    field += char;
+    started = true;
+  }
+
+  // Whatever is left when the text runs out is the last row, unless the file ended on a newline.
+  if (field !== '' || row.length > 0) endRow();
+
+  if (rows.length === 0) return { columns: [], rows: [] };
+  const [columns, ...body] = rows;
+  return {
+    columns,
+    rows: body.map((cells) => {
+      const record = {};
+      columns.forEach((column, index) => {
+        const value = cells[index];
+        /* An empty cell is left off the row rather than written as '' or null. The importer skips
+           undefined columns, so the column keeps its default on an insert and its current value on
+           a re-import — where '' would fail a DATE column outright and null would fail every
+           NOT NULL one. */
+        if (value !== undefined && value !== '') record[column] = value;
+      });
+      return record;
+    }),
+  };
+};
+
+/** `students.csv` names the table it holds. The name is the only thing tying a file to a table. */
+const tableOfFile = (name) => String(name || '').trim().replace(/\.(csv|json)$/i, '');
+
+/**
+ * The `{ table: rows }` shape the checker and the importer already speak, from uploaded files.
+ *
+ * Export writes CSV and JSON; import understood only JSON, so a bursar could take the roll out as a
+ * spreadsheet, correct it, and have no way to put it back. The files go through the same validate
+ * and the same writer as before — this only turns them into rows.
+ */
+export const dataFromFiles = (files) => {
+  const data = {};
+  const problems = [];
+
+  for (const file of Array.isArray(files) ? files : []) {
+    const table = tableOfFile(file?.name);
+    if (!table) {
+      problems.push({ table: '—', problem: 'A file arrived with no name, so there is no telling which table it holds.' });
+      continue;
+    }
+
+    const content = String(file?.content ?? '');
+    if (!content.trim()) {
+      problems.push({ table, problem: 'The file is empty.' });
+      continue;
+    }
+
+    if (/\.json$/i.test(String(file?.name))) {
+      try {
+        const parsed = JSON.parse(content);
+        // A whole export in one file — { students: [...], invoices: [...] } — as well as one table's
+        // array, because both are shapes this system hands out.
+        if (Array.isArray(parsed)) data[table] = parsed;
+        else if (parsed && typeof parsed === 'object') Object.assign(data, parsed);
+        else problems.push({ table, problem: 'The JSON did not read as rows.' });
+      } catch (error) {
+        problems.push({ table, problem: `The JSON could not be read: ${error instanceof Error ? error.message : 'malformed'}` });
+      }
+      continue;
+    }
+
+    const { columns, rows } = parseCsv(content);
+    if (columns.length === 0) {
+      problems.push({ table, problem: 'The file has no header row, so its columns cannot be named.' });
+      continue;
+    }
+    data[table] = rows;
+  }
+
+  return { data, problems };
+};
+
+/** Rows from `body.files` when they were uploaded, `body.data` when they were sent as JSON. */
+const payloadOf = (body) => {
+  if (Array.isArray(body.files) && body.files.length > 0) return dataFromFiles(body.files);
+  return { data: body.data, problems: [] };
 };
 
 const listTables = async ({ tables }) => ({ tables: exportableTables(tables) });
@@ -187,13 +327,16 @@ const validate = (tables, payload) => {
 };
 
 const dryRun = async ({ body, tables }) => {
-  const { problems, summary } = validate(tables, body.data);
+  const payload = payloadOf(body);
+  const { problems, summary } = validate(tables, payload.data);
+  // A file that could not be read at all is as much a reason to refuse as a bad column.
+  const all = [...payload.problems, ...problems];
   return {
     dryRun: true,
     summary,
-    problems,
+    problems: all,
     // Named rather than implied: a caller has to pass this back to actually write.
-    token: problems.length === 0 ? 'ready' : '',
+    token: all.length === 0 ? 'ready' : '',
   };
 };
 
@@ -202,12 +345,15 @@ const importData = async ({ database, body, actor, tables }) => {
     return { error: 'Run the check first — an import is only allowed once it has been previewed.' };
   }
 
-  const { problems, summary } = validate(tables, body.data);
-  if (problems.length > 0) return { error: 'The file still has problems; run the check again.', problems };
+  const payload = payloadOf(body);
+  const { problems, summary } = validate(tables, payload.data);
+  const all = [...payload.problems, ...problems];
+  if (all.length > 0) return { error: 'The file still has problems; run the check again.', problems: all };
 
+  const data = payload.data;
   const ordered = [
-    ...RESTORE_ORDER.filter((name) => body.data[name]),
-    ...Object.keys(body.data).filter((name) => !RESTORE_ORDER.includes(name) && tables[name]),
+    ...RESTORE_ORDER.filter((name) => data[name]),
+    ...Object.keys(data).filter((name) => !RESTORE_ORDER.includes(name) && tables[name]),
   ];
 
   let written = 0;
@@ -216,7 +362,7 @@ const importData = async ({ database, body, actor, tables }) => {
       if (REBUILDABLE.has(name)) continue;
       const columns = tables[name].columns.filter((c) => !NEVER_EXPORT.has(c));
 
-      for (const row of body.data[name]) {
+      for (const row of data[name]) {
         const present = columns.filter((column) => row[column] !== undefined);
         if (present.length === 0 || !row.id) continue;
 

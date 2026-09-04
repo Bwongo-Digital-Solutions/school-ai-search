@@ -100,3 +100,36 @@ export const checkImport = (data: unknown) =>
 
 export const runImport = (data: unknown, confirm: string) =>
   call<{ imported: true; rowsWritten: number }>('data', { action: 'import', data, confirm });
+
+export interface UploadedFile {
+  name: string;
+  content: string;
+}
+
+/**
+ * The same two steps, for files rather than for an already-parsed object.
+ *
+ * A file is named for the table it holds — `students.csv` — and CSV and JSON are both read. The
+ * server does the parsing: a CSV good enough to open in a spreadsheet and a CSV good enough to
+ * write back are the same file, and there is no reason for two parsers to disagree about it.
+ */
+export const checkFileImport = (files: UploadedFile[]) =>
+  call<ImportCheck>('data', { action: 'check_import', files });
+
+export const runFileImport = (files: UploadedFile[], confirm: string) =>
+  call<{ imported: true; rowsWritten: number }>('data', { action: 'import', files, confirm });
+
+/**
+ * Bring a dump in from elsewhere — an old server, a laptop, a provider's export.
+ *
+ * Base64 because a `.dump` is binary and this travels as JSON. The server checks it really is a
+ * custom-format archive before it joins the list of things that can be restored.
+ */
+export const uploadBackup = (filename: string, content: string) =>
+  call<BackupList>('backup', { action: 'upload', filename, content });
+
+/** Replaces everything currently in the database. The word, not a boolean — see the service. */
+export const restoreBackup = (id: string) =>
+  call<{ restored: true; filename: string; warnings: string }>('backup', {
+    action: 'restore', id, confirm: 'restore',
+  });

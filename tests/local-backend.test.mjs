@@ -3305,6 +3305,150 @@ test('a backup names the right file and records who took it', async () => {
   }
 });
 
+test('a dump can be brought in from elsewhere, and put back', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const { handleBackupFunction } = await import('../server/services/backup.mjs');
+
+  const database = {
+    ...runtime.database,
+    kind: 'postgres',
+    pool: { options: { connectionString: 'postgres://user:pw@db:5432/school' } },
+  };
+  const call = (body, context = {}) =>
+    handleBackupFunction(database, { requesterRole: 'admin', ...body }, { tenantId: 'kampala-high', ...context });
+
+  process.env.BACKUP_DIR = '/tmp/eschool-upload-test';
+  try {
+    /* The magic bytes of a custom-format archive. Without this check a spreadsheet dragged into the
+       wrong box sits on the list looking restorable, and the difference only surfaces at a recovery
+       — the worst possible moment to learn it. */
+    const notADump = await call({ action: 'upload', content: Buffer.from('id,name\n1,Ali').toString('base64'), filename: 'students.csv' });
+    assert.match(notADump.error, /not a PostgreSQL custom-format dump/);
+    assert.match((await call({ action: 'upload', content: '' })).error, /No file arrived/);
+
+    const dump = Buffer.concat([Buffer.from('PGDMP'), Buffer.alloc(64, 7)]);
+    const uploaded = await call({ action: 'upload', content: dump.toString('base64'), filename: 'from-the-old-server.dump' });
+
+    const [row] = uploaded.backups;
+    assert.equal(row.status, 'complete');
+    assert.equal(row.kind, 'uploaded', 'neither manual nor scheduled, so pruning leaves it alone');
+    assert.equal(Number(row.size_bytes), dump.length);
+    // The name on disk is this server's own: an uploaded filename is attacker-controlled text, and
+    // the filename is the only thing tying a file to a tenant here.
+    assert.match(row.filename, /^kampala-high-[\dTZ-]+\.dump$/);
+
+    const uploadAudit = await runtime.database.query(
+      "SELECT user_role, changes FROM audit_logs WHERE action = 'backup_uploaded'",
+    );
+    assert.equal(uploadAudit.rows.length, 1);
+    // The name it arrived under is kept even though it is not the name on disk: it is how the
+    // person who uploaded it will refer to it.
+    const changes = uploadAudit.rows[0].changes;
+    assert.equal((typeof changes === 'string' ? JSON.parse(changes) : changes).uploaded_as, 'from-the-old-server.dump');
+
+    // Restoring replaces everything, so it asks for the word — a stray `true` cannot do it.
+    assert.match((await call({ action: 'restore', id: row.id })).error, /Confirm it to continue/);
+    assert.match((await call({ action: 'restore', id: row.id, confirm: true })).error, /Confirm it to continue/);
+    assert.match((await call({ action: 'restore', id: 'nope', confirm: 'restore' })).error, /not on file/);
+
+    const restores = [];
+    const runPgRestore = async (options) => { restores.push(options); return { warnings: 'dropping extension failed' }; };
+    const restored = await call({ action: 'restore', id: row.id, confirm: 'restore' }, { runPgRestore });
+
+    assert.equal(restored.restored, true);
+    assert.equal(restores.length, 1);
+    assert.equal(restores[0].connectionString, 'postgres://user:pw@db:5432/school');
+    assert.match(restores[0].source, /^\/tmp\/eschool-upload-test\/kampala-high-[\dTZ-]+\.dump$/);
+    assert.equal(restored.warnings, 'dropping extension failed', "pg_restore's grumbles are shown, not swallowed");
+
+    /* Audited before it runs, not after: a restore that goes wrong may take the audit table with it
+       and leave no trace of who asked for it. Asserted by failing the restore and checking the row
+       survives anyway. */
+    const failing = await call(
+      { action: 'restore', id: row.id, confirm: 'restore' },
+      { runPgRestore: async () => { throw new Error('server went away'); } },
+    );
+    assert.match(failing.error, /Restore failed: server went away/);
+    const restoreAudit = await runtime.database.query(
+      "SELECT id FROM audit_logs WHERE action = 'backup_restored'",
+    );
+    assert.equal(restoreAudit.rows.length, 2, 'both attempts are on the record, the failed one included');
+
+    // A copy of the school is not a teacher's to take, nor to put back.
+    for (const action of ['upload', 'restore']) {
+      const denied = await handleBackupFunction(database, { action, requesterRole: 'teacher', id: row.id }, {});
+      assert.equal(denied.error, 'Unauthorized', `${action} for a teacher`);
+    }
+  } finally {
+    delete process.env.BACKUP_DIR;
+    await cleanup();
+  }
+});
+
+test('a spreadsheet taken out of the school can be brought back in', async () => {
+  const { runtime, cleanup } = await startTestRuntime();
+  const transfer = (body) =>
+    dispatch(runtime, 'POST', '/api/functions/data', { requesterRole: 'admin', actorName: 'Admin', ...body });
+
+  try {
+    const exported = (await transfer({ action: 'export', format: 'csv', tables: ['students'] })).body.data;
+    const file = exported.files.find((entry) => entry.table === 'students');
+    assert.ok(file, 'students exports as CSV');
+    assert.ok(file.rows > 0);
+
+    const before = (await runtime.database.query('SELECT COUNT(*)::int AS n FROM students')).rows[0].n;
+
+    /* The round trip is the point. Export wrote CSV and import understood only JSON, so a bursar
+       could take the roll out as a spreadsheet, correct it, and have nowhere to put it back. */
+    const checked = (await transfer({ action: 'check_import', files: [{ name: 'students.csv', content: file.content }] })).body.data;
+    assert.deepEqual(checked.problems, [], 'a file this system wrote should come back without complaint');
+    assert.equal(checked.token, 'ready');
+    assert.equal(checked.summary.find((entry) => entry.table === 'students').rows, file.rows);
+
+    const imported = (await transfer({
+      action: 'import', confirm: 'ready', files: [{ name: 'students.csv', content: file.content }],
+    })).body.data;
+    assert.equal(imported.imported, true);
+    assert.equal(imported.rowsWritten, file.rows);
+    assert.equal(
+      (await runtime.database.query('SELECT COUNT(*)::int AS n FROM students')).rows[0].n,
+      before,
+      're-importing the same roll updates rows rather than duplicating them',
+    );
+
+    // A comma inside a field is the whole reason this is parsed rather than split on commas.
+    const student = (await runtime.database.query('SELECT id FROM students ORDER BY last_name LIMIT 1')).rows[0];
+    const withComma = [
+      '"id","address"',
+      `"${student.id}","Plot 4, Kira Road, Kampala"`,
+    ].join('\n');
+    const commaCheck = (await transfer({ action: 'check_import', files: [{ name: 'students.csv', content: withComma }] })).body.data;
+    assert.deepEqual(commaCheck.problems, []);
+    await transfer({ action: 'import', confirm: 'ready', files: [{ name: 'students.csv', content: withComma }] });
+    assert.equal(
+      (await runtime.database.query('SELECT address FROM students WHERE id = $1', [student.id])).rows[0].address,
+      'Plot 4, Kira Road, Kampala',
+      'one field, not three',
+    );
+
+    // A file nobody can read is a reason to refuse, the same as a bad column.
+    const rubbish = (await transfer({ action: 'check_import', files: [{ name: 'students.csv', content: '' }] })).body.data;
+    assert.ok(rubbish.problems.length > 0);
+    assert.equal(rubbish.token, '', 'and it cannot be waved through to the writer');
+    // The route turns a service-level { error } into a 400 with the message at the body level.
+    const refused = await transfer({ action: 'import', confirm: 'ready', files: [{ name: 'students.csv', content: '' }] });
+    assert.equal(refused.status, 400);
+    assert.match(refused.body.error, /problems/);
+
+    /* The role fence is not re-asserted here: 'exporting the school leaves the credentials behind'
+       already walks every action in DATA_TRANSFER_ACTIONS against a teacher, support staff and an
+       anonymous caller, which covers both paths this test uses. */
+  } finally {
+    await cleanup();
+  }
+});
+
+
 test('a student summary shows each role its own share of one student, and no more', async () => {
   const { runtime, cleanup } = await startTestRuntime();
 
