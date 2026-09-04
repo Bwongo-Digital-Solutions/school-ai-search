@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { Button, InlineNotification, Tab, TabList, Tabs } from '@carbon/react';
+import { Button, InlineNotification, Tab, TabList, Tabs, Tag } from '@carbon/react';
 import { Education, Plug, Save, Search, Settings as SettingsIcon, Password } from '@carbon/react/icons';
 import McpServersPanel from './McpServersPanel';
 import AiKeysPanel from './AiKeysPanel';
 import LibreChatPanel from './LibreChatPanel';
 import IntegrationsPanel from './IntegrationsPanel';
 import { useAuth } from '@/contexts/AuthContext';
+import { useLicence } from '@/contexts/LicenceContext';
+import { changePlan, fetchPlanView, type PlanTier } from '@/lib/licence';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useNotifications } from '@/contexts/NotificationContext';
 import {
@@ -43,10 +45,15 @@ const BLURB: Record<(typeof TABS)[number]['key'], string> = {
     "The systems your school already runs — its Moodle, and one business system — so they open from here.",
 };
 
+/* Cheapest first, matching TIERS on the server. Used only to tell an upgrade from a downgrade, so
+   the confirmation can say which one is about to happen. */
+const TIER_ORDER = ['essential', 'standard', 'professional', 'enterprise'];
+
 const SettingsPanel: React.FC = () => {
   const { user, isAdmin } = useAuth();
+  const { entitlements, refreshLicence } = useLicence();
   const { settings, refreshSettings } = useSettings();
-  const { notify } = useNotifications();
+  const { notify, confirm } = useNotifications();
   const [form, setForm] = useState<SchoolSettings>(settings);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -57,6 +64,42 @@ const SettingsPanel: React.FC = () => {
   useEffect(() => {
     setForm(settings);
   }, [settings]);
+
+  const [planChangeable, setPlanChangeable] = useState(true);
+  const [changingPlan, setChangingPlan] = useState('');
+
+  /* Whether this deployment can act on a change at all is a server question — the plan may be
+     pinned in the environment, where nothing on this screen can move it — so it is asked rather
+     than assumed. A failure leaves the buttons live: the server refuses in words if it must. */
+  useEffect(() => {
+    fetchPlanView()
+      .then(view => setPlanChangeable(view.changeable))
+      .catch(() => setPlanChangeable(true));
+  }, []);
+
+  const changeTier = async (plan: PlanTier, label: string) => {
+    const dropping = TIER_ORDER.indexOf(plan) < TIER_ORDER.indexOf(entitlements.plan);
+    const ok = await confirm({
+      title: `Move this school to ${label}?`,
+      message: dropping
+        ? `The screens ${label} does not include stop working immediately, for everyone signed in. There is no grace period and nothing is refunded automatically.`
+        : `${label} switches on straight away for everyone signed in. Nothing is charged here — billing is handled separately.`,
+      confirmLabel: dropping ? `Downgrade to ${label}` : `Upgrade to ${label}`,
+      danger: dropping,
+    });
+    if (!ok) return;
+
+    setChangingPlan(plan);
+    try {
+      await changePlan(plan);
+      await refreshLicence();
+      notify.success(`Now on ${label}`, 'It takes effect within a minute for everyone signed in.');
+    } catch (err) {
+      notify.error('The plan could not be changed', err instanceof Error ? err.message : undefined);
+    } finally {
+      setChangingPlan('');
+    }
+  };
 
   if (!isAdmin) {
     return (
@@ -207,6 +250,62 @@ const SettingsPanel: React.FC = () => {
                   shape="logo"
                   hint="Appears on report cards, receipts, statements and ID cards."
                 />
+              </div>
+            </WidgetCard>
+
+            {/* The school changes its own tier here, without an operator in the loop. Two things
+                this does not do, and they are the price of that: nothing is charged (billing is the
+                control plane's business and is not wired to this), and a downgrade takes effect at
+                once with no proration. Both are said out loud rather than discovered. */}
+            <WidgetCard>
+              <CardHeader title="Plan">
+                <Tag type="blue" size="sm">{entitlements.planLabel}</Tag>
+              </CardHeader>
+              <div className={styles.section}>
+                <p className={styles.blurb}>
+                  {entitlements.deploymentLabel}
+                  {entitlements.deployment === 'onsite' && !entitlements.ownModel
+                    && ' · no model of your own is configured, so the AI features stay off whatever the tier'}
+                </p>
+
+                <div className={styles.planTiers}>
+                  {entitlements.tiers.map(tier => {
+                    const included = Object.values(entitlements.features).filter(f => f.tier === tier.value);
+                    const current = tier.value === entitlements.plan;
+                    return (
+                      <div key={tier.value} className={`${styles.planTier} ${current ? styles.planTierCurrent : ''}`}>
+                        <div className={styles.planRow}>
+                          <strong>{tier.label}</strong>
+                          {current
+                            ? <Tag type="blue" size="sm">Current</Tag>
+                            : (
+                              <Button
+                                kind="tertiary"
+                                size="sm"
+                                disabled={!planChangeable || Boolean(changingPlan)}
+                                onClick={() => changeTier(tier.value, tier.label)}
+                              >
+                                {changingPlan === tier.value
+                                  ? 'Changing…'
+                                  : TIER_ORDER.indexOf(tier.value) > TIER_ORDER.indexOf(entitlements.plan)
+                                    ? 'Upgrade'
+                                    : 'Downgrade'}
+                              </Button>
+                            )}
+                        </div>
+                        <p className={styles.note}>
+                          {included.map(f => f.label).join(' · ') || '—'}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <p className={styles.note}>
+                  Each tier includes everything in the ones above it. A change takes effect within a
+                  minute, for everyone signed in — a downgrade removes those screens straight away.
+                  {!planChangeable && ' This deployment pins its plan in its configuration, so it cannot be changed here.'}
+                </p>
               </div>
             </WidgetCard>
 

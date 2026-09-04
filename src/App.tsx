@@ -4,6 +4,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { ChatProvider } from "@/contexts/ChatContext";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { SettingsProvider } from "@/contexts/SettingsContext";
+import { LicenceProvider } from "@/contexts/LicenceContext";
 import { LiveProvider } from "@/contexts/LiveContext";
 import { NotificationProvider } from "@/contexts/NotificationContext";
 import CarbonTheme from "@/components/CarbonTheme";
@@ -23,6 +24,7 @@ const App = () => (
         <NotificationProvider>
           <AuthProvider>
             <SettingsProvider>
+              <LicenceProvider>
               <LiveProvider>
                 <ChatProvider>
                   <BrowserRouter>
@@ -35,6 +37,7 @@ const App = () => (
                   </BrowserRouter>
                 </ChatProvider>
               </LiveProvider>
+              </LicenceProvider>
             </SettingsProvider>
           </AuthProvider>
         </NotificationProvider>
